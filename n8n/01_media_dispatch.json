@@ -1,0 +1,199 @@
+{
+  "id": "PersonaMediaDisp",
+  "name": "persona · ① media_queue → ComfyUI 브릿지",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "media-queue",
+        "authentication": "headerAuth",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "add6e243-36d9-4824-b95f-0bbae2a8548c",
+      "name": "Supabase 웹훅 (media_queue INSERT)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "be62135c-d37f-4eba-b340-89f815a0aac2"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "17dd9290-ef6a-412e-9329-ea8d45795162",
+              "leftValue": "={{ $json.body.type }}",
+              "rightValue": "INSERT",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "0e000c3b-bae8-40c2-a38f-531c5ad15d2e",
+              "leftValue": "={{ $json.body.record.status }}",
+              "rightValue": "pending",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b4198b16-6151-4570-8e86-a01926ebb76c",
+      "name": "새 pending 작업?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR-BRIDGE-DOMAIN/jobs",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"job_id\": \"{{ $json.body.record.id }}\"\n}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "5e29fb5e-94df-42e2-93da-d4a7638381d8",
+      "name": "브릿지: 작업 전달",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        -20
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "e6edc363-1117-4d5f-aadd-49b743c8deb7",
+      "name": "안전망: 1분마다",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR-BRIDGE-DOMAIN/jobs",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "0bc88e20-fa22-46bf-8d32-826517543dae",
+      "name": "브릿지: 다음 작업 선점",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        260
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "content": "## ① 작업 감지 → 브릿지\n- 위: Supabase Database Webhook(INSERT) → 즉시 전달\n- 아래: 1분마다 다음 pending 작업 1건 선점 (놓친 작업 + 재시도 대기 작업 처리)\n\n**import 후 할 일**\n1. 두 HTTP 노드 URL의 `YOUR-BRIDGE-DOMAIN` 을 ngrok 도메인(또는 `host.docker.internal:8000`)으로 변경\n2. Credential 연결: `n8n Webhook Secret`(Header Auth, Name `X-Webhook-Secret`), `Bridge Token`(Header Auth, Name `X-Bridge-Token`)\n3. 워크플로우 Active → Webhook Production URL 을 Supabase Database Webhook 에 등록\n\n409(선점할 작업 없음)는 정상 응답이라 Never Error 로 둠",
+        "width": 620,
+        "height": 340
+      },
+      "id": "8bae52ce-fce1-4f09-b436-f961716fd7d3",
+      "name": "메모 52de",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -400
+      ]
+    }
+  ],
+  "connections": {
+    "Supabase 웹훅 (media_queue INSERT)": {
+      "main": [
+        [
+          {
+            "node": "새 pending 작업?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "새 pending 작업?": {
+      "main": [
+        [
+          {
+            "node": "브릿지: 작업 전달",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "안전망: 1분마다": {
+      "main": [
+        [
+          {
+            "node": "브릿지: 다음 작업 선점",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "pinData": {}
+}

@@ -1,0 +1,148 @@
+{
+  "id": "PersonaMediaDone",
+  "name": "persona · ② 생성 완료 → posts 초안",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "media-done",
+        "authentication": "headerAuth",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "a132e664-fb63-418b-9013-496d1cbe2442",
+      "name": "브릿지 콜백 (작업 완료/실패)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "9ceea0f5-91fa-431a-bf47-419e90e80772"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b6622ee6-7682-4b85-afc5-16e7c531f826",
+              "leftValue": "={{ $json.body.status }}",
+              "rightValue": "done",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b0516ee7-709f-4c48-895b-f7208dba51eb",
+      "name": "성공?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR-PROJECT-REF.supabase.co/rest/v1/posts",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "return=representation"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  persona_id: $json.body.persona_id,\n  media_job_id: $json.body.job_id,\n  platform: 'instagram',\n  media_urls: $json.body.output_urls,\n  status: 'draft'\n}) }}",
+        "options": {}
+      },
+      "id": "9e8050b2-571c-439a-9e38-5d769ee4e6b5",
+      "name": "posts 초안 생성",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        -100
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "438db5c0-1133-436a-baa9-593740826d74",
+      "name": "실패 알림 (Slack/Telegram 연결)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        480,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## ② 완료 → posts 초안\n브릿지가 `N8N_CALLBACK_URL` 로 보내는 결과를 받아 `posts` 에 draft 행을 만든다.\n(재시도 대기 중인 작업은 콜백이 오지 않고, 최종 done/failed 만 온다)\n\n**import 후 할 일**\n1. `YOUR-PROJECT-REF` 를 Supabase 프로젝트 ref 로 변경\n2. Credential 연결: `Bridge Callback Token`(Header Auth, Name `X-Callback-Token`), `Supabase service_role`(Supabase API)\n3. Active 후 Webhook Production URL → `.env` 의 `N8N_CALLBACK_URL`\n\n다음 단계: posts 초안 뒤에 캡션 생성(LLM) → status=scheduled → SNS 포스팅",
+        "width": 620,
+        "height": 360
+      },
+      "id": "3a063691-336c-4bc8-a7d6-19add0d02253",
+      "name": "메모 a7a2",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -440
+      ]
+    }
+  ],
+  "connections": {
+    "브릿지 콜백 (작업 완료/실패)": {
+      "main": [
+        [
+          {
+            "node": "성공?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "성공?": {
+      "main": [
+        [
+          {
+            "node": "posts 초안 생성",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "실패 알림 (Slack/Telegram 연결)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "pinData": {}
+}
