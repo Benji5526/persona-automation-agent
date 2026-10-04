@@ -727,6 +727,7 @@ Content Job ──1:N──▶ Generation Job (media_queue) ──1:N──▶ A
 - 상태 값은 모두 소문자로 쓴다 (원안 5.10의 `PENDING`, `CLAIMED` 같은 대문자 대신).
 - 원안 5.10의 `CLAIMED`와 `RUNNING`은 `processing` 하나로 합친다. 선점(claim)과 실행 시작이 같은 순간이라 나눌 필요가 없다.
 - Content Job 하나에서 Asset을 여러 개 만들고 그중 일부만 게시할 수 있다 (예: 4장 생성 → 1장 승인).
+- 상태별 전환 조건, 추가 상태(`cancelled`, `archived`, Approval의 `expired`), 멈춘 Job 회수 규칙은 [TECH_DESIGN.md 11. State Machine](TECH_DESIGN.md)에서 정의한다.
 
 ---
 
@@ -1468,7 +1469,7 @@ Observe → Think → Create → Publish → Interact → Measure → Learn → 
 
 ## 다음 문서: 기술 설계
 
-PRD 1~8로 제품 정의는 1차 완성이다. 이제부터는 실제로 개발할 수 있는 기술 설계로 넘어간다.
+PRD 1~8로 제품 정의는 1차 완성이다. 이제부터는 실제로 개발할 수 있는 기술 설계로 넘어간다. 기술 설계는 [TECH_DESIGN.md](TECH_DESIGN.md)에 작성한다.
 
 ```text
 PRD ✅ → 9. System Architecture → 10. Database / ERD → 11. State Machine → 12. API Specification
