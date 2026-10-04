@@ -13,7 +13,7 @@ Lovable (관제센터) → Supabase (Source of Truth) → n8n (Orchestrator) →
 | 문서 | 내용 |
 |---|---|
 | [docs/PRD.md](docs/PRD.md) | 제품 정의 v1.0: 문제, 목표·지표, 사용자, 기능, 자동화 시나리오, 범위(MVP·V1·V2), 로드맵 |
-| [docs/TECH_DESIGN.md](docs/TECH_DESIGN.md) | 기술 설계 v1.0: 아키텍처, DB, State Machine, API, ComfyUI·n8n 명세, 보안, 구현 계획, UI/UX(초안) |
+| [docs/TECH_DESIGN.md](docs/TECH_DESIGN.md) | 기술 설계 v1.0: 아키텍처, DB, State Machine, API, ComfyUI·n8n 명세, 보안, 구현 계획, UI/UX, Frontend |
 | [docs/n8n_guide.md](docs/n8n_guide.md) | n8n 연동·터널 설정 가이드 (현재 브릿지 기준) |
 | [supabase/README.md](supabase/README.md) | DB 마이그레이션 적용·테스트 방법 |
 
@@ -36,7 +36,7 @@ docs/                  PRD, 기술 설계, 가이드
 | Milestone | 상태 |
 |---|---|
 | PRD v1.0 (1~8) | ✅ |
-| 기술 설계 v1.0 (9~16) | ✅ · 17 UI/UX는 초안 |
+| 기술 설계 v1.0 (9~18) | ✅ (17 UI/UX, 18 Frontend 포함) |
 | M0 Environment (Supabase, Cloudflare Tunnel, n8n 서버, Lovable) | 대기 (계정·결제가 필요한 직접 작업) |
 | M1 Database Foundation | ✅ 로컬 테스트 통과 · 실제 Supabase 적용 전 |
 | M2 Python Bridge v1 | 다음 |
