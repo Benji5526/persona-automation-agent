@@ -5,7 +5,7 @@
 | 기준 문서 | [PRD v1.0](PRD.md) |
 | 최종 수정 | 2026-10-05 |
 | 상태 | v1.0 기술 설계 1차 완성 |
-| 진행 | 9. System Architecture ✅ · 10. Database / ERD ✅ · 11. State Machine ✅ · 12. API Specification ✅ · 13. ComfyUI Workflow Spec ✅ · 14. n8n Workflow Spec ✅ · 15. Security ✅ · 16. Implementation Plan ✅ |
+| 진행 | 9. System Architecture ✅ · 10. Database / ERD ✅ · 11. State Machine ✅ · 12. API Specification ✅ · 13. ComfyUI Workflow Spec ✅ · 14. n8n Workflow Spec ✅ · 15. Security ✅ · 16. Implementation Plan ✅ · 17. UI/UX Spec 📝 |
 
 ---
 
@@ -557,6 +557,7 @@ Persona
 | platform | text | 대상 플랫폼 |
 | priority | smallint | 우선순위 |
 | status | text ⚙️ | 5.15 상태: `draft` / `queued` / `generating` / `ready` / `published` / `failed` / `cancelled` |
+| run_number | smallint, default 1 ⚙️ | 재시도·재생성 회차. `idempotency_key`에 붙인다 (예: `prompt:{id}:{run_number}`, 14.17) |
 | scheduled_at | timestamptz | 예약 시간 |
 | metadata | jsonb | 추가 정보 |
 | created_at | timestamptz | 생성일 |
@@ -720,6 +721,7 @@ Fan에 대한 장기 정보다. 모든 메시지를 장기 Memory로 저장하�
 | job_type | text ⚙️ | `prompt` / `generation` / `caption` / `publish` / `analytics` |
 | status | text ⚙️ | 5.15 상태: `pending` / `processing` / `done` / `failed` / `cancelled` (11.4) |
 | worker | text | 실행 주체: `n8n` / `python` |
+| claimed_by | text ⚙️ | 선점한 인스턴스 (예: `python:rtx5080-1`, 14.5) |
 | priority | smallint | 우선순위 |
 | idempotency_key | text, unique ⚙️ | 같은 작업 중복 생성 방지 (예: `publish:{post_id}`, 14.17) |
 | attempts | smallint | 실행 횟수 |
@@ -973,6 +975,7 @@ draft ──▶ queued ──▶ generating ──▶ ready ──▶ published
 | ready | published | 이 Content Job의 Post 중 하나가 `published` | DB 트리거 (11.9 R4) |
 | ready | cancelled | `published`인 Post가 없음 | Operator |
 | failed | queued | 재시도 요청. 새 Automation Job이 만들어짐 | Operator |
+| failed | generating | 실패한 단계만 다시 실행 (`retry_automation_job`). 그 단계 Job은 `failed → pending` | Operator |
 | failed | cancelled | – | Operator |
 
 ### 11.4 Automation Job State
@@ -1404,7 +1407,7 @@ Bridge API의 오류 본문:
 | `claim_next_automation_job` | `p_job_type`, `p_worker` | 행 또는 빈 결과 | 우선순위 순 1건 (`FOR UPDATE SKIP LOCKED`) |
 | `heartbeat_automation_job` | `p_job_id`, `p_locked_at` | `boolean` | `false`면 잠금을 잃은 것 → Worker는 즉시 중단 |
 | `complete_automation_job` | `p_job_id`, `p_locked_at`, `p_result jsonb` | `boolean` | `processing → done`. job_type별 `done` 조건(11.4) 검사 |
-| `fail_automation_job` | `p_job_id`, `p_locked_at`, `p_error_type`, `p_error_code`, `p_message`, `p_retryable`, `p_retry_after_seconds default null` | `{ "status": "pending" \| "failed", "run_after": "…" }` | 재시도 결정 (14.11). `p_retry_after_seconds`가 있으면 backoff 대신 사용 (`RATE_LIMIT`). `system_errors` 기록 |
+| `fail_automation_job` | `p_job_id`, `p_locked_at`, `p_error_type`, `p_error_code`, `p_message`, `p_retryable`, `p_retry_after_seconds default null`, `p_step default null` | `{ "applied": true, "status": "pending" \| "failed", "run_after": "…" }` (잠금이 안 맞으면 `applied: false`) | 재시도 결정 (14.11). `p_retry_after_seconds`가 있으면 backoff 대신 사용 (`RATE_LIMIT`). `system_errors` 기록 |
 | `log_execution` | `p_job_id`, `p_step`, `p_service`, `p_status`, `p_input`, `p_output`, `p_duration_ms`, `p_execution_ref`, `p_error` | `void` | `execution_logs` 기록. 비밀값 금지 |
 
 `fail_automation_job` 예 (Python, GPU 메모리 부족):
@@ -1425,8 +1428,8 @@ Bridge API의 오류 본문:
 | RPC | 호출자 | 입력 | 동작 |
 |---|---|---|---|
 | `save_prompt_parts` | n8n (WF-002) | `p_prompt_parts jsonb`, `p_negative_additions text[]` | `content_jobs.prompt_parts` 저장 |
-| `register_asset` | Python | `p_asset jsonb` (아래) | `assets` 행 생성 (`generated`) |
-| `create_post_draft` | n8n (WF-005) | `p_asset_id`, `p_platform`, `p_caption`, `p_hashtags` | `posts` 행 생성 (`draft`) |
+| `register_asset` | Python | `p_asset jsonb` (아래) | `assets` 행 생성 (`generated`). 같은 `id`로 다시 부르면 기존 행 반환. 잠금을 잃으면 빈 결과 |
+| `create_post_draft` | n8n (WF-005) | `p_asset_id`, `p_platform`, `p_caption`, `p_hashtags` | `posts` 행 생성 (`draft`), Job `result.post_id`에 기록. 잠금을 잃으면 빈 결과 |
 | `sync_workflow_registry` | Python (시작 시) | `p_workflows jsonb` | `comfy_workflows` 갱신 (아래) |
 | `mark_post_publishing` | n8n (V1) | `p_post_id` | `approved·scheduled → publishing` |
 | `complete_publish` | n8n (V1) | `p_external_post_id`, `p_permalink`, `p_published_at` | Post `publishing → published` + Job `done` |
@@ -2836,7 +2839,7 @@ MVP·V1에는 Operator 정보만 저장한다. 팬 데이터는 V2에서 생긴�
 - [ ] 경로 조작 방지: 요청 값으로 파일 경로를 만들지 않음, 임시 폴더 밖 접근 불가
 - [ ] 참조 이미지 파일 헤더 검증
 - [ ] 실행 한도 동작 (한도 초과 시 `RATE_LIMITED`)
-- [ ] `security_events` 기록 (가입 거부, 토큰 오류, 한도 초과, 잘못된 전환 시도)
+- [ ] `security_events` 기록 (토큰 오류, 한도 초과·잘못된 전환은 거부 응답을 받은 쪽이 기록), 가입 거부는 Auth 로그로 확인
 - [ ] 브릿지 CORS 없음
 - [ ] DB 매일 `pg_dump` 백업, 복구 연습 1회
 - [ ] `media` 목록 조회 정책 없음, `persona-private` 소유자 정책 동작
@@ -2999,13 +3002,15 @@ System Rules → Safety Rules → Persona Rules → Task → 외부 입력 (팬 
 
 | event_type | 기록 주체 | 단계 |
 |---|---|---|
-| `LOGIN_REJECTED` (허용 목록에 없는 가입 시도) | 가입 트리거 | MVP |
+| `LOGIN_REJECTED` (허용 목록에 없는 가입 시도) | Supabase Auth 로그 (아래 참고) | MVP |
 | `API_AUTH_FAILED` (브릿지 토큰 오류) | 브릿지 | MVP |
-| `RATE_LIMITED` | DB 함수, 브릿지 | MVP |
-| `INVALID_TRANSITION_ATTEMPT` (허용되지 않은 상태 변경 시도) | 전환 트리거 | MVP |
+| `RATE_LIMITED` | 브릿지(자체 한도), n8n(RPC가 429를 돌려줄 때 `log_security_event` 호출) | MVP |
+| `INVALID_TRANSITION_ATTEMPT` (허용되지 않은 상태 변경 시도) | n8n·브릿지 (RPC가 409를 돌려줄 때) | MVP |
 | `PUBLISHING_DISABLED` / `PUBLISHING_ENABLED` (긴급 정지) | Operator RPC | V1 |
 | `SNS_CONNECTED` / `SNS_DISCONNECTED` / `TOKEN_EXPIRED` | n8n | V1 |
 | `AGENT_ACTION_BLOCKED` (허용 목록 밖 Action) | n8n | V2 |
+
+> **트랜잭션 제약:** DB가 요청을 거부하면(예외 발생) 그 트랜잭션 안에서 쓴 기록도 함께 롤백된다. 그래서 가입 거부·한도 초과·잘못된 전환처럼 **DB가 거부한 이벤트는 DB 안에서 기록할 수 없다.** 가입 거부는 Supabase Auth 로그에 남고, 나머지는 거부 응답을 받은 쪽(n8n, 브릿지)이 `log_security_event`로 기록한다. 가입 거부를 DB에도 남기려면 이후 Supabase Auth의 Before User Created Hook으로 바꾼다 (Hook은 오류를 예외가 아닌 응답으로 돌려주므로 기록이 남는다).
 
 Operator는 `security_events`를 읽기만 할 수 있다. `API_AUTH_FAILED`가 1시간에 50건을 넘으면 알림을 보낸다 (V1 WF-010).
 
@@ -3115,8 +3120,7 @@ persona-automation-agent/
 │   │   ├── 0004_rpc_worker.sql
 │   │   ├── 0005_security.sql           RLS, 권한 회수, 가입 허용 목록, Storage 정책
 │   │   └── 0006_cron.sql               recover_stale_jobs, (V1) expire_approvals
-│   ├── seed.sql               테스트용 Operator·Persona
-│   └── tests/                 pgTAP 테스트 (RLS, 권한, 전환 규칙)
+│   └── tests/stubs/           로컬 테스트 전용 Supabase 흉내 스키마 (auth, storage, 역할)
 ├── app/                       ⚙️ src/comfy_bridge.py를 모듈로 나눔
 │   ├── main.py                FastAPI 시작점 (/v1 라우터 등록)
 │   ├── config.py              환경변수
@@ -3131,7 +3135,9 @@ persona-automation-agent/
 │   └── image_generation_v1.json, image_generation_lora_v1.json, image_to_image_v1.json,
 │       character_reference_v1.json, faceswap_v1.json
 ├── n8n/                       [PA] WF-001~006 JSON (git으로 관리)
-├── tests/                     pytest (가짜 ComfyUI·가짜 Supabase)
+├── tests/
+│   ├── db/                    DB 테스트 (pytest + psycopg, 내장 PostgreSQL)
+│   └── bridge/                브릿지 테스트 (가짜 ComfyUI·가짜 Supabase)
 ├── docs/                      PRD, TECH_DESIGN, n8n_guide, (신규) runbook
 ├── .env.example
 └── requirements.txt
@@ -3174,7 +3180,7 @@ Lovable에는 secret key·service_role key를 절대 넣지 않는다. 브릿지
 | 8 | pg_cron: `recover_stale_jobs()` 1분 | 11.6 |
 | 9 | Realtime: content_jobs, automation_jobs, assets, posts 발행 | 12.3 |
 
-**완료 조건:** pgTAP 테스트 통과 (16.12의 DB 테스트), Supabase Security Advisor 경고 0개.
+**완료 조건:** `tests/db` 통과 (16.12의 DB 테스트), Supabase에 적용 후 Security Advisor 경고 0개.
 
 ### 16.7 M2: Python Bridge v1
 
@@ -3256,7 +3262,7 @@ Lovable에는 secret key·service_role key를 절대 넣지 않는다. 브릿지
 
 | 계층 | 도구 | 테스트 항목 |
 |---|---|---|
-| Database | pgTAP (`supabase test db`) | User A가 User B의 Persona·Job·Asset을 못 봄. `authenticated`가 `status`·`role`을 직접 못 바꿈. Worker RPC를 `anon`·`authenticated`가 못 부름. 허용되지 않은 전환 거부. 종료 상태 되돌리기 거부. Rollup R1·R2·R5. 중복 Job 생성 거부. 실행 한도 초과 시 `RATE_LIMITED`. 허용 목록 밖 가입 거부 |
+| Database | pytest + psycopg + 내장 PostgreSQL(`pgserver`) + Supabase 흉내 스키마 ⚙️ | User A가 User B의 Persona·Job·Asset을 못 봄. `authenticated`가 `status`·`role`을 직접 못 바꿈. Worker RPC를 `anon`·`authenticated`가 못 부름. 허용되지 않은 전환 거부. 종료 상태 되돌리기 거부. Rollup R1·R2·R5. 중복 Job 생성 거부. 실행 한도 초과 시 `RATE_LIMITED`. 허용 목록 밖 가입 거부 |
 | Bridge | pytest + 가짜 ComfyUI·Supabase | 잘못된 토큰·Job ID·Workflow·Parameter, `503` 사전 확인, 선점 경쟁, Heartbeat 잠금 상실 시 결과 폐기, 실행 후 검증 실패, 오류 코드 분류, 로그에 토큰 없음 |
 | ComfyUI | 실제 ComfyUI | Registry의 Workflow 5개가 각각 이미지 생성 |
 | n8n | 가짜 LLM(고정 JSON)·실제 브릿지 | WF-001~006 각각, LLM 스키마 검증 실패 처리, Error Handler 연결 |
@@ -3335,4 +3341,562 @@ Lovable에는 secret key·service_role key를 절대 넣지 않는다. 브릿지
 | AI Decision 출력 | `decision_type`, 평면 필드 | `ai_decision.v1` (`action`, `params`, `reasoning_summary`) | 12.9 |
 | 보안 작업 | Phase 1 Step 4 "RLS 설정"만 | M0·M1·M2에 보안 항목 포함, MVP DoD에 15.15 체크리스트 | Security from Day 1 |
 | MVP DoD | Caption 없음 | Caption 초안 포함 | PRD 7.3 |
-| 테스트 도구 | 미정 | pgTAP, pytest, 가짜 서버 | 반복 실행 가능한 자동 테스트 |
+| 테스트 도구 | 미정 | pytest(DB·브릿지), 내장 PostgreSQL + Supabase 흉내 스키마, 가짜 서버 | Docker 없이 로컬에서 반복 실행 가능. pgTAP 대신 pytest로 통일 (M1 구현 때 변경) |
+
+---
+
+## 17. UI/UX Specification 📝
+
+> ⚙️ 표시는 9~16번 확정 사항에 맞춰 원안을 조정한 부분이다 (17.24). ⚠️는 확정이 필요한 결정이다 (17.25).
+
+### 17.1 목표와 원칙
+
+UI는 콘텐츠 관리 화면이 아니라 **AI 버추얼 인플루언서 운영 관제센터(Control Center)**다. Operator는 모든 작업을 직접 실행하지 않고, 시스템 상태를 보고 필요할 때만 개입한다.
+
+```text
+Observe → Understand → Approve / Adjust → Monitor → Analyze → Decide
+```
+
+UI는 세 가지를 동시에 만족해야 한다.
+
+1. 현재 시스템 상태를 한눈에 파악할 수 있다.
+2. AI와 자동화가 무엇을 하고 있는지 이해할 수 있다.
+3. 문제가 생겼을 때 빠르게 개입할 수 있다.
+
+| 원칙 | 내용 |
+|---|---|
+| Status First | 화면을 열면 가장 먼저 현재 상태가 보인다 |
+| Actionable Data | 중요한 데이터는 행동과 연결한다 (실패 → 재시도, Insight → 콘텐츠 만들기, 승인 요청 → 승인) |
+| AI Transparency | AI의 결정에는 판단 요약(Reasoning Summary)과 Confidence를 보여준다. 내부 Chain-of-Thought는 보여주지 않는다 |
+| Exception-focused | 정상 동작보다 문제 상황에서 빨리 개입할 수 있게 설계한다 |
+| Consistency | Job, Asset, Post, AI Decision 모두 같은 상태 배지·상세 화면·Timeline 패턴을 쓴다 |
+| Progressive Autonomy | 처음에는 Operator가 많이 확인하고, 안정되면 화면의 중심을 직접 조작에서 모니터링과 전략으로 옮긴다 |
+| Supabase Only ⚙️ | Lovable은 Supabase(테이블, RPC, Realtime, Storage)만 호출한다. n8n·브릿지·LLM을 직접 부르지 않는다 (9.3) |
+
+**지원 해상도:** 데스크톱 우선. 기준 1440×900, 지원 1920×1080·1366×768. 태블릿·모바일은 모니터링(Overview, Job 상태, 승인) 중심으로만 지원한다.
+
+### 17.2 내비게이션과 공통 레이아웃
+
+**왼쪽 Sidebar**
+
+| 메뉴 | 단계 | 아이콘 (lucide) |
+|---|---|---|
+| Overview | MVP | `layout-dashboard` |
+| Personas | MVP | `user-round` |
+| Content Jobs | MVP | `wand-sparkles` |
+| Assets | MVP | `images` |
+| Automation | MVP | `cpu` |
+| Social | V1 | `share-2` |
+| Approvals | V1 | `badge-check` |
+| Analytics | V1 | `chart-line` |
+| AI Decisions | V2 | `brain` |
+| Conversations | V2 | `messages-square` |
+| Settings | MVP | `settings` |
+
+V1·V2 메뉴는 해당 단계 전까지 **숨긴다** (비활성 메뉴를 보여주지 않는다).
+
+**상단 Header**
+
+```text
+┌──────────────────────────────────────────────────────────────┐
+│ ☰  Persona Agent   [Persona: Gina ▼]   ⟳ 2 실행 중   ● 정상   👤 ▼ │
+└──────────────────────────────────────────────────────────────┘
+```
+
+- Persona 선택: 모든 화면의 필터 기본값. "전체"도 선택 가능
+- 실행 중 Job 수: `automation_jobs.status = 'processing'` 개수
+- 시스템 상태 표시 (17.4). 클릭하면 Automation 화면
+
+### 17.3 상태 표시 규칙 (Status Design)
+
+모든 상태 배지는 **11번의 실제 상태 값**을 쓰고, 화면에는 한국어 이름으로 보여준다 ⚙️. 색은 의미 단위로만 쓴다.
+
+| 의미 | 색 토큰 | 상태 값 |
+|---|---|---|
+| Neutral (대기) | `status-neutral` | content_job `draft` `queued` · automation_job `pending`(대기) · post `draft` `scheduled` · approval `pending` |
+| Active (진행 중) | `status-active` | content_job `generating` · automation_job `processing` · post `publishing` |
+| Success (완료) | `status-success` | content_job `ready` `published` · automation_job `done` · asset `generated` `approved` · post `approved` `published` · approval `approved` |
+| Warning (확인 필요) | `status-warning` | automation_job `pending` + 재시도 대기 · post `pending_approval` · approval `expired` |
+| Error (실패) | `status-error` | content_job `failed` · automation_job `failed` · post `failed` · asset `rejected` · approval `rejected` |
+| Muted (종료) | `status-muted` | `cancelled` · asset `archived` |
+
+| 상태 값 | 화면 이름 |
+|---|---|
+| `draft` | 초안 |
+| `queued` | 대기 중 |
+| `generating` | 생성 중 |
+| `ready` | 완료 |
+| `published` | 게시됨 |
+| `failed` | 실패 |
+| `cancelled` | 취소됨 |
+| `pending` | 대기 중 / 재시도 대기 (`run_after > now()`이고 `attempts > 0`이면) |
+| `processing` | 실행 중 |
+| `done` | 완료 |
+| `generated` | 생성됨 |
+| `approved` | 승인됨 |
+| `rejected` | 반려됨 |
+| `archived` | 보관됨 |
+| `pending_approval` | 승인 대기 |
+| `scheduled` | 예약됨 |
+| `publishing` | 게시 중 |
+
+색은 컴포넌트마다 다르게 쓰지 않는다. 배지에는 색과 함께 아이콘·글자를 같이 둬서 색만으로 구분하지 않게 한다 (접근성).
+
+### 17.4 시스템 상태 (System Health) ⚙️
+
+원안의 Worker 상태·GPU·n8n 상태는 지금 설계에 **데이터 출처가 없다.** 브릿지는 Job을 처리할 때만 Heartbeat를 보내고, n8n은 상태를 남기지 않는다. 그래서 Worker 상태 테이블을 추가한다.
+
+**`worker_status` 테이블 (신규, MVP)**
+
+| Column | Type | Description |
+|---|---|---|
+| id | text PK | Worker ID (`python:rtx5080-1`, `n8n`) |
+| kind | text | `python` / `n8n` |
+| comfyui_ok | boolean, nullable | 브릿지가 확인한 ComfyUI 연결 상태 |
+| gpu | jsonb | `{ "name": "RTX 5080", "vram_total_mb": 16303, "vram_free_mb": 2100 }` |
+| current_job_id | uuid, nullable | 실행 중인 Job |
+| queue_size | integer | 브릿지 대기열 길이 |
+| version | text | 브릿지·Registry 버전 |
+| last_seen_at | timestamptz | 마지막 보고 시각 |
+
+- 브릿지는 30초마다 Worker RPC `report_worker_status(p_worker_id, p_kind, p_info)`를 호출한다. ComfyUI `/system_stats`에서 GPU 정보를 읽는다.
+- n8n은 1분 안전망 Schedule(14.4)이 돌 때마다 같은 RPC로 보고한다.
+- `last_seen_at`이 90초보다 오래되면 Offline으로 본다. Operator는 읽기만 한다 (RLS: 로그인한 Operator 전체 읽기).
+- `get_dashboard_summary`에 `workers` 목록을 추가한다.
+
+**Header 표시 규칙**
+
+| 상태 | 조건 | 표시 |
+|---|---|---|
+| 정상 | 모든 Worker Online, `failed` Job 없음 | `● 정상` (success) |
+| 확인 필요 | 재시도 대기 Job 또는 최근 24시간 `failed` Job 있음 | `● 확인 필요 3건` (warning) |
+| 장애 | 브릿지 Offline, `comfyui_ok = false`, 또는 n8n Offline | `● 생성 Worker 꺼짐` (error) |
+
+### 17.5 화면별 데이터 계약
+
+Lovable에서 각 화면을 만들 때 쓰는 데이터 출처다. 모두 supabase-js로 호출한다.
+
+| 화면 | 읽기 | 쓰기 (RPC) | Realtime |
+|---|---|---|---|
+| Overview | `get_dashboard_summary`, `state_transitions`(최근 20건), `assets`(최근 6개), `worker_status` | – | `content_jobs`, `automation_jobs`, `assets` |
+| Personas | `personas` + 개수(`content_jobs`, `assets`) | 테이블 insert·update | – |
+| Persona Detail | `personas`, `persona_assets`, `comfy_workflows` | 테이블 update, Storage `persona-private` 업로드 | – |
+| Create Content | `personas`, `comfy_workflows`, `persona_assets` | `create_content_job` | – |
+| Content Jobs | `content_jobs` (+ Persona 이름) | `cancel_content_job`, `retry_content_job`, `regenerate_content_job` | `content_jobs` |
+| Job Detail | `content_jobs`, `automation_jobs`, `execution_logs`, `state_transitions`, `assets` | `cancel_content_job`, `retry_automation_job` | `content_jobs`, `automation_jobs`, `assets` |
+| Asset Library | `assets` (+ Persona·Content Job) | `archive_asset` | `assets` |
+| Asset Detail | `assets`, `posts`(Caption 초안) | `archive_asset`, `regenerate_content_job`, `create_content_job`(Variation), posts update(캡션 수정) | – |
+| Automation | `worker_status`, `automation_jobs`, `get_dashboard_summary` | `retry_automation_job` | `automation_jobs` |
+| Error Detail | `automation_jobs`, `system_errors`, `execution_logs` | `retry_automation_job` | – |
+| Settings | `users`(자기 정보), `get_app_settings` | users update, `update_app_setting` (admin) | – |
+
+**Operator RPC 추가** ⚙️ (Settings 화면용, `users.role = 'admin'`만)
+
+| RPC | 동작 |
+|---|---|
+| `get_app_settings()` | `allowed_emails`, `limits`, `publishing_enabled`, `retry_backoff_seconds` 반환 |
+| `update_app_setting(p_key, p_value)` | 위 키만 수정 가능. 값 형식 검증. 변경은 `security_events`(`SETTINGS_CHANGED`)에 기록 |
+
+첫 Operator의 `role`은 마이그레이션 적용 후 SQL로 `admin`으로 바꾼다 (supabase/README).
+
+### 17.6 Overview
+
+목표: **"지금 내 AI 인플루언서가 무엇을 하고 있나?"를 5초 안에 이해한다.**
+
+```text
+┌────────────────────────────────────────────────────────────┐
+│ 좋은 오후예요                                                │
+│ 오늘 Gina가 하고 있는 일이에요.                              │
+├──────────┬──────────┬──────────┬──────────┬────────────────┤
+│ Persona  │ 실행 중  │ 오늘 완료 │ 실패     │ Asset          │
+│    1     │    2     │    18    │    1 ⚠   │    128         │
+├──────────┴──────────┴──────────┴──────────┴────────────────┤
+│ 실행 중인 작업                     │ 최근 Asset              │
+│ ┌──────────────────────────────┐ │ [img] [img] [img]       │
+│ │ 이미지 생성 · Gina · 도쿄 야경 │ │ [img] [img] [img]       │
+│ │ ✓ 대기 ✓ 프롬프트 ● 생성 ○ 검증 │ │                         │
+│ └──────────────────────────────┘ │                         │
+├──────────────────────────────────┴─────────────────────────┤
+│ 최근 활동                                                    │
+│ 10:42 ✓ Asset 생성됨 · Gina · Job #129                      │
+│ 10:40 → 생성 시작 · Job #129                                │
+│ 10:31 ⚠ 재시도 대기 · Job #128 · OUT_OF_MEMORY               │
+├────────────────────────────────────────────────────────────┤
+│ 자동화 상태    성공률 96.8% · 재시도 대기 1 · 평균 생성 42초   │
+└────────────────────────────────────────────────────────────┘
+```
+
+**KPI 카드**
+
+| 단계 | KPI | 출처 |
+|---|---|---|
+| MVP | Persona, 실행 중 Job, 오늘 완료, 실패, Asset 수 | `get_dashboard_summary` |
+| V1 | 게시 수, 조회수, 참여율, 팔로워 | `posts`, `performance_metrics` |
+| V2 | AI Decision 수, 자율 실행 수, 승인율, 자동화 성공률 | `ai_decisions`, `approvals` |
+
+실패 카드처럼 확인이 필요한 숫자는 warning 색과 함께 **클릭하면 해당 목록으로 이동**한다.
+
+**자동화 상태 줄** (PRD 3.7 KPI)
+
+| 지표 | 계산 (최근 7일) |
+|---|---|
+| 성공률 | `generation` Job의 `done / (done + failed)` |
+| 재시도 대기 | `pending` + `run_after > now()` + `attempts > 0` |
+| 평균 생성 시간 | `generation` Job의 `completed_at - started_at` 평균 |
+
+**최근 활동 (Activity Timeline):** `state_transitions`를 시간 역순으로 보여준다. 각 줄에 시간, 상태 아이콘, 무슨 일인지(한국어 문장), Persona, Job 번호를 표시하고, 클릭하면 Job Detail로 간다.
+
+**AI Insight 카드:** V2 (`performance_insight.v1`). 판단 요약, Confidence, `[콘텐츠 만들기]` `[분석 보기]` 버튼. MVP에서는 카드 자리를 두지 않는다.
+
+### 17.7 진행 표시 (Step-based Progress) ⚙️
+
+GPU 작업은 정확한 진행률을 알 수 없다. **가짜 %를 만들지 않고 단계로 보여준다.** 단계는 `automation_jobs`와 `execution_logs.step`에서 계산한다.
+
+| 화면 단계 | 판단 기준 |
+|---|---|
+| 대기 | Content Job `queued` |
+| 프롬프트 | `prompt` Job `processing` (프롬프트를 직접 쓴 경우 건너뜀) |
+| 생성 대기 | `generation` Job `pending` |
+| 생성 | `generation` Job `processing` + 마지막 step `COMFYUI_QUEUE` / `COMFYUI_WAIT` |
+| 검증 | 마지막 step `VALIDATE` |
+| 업로드 | 마지막 step `UPLOAD` |
+| 완료 | Content Job `ready` |
+
+브릿지는 단계가 바뀔 때마다 `log_execution`으로 위 step 이름을 남긴다 (M2에 반영). ComfyUI가 단계별 진행(예: 샘플링 step 12/30)을 알려주는 경우에만 막대 진행률을 함께 보여준다.
+
+```text
+이미지 생성 중...
+✓ 작업 접수됨
+✓ 프롬프트 준비됨
+● ComfyUI에서 생성 중 (2분째)
+○ 결과 검증
+○ 업로드
+```
+
+"Loading..." 스피너만 보여주지 않는다. 오래 걸리면 경과 시간을 함께 보여줘서 멈춘 게 아니라는 걸 알 수 있게 한다.
+
+### 17.8 Personas · Persona Detail
+
+**Persona 목록:** 카드 그리드. 프로필 이미지, 이름, 한 줄 설명, 상태 배지, Content Job 수, Asset 수, (V1) 게시 수, `[열기]`.
+
+**Persona Detail 탭**
+
+| 탭 | 단계 | 저장 위치 |
+|---|---|---|
+| 프로필 | MVP | `name`, `slug`, `description`, `profile_image_path`, `interests`, `background.age_group`, `status` |
+| 성격·말투 | MVP | `personality`, `speaking_style` |
+| Visual Identity | MVP | `visual_settings`, `persona_assets` |
+| 콘텐츠 규칙 | MVP | `content_rules` |
+| 상호작용 규칙 | V2 | `interaction_rules`, `safety_rules` |
+| Memory | V2 | `fan_memories` |
+| 성과 | V1 | `performance_metrics` 집계 |
+
+**JSON 칸 형식** ⚙️: LLM 프롬프트가 이 값을 읽으므로 화면과 DB가 같은 형식을 쓴다.
+
+```json
+{
+  "personality": {
+    "traits": { "friendly": 0.8, "playful": 0.6, "confident": 0.7, "curious": 0.9, "calm": 0.5 },
+    "tags": ["warm", "curious"]
+  },
+  "speaking_style": {
+    "tone": "friendly",
+    "sentence_length": "short",
+    "emoji_usage": "moderate",
+    "formality": "casual",
+    "language": "ko",
+    "preferred_expressions": ["좋아요!", "오늘도"],
+    "forbidden_expressions": ["대박"]
+  },
+  "interests": ["travel", "fashion", "coffee", "photography"],
+  "background": { "age_group": "20s", "home_city": "Seoul", "story": "…" },
+  "content_rules": {
+    "preferred_topics": ["travel", "cafe"],
+    "forbidden_topics": ["politics", "gambling"],
+    "default_negative_prompt": "lowres, blurry, extra fingers"
+  },
+  "visual_settings": {
+    "default_workflow": "image_generation_lora_v1",
+    "base_model": "model_a.safetensors",
+    "lora_persona_asset_id": "…",
+    "lora_strength": 0.75,
+    "face_ref_persona_asset_id": "…",
+    "default_params": { "width": 1024, "height": 1536, "steps": 30, "cfg": 7 },
+    "style": "photorealistic"
+  }
+}
+```
+
+- 성격은 슬라이더(0~1)와 태그를 함께 쓴다. 말투는 드롭다운과 표현 목록으로 입력한다.
+- `age_group`은 **성인 연령대만** 고를 수 있다 (`20s`, `30s`, `40s+`) (15.11).
+- Visual Identity 화면: Base Model·Default Workflow 드롭다운(`comfy_workflows`), LoRA 선택(`persona_assets` 중 `lora`), LoRA 강도, Face·Style Reference 업로드(`persona-private`, 15.5).
+- **테스트 이미지 생성:** `[테스트 이미지 생성]`은 별도 기능이 아니라 `create_content_job(…, metadata = {"purpose": "visual_test"})`를 부른다. 결과는 같은 화면 미리보기 칸에 표시하고, Asset Library 기본 필터에서는 숨긴다.
+
+### 17.9 Content Jobs · Create Content · Job Detail
+
+**목록:** 표(기본)와 칸반을 전환한다.
+
+| 칸반 열 ⚙️ | 상태 |
+|---|---|
+| 대기 | `draft`, `queued` |
+| 생성 중 | `generating` |
+| 완료 | `ready` |
+| 게시됨 (V1) | `published` |
+| 실패 | `failed` |
+
+칸반은 **보기 전용**이다. 카드를 끌어 상태를 바꾸지 않는다 (상태는 시스템이 바꾼다, 11.12).
+
+**Create Content (모달)**
+
+| 필드 | 단계 | 비고 |
+|---|---|---|
+| Persona | MVP | Header 선택값이 기본 |
+| 콘텐츠 종류 | MVP | MVP는 `image`만 활성 |
+| 주제 (Topic) | MVP | 필수 (프롬프트를 직접 쓰면 선택) |
+| 프롬프트 | MVP | "직접 입력" 펼침. 비우면 AI가 만든다 |
+| Negative Prompt | MVP | 펼침. 비우면 Persona 기본값 |
+| Workflow | MVP | 펼침. 비우면 Persona 기본값 |
+| 입력 이미지 | MVP | Image→Image·FaceSwap Workflow일 때만 표시. Asset 또는 Persona 참조 이미지 선택 |
+| 후보 수 | MVP | 1~4 |
+| 우선순위 | MVP | 낮음(1) / 보통(5) / 높음(8) / 긴급(10) |
+| 플랫폼 | MVP | Caption 초안용 |
+| 예약 | V1 | |
+
+원안의 "Approval: Required/Optional" 선택은 넣지 않는다 ⚙️. V1의 모든 게시물은 승인이 필수이고(PRD 2번), 선택권은 V2 자동 승인 정책에서 다룬다.
+
+**AI 프롬프트 생성 ("✨ AI로 만들기")** ⚠️ (17.25 결정 1): 원안은 생성 전에 AI가 만든 프롬프트를 미리 보고 확정하는 흐름이다. Lovable은 LLM을 직접 부를 수 없으므로(9.3) 방식을 정해야 한다.
+
+**Job Detail**
+
+```text
+Job #129 · Gina · 이미지 생성                        ● 생성 중
+────────────────────────────────────────────────────────────
+진행  ✓ 대기 → ✓ 프롬프트 → ● 생성 → ○ 검증 → ○ 업로드 → ○ 완료
+────────────────────────────────────────────────────────────
+내용   주제: 도쿄 야경 · Workflow: image_generation_lora_v1
+       프롬프트 구성: subject Gina · location Tokyo at night · style photorealistic
+       파라미터: 1024×1536 · steps 30 · cfg 7 · seed 182937
+────────────────────────────────────────────────────────────
+결과   [img] [img] [img] [img]
+────────────────────────────────────────────────────────────
+실행 기록
+10:38:01  생성됨 (Operator)
+10:38:04  선점됨 (n8n)
+10:38:05  프롬프트 생성됨 (llm, 1.2초)
+10:38:08  ComfyUI 대기열 등록 (python)
+10:38:40  이미지 생성 완료 (comfyui, 32초)
+10:38:45  Asset 4개 등록 · 완료 (system)
+────────────────────────────────────────────────────────────
+[취소] [다시 만들기] [실패한 단계 다시 실행]
+```
+
+- 실행 기록은 `state_transitions`와 `execution_logs`를 시간순으로 합쳐 보여준다. 디버깅에 가장 중요한 화면이다.
+- 버튼은 현재 상태에서 가능한 것만 보인다 (11.3 전환표 기준).
+
+### 17.10 Asset Library · Asset Detail
+
+**Asset Library:** 썸네일 그리드(`thumbnail_url`). 필터: Persona, 종류, 상태, 날짜, 검색(주제·프롬프트). 기본 필터는 `archived`와 테스트 이미지를 숨긴다.
+
+**Asset Detail:** 왼쪽 큰 이미지, 오른쪽 정보 (Persona, Content Job, Workflow·버전, Model, LoRA, Seed, 해상도, 생성 시각, 프롬프트).
+
+| 버튼 | 동작 | 단계 |
+|---|---|---|
+| 다운로드 | `public_url` | MVP |
+| 변형 만들기 | `create_content_job(workflow = image_to_image_v1, input_images = {init_image: {asset_id}})` | MVP |
+| 다시 만들기 | 원본 Content Job `regenerate_content_job` | MVP |
+| 캡션 보기·수정 | 이 Asset의 `posts`(`draft`) | MVP |
+| 게시 요청 | `submit_post_for_approval` | V1 |
+| 보관 | `archive_asset` | MVP |
+
+### 17.11 Automation · Error Center
+
+**Automation 화면**
+
+```text
+Worker
+  Python 브릿지   ● Online · 마지막 보고 10:43:21 · RTX 5080 · VRAM 2.1 / 15.9 GB 여유 · 실행 중 #129 · 대기 2
+  ComfyUI        ● 연결됨
+  n8n            ● Online · 마지막 보고 10:43:00
+
+Queue
+  대기 4 · 실행 중 1 · 재시도 대기 1 · 실패 0
+```
+
+Automation Job 표: Job, 종류, Worker, 상태(17.3 이름), 시도 횟수(`2/3`), 오류 코드, 시작·종료 시각. 필터: 상태, Worker, 종류, 날짜, 오류 종류.
+
+**Error Center:** `failed` Job과 재시도 대기 Job을 카드로 모은다.
+
+```text
+⚠ Job #128 · 이미지 생성 · Gina
+GPU 메모리가 부족해서 생성하지 못했어요.
+재시도 가능 · 시도 2/3 · 다음 시도 10:35
+[지금 다시 실행] [실행 기록 보기]
+```
+
+### 17.12 오류 메시지 (Error UX) ⚙️
+
+기술 오류를 그대로 보여주지 않는다. `error_code`(13.12, 14.11, 12.8)를 사람이 읽는 문장과 다음 행동으로 바꾼다. 원래 코드와 Job ID는 "자세히 보기"에 둔다.
+
+| error_code | 화면 문장 | 제안 행동 |
+|---|---|---|
+| `COMFY_UNREACHABLE`, 브릿지 `503` | 로컬 생성 PC에 연결할 수 없어요. PC와 ComfyUI가 켜져 있는지 확인해 주세요. 켜지면 자동으로 다시 시도해요. | Automation 화면 |
+| `OUT_OF_MEMORY` | GPU 메모리가 부족했어요. 해상도를 낮춰 자동으로 다시 시도하고 있어요. | 기다리기 |
+| `CUDA_ERROR` | GPU 오류가 났어요. ComfyUI를 다시 시작해야 할 수 있어요. | 실행 기록 |
+| `MODEL_NOT_FOUND`, `LORA_NOT_FOUND` | 생성에 필요한 모델 파일(…)을 찾지 못했어요. Persona의 Visual Identity 설정을 확인해 주세요. | Persona 설정으로 이동 |
+| `WORKFLOW_INVALID` | 선택한 Workflow 설정에 문제가 있어요. | 다른 Workflow로 다시 만들기 |
+| `INPUT_NOT_FOUND` | 입력 이미지를 찾지 못했어요. | 입력 이미지 다시 선택 |
+| `HEARTBEAT_TIMEOUT` | 작업 중 생성 PC와 연결이 끊겼어요. 자동으로 다시 시도해요. | 기다리기 |
+| `LLM_OUTPUT_INVALID` | AI가 프롬프트를 제대로 만들지 못했어요. | 다시 실행 또는 프롬프트 직접 입력 |
+| `RATE_LIMITED` | 실행 한도에 도달했어요. (한도: …) | Settings의 실행 한도 |
+| `TOKEN_EXPIRED` (V1) | Instagram 연결이 만료됐어요. 다시 연결해 주세요. | Social 화면 |
+| 그 밖의 코드 | 작업을 완료하지 못했어요. | 실행 기록 |
+
+### 17.13 빈 화면 (Empty State)
+
+데이터가 없을 때 빈 화면 대신 다음 행동을 안내한다.
+
+| 화면 | 문장 | 버튼 |
+|---|---|---|
+| Personas | 아직 Persona가 없어요. 첫 AI 인플루언서를 만들어 보세요. | `[Persona 만들기]` |
+| Content Jobs | 아직 만든 콘텐츠가 없어요. | `[콘텐츠 만들기]` |
+| Assets | 아직 생성된 이미지가 없어요. | `[콘텐츠 만들기]` |
+| Automation (Worker 없음) | 생성 PC가 아직 연결되지 않았어요. 브릿지를 실행하면 여기에 표시돼요. | `[설정 방법 보기]` |
+
+### 17.14 Settings (MVP)
+
+| 항목 | 누가 | 출처 |
+|---|---|---|
+| 내 프로필 (이름, 아바타) | 모든 Operator | `users` |
+| 가입 허용 이메일 | admin | `get_app_settings` / `update_app_setting` |
+| 실행 한도 (시간당 Content Job, 하루 생성 수, 하루 LLM 호출) | admin | 위와 같음 |
+| 긴급 게시 정지 (V1) | admin | `publishing_enabled` |
+| 브릿지 연결 안내 | 모든 Operator | 정적 안내 + `worker_status` |
+
+### 17.15 V1 화면
+
+| 화면 | 내용 |
+|---|---|
+| Social | Persona별 연결 계정 (Instagram 연결됨 / 다른 플랫폼 미연결), 토큰 만료일, `[연결]` `[해제]` |
+| Posts | 상태별 탭: 초안 · 승인 대기 · 예약됨 · 게시됨 · 실패 |
+| Post Detail | Asset, Caption, Hashtag, 광고 표기, 플랫폼, 예약 시각, 외부 게시물 링크, 성과 |
+| Approvals | 승인 대기 Post 카드. 이미지, Persona, Caption, **승인을 요청한 이유**(V1은 "모든 게시물 사전 승인"), `[승인]` `[반려]` `[캡션 수정]` |
+| Analytics | 조회수, 좋아요, 댓글, 공유, 저장, 참여율, 팔로워 증가 그래프. 주제·게시 시간·플랫폼별 비교 막대 |
+
+### 17.16 V2 화면
+
+| 화면 | 내용 |
+|---|---|
+| AI Decisions | 오늘의 결정 수(실행·승인·반려·실패), Decision 목록 |
+| Decision Detail | Action, 판단 요약, Confidence, 결과(만들어진 Content Job 링크), 상태 |
+| AI Activity | AI가 한 행동을 시간순으로 (결정 → Job 생성 → 생성 → 예약) |
+| Conversations | 왼쪽 팬 목록, 가운데 대화, 오른쪽 Fan Memory 패널 (수정·삭제 가능) |
+
+**AI 설명 (Explainability):** 중요한 결정마다 "AI가 왜 이걸 골랐나요?" 영역에 `reasoning_summary`와 Confidence를 보여준다. Chain-of-Thought는 저장하지도 보여주지도 않는다 (10.17).
+
+### 17.17 전역 검색 (Long-term)
+
+Persona, Content Job, Asset, Post, Conversation, AI Decision을 한 번에 검색한다 (예: "Tokyo"). MVP에서는 화면별 검색만 제공한다.
+
+### 17.18 사용자 흐름
+
+| 흐름 | 순서 |
+|---|---|
+| 콘텐츠 생성 | Overview → `[콘텐츠 만들기]` → Persona·주제 입력 → (17.25 결정 1에 따라 프롬프트 미리보기) → 만들기 → Job Detail에서 진행 확인 → Asset |
+| 모니터링 | Overview → 실행 중인 작업 → Job Detail → 실행 기록 → 결과 Asset |
+| 실패 복구 | Header `● 확인 필요` 또는 실패 KPI → Error Center → 오류 상세 → `[지금 다시 실행]` → 대기열 → 생성 |
+| 승인 (V1) | Approvals → Asset·Caption 확인 → 승인 → 예약됨 |
+| 자율 운영 (V2 이후) | Overview → AI Activity → 중요한 결정 검토 → 예외 승인 → 성과 모니터링 |
+
+### 17.19 Lovable 컴포넌트 구조
+
+```text
+src/
+├── lib/
+│   ├── supabase.ts            클라이언트 (publishable key만)
+│   ├── status.ts              17.3 상태 → 이름·색 토큰·아이콘 (모든 화면이 이것만 사용)
+│   ├── errors.ts              17.12 error_code → 문장·행동
+│   └── progress.ts            17.7 Job → 진행 단계 계산
+├── components/
+│   ├── layout/                Sidebar, Header, PersonaSwitcher, SystemHealthBadge, PageContainer
+│   ├── common/                StatusBadge, EmptyState, ErrorNotice, StepProgress, Timeline, ConfirmDialog
+│   ├── dashboard/             KPICard, ActivityTimeline, ActiveJobCard, AutomationHealth, AIInsightCard(V2)
+│   ├── jobs/                  JobTable, JobKanban, CreateContentDialog, JobPipeline, JobTimeline
+│   ├── assets/                AssetGrid, AssetCard, AssetDetail, AssetFilters
+│   ├── persona/               PersonaCard, ProfileForm, PersonalityEditor, SpeakingStyleEditor,
+│   │                          VisualIdentityEditor, ReferenceUploader
+│   └── automation/            WorkerStatusCard, QueueStatus, AutomationJobTable, ErrorCard
+└── pages/                     Login, Overview, Personas, PersonaDetail, ContentJobs, JobDetail,
+                               Assets, AssetDetail, Automation, ErrorDetail, Settings
+```
+
+### 17.20 MVP 화면 목록과 우선순위
+
+| # | 화면 | 우선 |
+|---|---|---|
+| 01 | Login (Google, 허용되지 않은 계정 안내) | 1 |
+| 02 | Overview | 1 |
+| 03 | Personas | 1 |
+| 04 | Persona Detail (프로필, 성격·말투, Visual Identity, 콘텐츠 규칙) | 1 |
+| 05 | Create Content (모달) | 1 |
+| 06 | Content Jobs | 1 |
+| 07 | Job Detail | 1 |
+| 08 | Asset Library | 1 |
+| 09 | Asset Detail | 2 |
+| 10 | Automation | 1 |
+| 11 | Error Detail (Error Center) | 2 |
+| 12 | Settings | 2 |
+
+우선 1은 MVP 핵심 테스트(PRD 7.9: Lovable에서 Content Job을 만들면 Asset Library에 결과가 나타남)에 필요한 화면이다.
+
+V1: 13 Social, 14 Posts, 15 Post Detail, 16 Approvals, 17 Analytics, 18 Performance Detail
+V2: 19 AI Decisions, 20 AI Activity, 21 Conversations, 22 Conversation Detail, 23 Fan Memory, 24 Autonomous Strategy
+
+### 17.21 접근성·사용성 기본 규칙
+
+- 상태는 색만으로 구분하지 않는다 (아이콘·글자 함께).
+- 모든 버튼·입력에 라벨. 키보드로 모든 기능 사용 가능.
+- 되돌릴 수 없는 행동(취소, 보관)은 확인 대화상자를 띄운다.
+- 시각은 Operator의 시간대로 표시하고, 저장은 UTC (12.2).
+- 숫자는 천 단위 구분, 비율은 소수 첫째 자리까지.
+
+### 17.22 UI 문구 언어
+
+⚠️ 17.25 결정 2.
+
+### 17.23 최종 UX 개념
+
+```text
+OPERATOR → CONTROL CENTER (Lovable)
+              ├── Persona
+              ├── Jobs
+              └── Analytics
+                    ↓
+              AI DECISIONS → AUTOMATION → CONTENT / SNS / FAN → PERFORMANCE → LEARN → NEXT ACTION
+```
+
+Lovable 화면은 "콘텐츠를 만드는 관리자 페이지"가 아니라 **"AI 인플루언서의 상태와 행동을 감독하는 관제센터"**다. MVP에서는 Overview → Persona → Content Job → Job Detail → Asset Library → Automation 순서로 먼저 완성하고, 그 위에 SNS·Analytics·AI Decision 화면을 넓힌다.
+
+### 17.24 원안에서 조정한 부분과 이유
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 상태 표시 | PENDING / RUNNING / GENERATED / APPROVED / RETRY_WAIT / SUCCEEDED | 11번 상태 값 + 한국어 이름 + 의미별 색 (17.3) | TECH 11 확정 |
+| 칸반 열 | PENDING · GENERATING · GENERATED · APPROVED | 대기 · 생성 중 · 완료 · 게시됨 · 실패, 보기 전용 | APPROVED는 Post 상태. 상태는 시스템만 바꿈 (11.12) |
+| Worker·GPU·n8n 상태 | 표시만 정의 | `worker_status` 테이블 + `report_worker_status` RPC 추가 | 데이터 출처가 없었음 |
+| 진행 단계 | Created → Claimed → Generating → … | `automation_jobs`·`execution_logs.step`에서 계산하는 규칙 (17.7) | 실제 데이터와 연결 |
+| Create Content | Schedule, Approval 선택 | Schedule은 V1, Approval 선택 없음 | PRD 2번 (V1 모든 게시물 승인) |
+| AI 프롬프트 생성 | Lovable에서 AI 호출 후 미리보기 | 17.25 결정 1 | Lovable은 LLM을 직접 부를 수 없음 (9.3) |
+| Persona 성격·말투 | 슬라이더·드롭다운 UI | 같은 UI + JSON 형식 고정 (17.8) | LLM 프롬프트가 같은 형식을 읽어야 함 |
+| 연령대 | 자유 입력 | 성인 연령대만 선택 | 15.11 |
+| 테스트 이미지 | "향후 ComfyUI Preview 연결" | 일반 Content Job (`purpose = visual_test`) | 새 경로 없이 같은 파이프라인 사용 |
+| 오류 코드 | `CUDA_OUT_OF_MEMORY`, `WORKER_OFFLINE` | 13.12·14.11 코드 + 문장 매핑표 (17.12) | 오류 코드를 하나로 |
+| Settings | 내용 미정 | 프로필, 허용 이메일, 실행 한도, 긴급 정지 + `get_app_settings`·`update_app_setting` RPC | Operator는 `app_settings`를 직접 읽을 수 없음 (0005) |
+| AI Insight 카드 | MVP Overview에 표시 | V2 | Insight는 V2 기능 |
+| V1·V2 메뉴 | 비활성으로 표시 | 숨김 | 쓸 수 없는 메뉴를 보여주지 않음 |
+
+### 17.25 확정이 필요한 결정
+
+| # | 항목 | 선택지 |
+|---|---|---|
+| 1 | AI 프롬프트 미리보기 | A. 미리보기 없이 바로 생성 (프롬프트는 Job Detail에서 확인, 마음에 안 들면 다시 만들기) · B. Content Job을 "프롬프트까지만" 진행한 뒤 Operator가 확인하면 생성 계속 (상태 하나 추가) · C. Supabase Edge Function으로 LLM을 바로 불러 미리보기 (Lovable → Supabase 원칙 유지, 새 구성요소 추가) |
+| 2 | UI 문구 언어 | 한국어 / 영어 / 둘 다 (i18n) |
