@@ -1,0 +1,6 @@
+-r requirements.txt
+
+# 테스트
+pytest>=8.0
+psycopg[binary]>=3.2
+pgserver>=0.1.4   # 내장 PostgreSQL (tests/db)
