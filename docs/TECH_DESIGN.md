@@ -5,7 +5,7 @@
 | 기준 문서 | [PRD v1.0](PRD.md) |
 | 최종 수정 | 2026-10-05 |
 | 상태 | v1.0 기술 설계 1차 완성 |
-| 진행 | 9. System Architecture ✅ · 10. Database / ERD ✅ · 11. State Machine ✅ · 12. API Specification ✅ · 13. ComfyUI Workflow Spec ✅ · 14. n8n Workflow Spec ✅ · 15. Security ✅ · 16. Implementation Plan ✅ · 17. UI/UX Spec ✅ · 18. Frontend Spec ✅ · 19. Backend (Python) Spec ✅ · 20. n8n Implementation Spec ✅ · 21. Supabase Implementation Spec ✅ · 22. Lovable Master Build Spec ✅ · 23. Lovable Master Prompt ✅ |
+| 진행 | 9. System Architecture ✅ · 10. Database / ERD ✅ · 11. State Machine ✅ · 12. API Specification ✅ · 13. ComfyUI Workflow Spec ✅ · 14. n8n Workflow Spec ✅ · 15. Security ✅ · 16. Implementation Plan ✅ · 17. UI/UX Spec ✅ · 18. Frontend Spec ✅ · 19. Backend (Python) Spec ✅ · 20. n8n Implementation Spec ✅ · 21. Supabase Implementation Spec ✅ · 22. Lovable Master Build Spec ✅ · 23. Lovable Master Prompt ✅ · 24. Supabase Production ✅ |
 
 ---
 
@@ -5929,3 +5929,152 @@ Phase는 22.22 빌드 순서를 따른다. Phase 1~3은 n8n·브릿지 없이 �
 | 데이터 흐름 설명 | n8n이 `RUNNING`으로 바꾸고 Python이 Persona를 읽음 등 내부 동작 | 화면이 알아야 할 계약(RPC·상태·이벤트)만 | Lovable이 내부 동작을 흉내 내지 않게 |
 | 문구 | 영어 | 한국어 문구 + 영어 기술 용어 | 17.25 |
 | Phase | 6단계 (Realtime·Error handling을 별도 Phase) | 6단계 (Realtime·오류 처리는 각 기능 Phase 안에서) | 기능마다 처음부터 상태·오류를 갖춰야 함 (18.10) |
+
+---
+
+## 24. Supabase Production Implementation ✅
+
+> 마이그레이션 0001~0007을 **실제 Supabase 프로젝트에 올리고 운영 가능한 상태인지 확인하는 절차**다. 스키마·RLS·RPC·Storage 설계는 21번이 정본이고 이미 SQL로 구현·테스트되어 있으므로, 이 장은 새 SQL을 만들지 않는다. 적용 후 점검은 `supabase/verify_production.sql`(읽기 전용)로 한다. ⚙️ 표시는 원안을 조정한 부분이다 (24.8).
+
+### 24.1 목적
+
+원안의 목표("누가 Job을 만들고, n8n이 어떻게 안전하게 Claim하며, Asset이 어떻게 Persona·User와 연결되는가를 잠근다")는 0001~0007이 이미 달성한다 (21.5~21.12). 남은 일은 그것을 **실제 프로젝트에 정확히 적용하고, 적용된 상태를 증명하는 것**이다.
+
+| 이 장에서 하는 것 | 하지 않는 것 |
+|---|---|
+| 프로젝트 생성·`db push`·Auth·키·URL 설정 순서 | 테이블·정책·함수를 새로 정의 |
+| 적용 후 점검 SQL과 기대 결과 | 마이그레이션 수정 (바꿀 일이 생기면 0008 이후 새 파일, 21.3) |
+| 사용자 격리·Claim·회수를 실제 프로젝트에서 확인하는 방법 | Dashboard Table Editor·SQL Editor로 스키마 변경 |
+| 원안 요구사항이 어디에 구현됐는지 대응표 | |
+
+### 24.2 원안 SQL을 실행하면 안 되는 이유 ⚙️
+
+원안 24.4~24.24의 SQL은 이미 있는 테이블을 다른 정의로 다시 만든다. 실제 프로젝트에서 실행하면 다음이 일어난다.
+
+| 원안 SQL | 결과 |
+|---|---|
+| `create table if not exists …` | 0001이 이미 만든 테이블이라 **아무것도 바뀌지 않는 것처럼 보이지만**, 뒤따르는 인덱스·정책·함수가 없는 칼럼(`retry_count` 등)과 대문자 상태 값을 가정해 실패하거나 엉뚱하게 동작한다 |
+| `public.handle_new_user()` + 트리거 | 0005의 **가입 허용 목록 검사가 없는** 두 번째 가입 트리거가 생긴다. 이름이 같은 `on_auth_user_created`면 생성이 실패하고, 이름을 바꾸면 허용 목록 밖 계정의 `users` 행이 만들어질 수 있다 (15.3 위반) |
+| `content_jobs_update_own` (상태 제한 없는 UPDATE 정책) | 0005의 칼럼 권한 때문에 `status`는 여전히 막히지만, 정책 두 개가 OR로 합쳐져 **`draft`가 아닌 Job의 내용도 수정 가능**해진다 (11.12 위반) |
+| `assets`·`persona_assets` INSERT/UPDATE 정책 | Operator가 Asset 행을 직접 만들 수 있게 된다. Asset은 실행 후 검증을 통과한 파일만 브릿지가 등록해야 한다 (19.15) |
+| `claim_automation_job(p_worker)` | 0004의 `claim_automation_job(p_job_id, p_worker)`와 **인자가 다른 같은 이름 함수**가 하나 더 생긴다 (오버로드). `CLAIMED` 상태는 CHECK 위반이라 호출하면 실패한다. 0005 이후에 만든 함수라 실행 권한도 꺼져 있다 |
+| `public.set_updated_at()` | API로 호출 가능한 함수가 하나 늘 뿐, 이미 `private.set_updated_at()` 트리거가 있다 |
+| `generated-assets`, `persona-assets` 버킷과 `{user_id}/…` 경로 | 브릿지(`media/persona/{id}/assets/…`)와 0005 Storage 정책(`persona-private/persona/{id}/refs/…`)과 다른 경로라, 업로드가 거부되거나 아무도 읽지 못하는 파일이 생긴다 |
+
+> **스키마의 정본은 `supabase/migrations`다.** SQL Editor는 아래 24.3의 설정 값(허용 목록, admin 지정)과 24.4의 점검 쿼리에만 쓴다.
+
+### 24.3 적용 절차 (M0)
+
+| # | 작업 | 위치 | 확인 |
+|---|---|---|---|
+| 1 | 프로젝트 생성. Region은 **Seoul (ap-northeast-2)**. DB 비밀번호는 비밀번호 관리자에 보관 | Dashboard | – |
+| 2 | `supabase link --project-ref <ref>` → `supabase db push` | 이 저장소에서 CLI | 0001~0007 적용 (점검 1) |
+| 3 | pg_cron 확인. `db push`에서 0006이 실패하면 Dashboard → Database → Extensions에서 `pg_cron`을 켜고 다시 push | Dashboard | 점검 13 |
+| 4 | **Google만** 켜고 Email·Phone·Anonymous 끄기 | Authentication → Sign In / Providers | – |
+| 5 | Google Cloud Console에서 OAuth Client(웹) 생성. 승인된 리디렉션 URI = `https://<ref>.supabase.co/auth/v1/callback`. Client ID·Secret을 4번 화면에 입력 | Google Cloud, Dashboard | – |
+| 6 | URL Configuration: Site URL = Lovable 운영 주소. Redirect URLs에 운영 주소와 Lovable 미리보기 주소의 **`/login`** 추가 (23.4: 로그인 후 `/login`으로 돌아와야 가입 거부 안내가 보인다) | Authentication → URL Configuration | – |
+| 7 | **로그인 전에** 허용 목록 입력: `update public.app_settings set value = '["you@example.com"]'::jsonb where key = 'allowed_emails';` (소문자) | SQL Editor | 점검 9 |
+| 8 | Lovable(또는 임시 페이지)에서 Google 로그인 → `users` 행 생성 확인 → `update public.users set role = 'admin' where email = 'you@example.com';` | SQL Editor | 점검 9 |
+| 9 | API Keys: **publishable key** → Lovable. **secret key 두 개**를 새로 만들어 이름을 `n8n`, `bridge`로 구분 → n8n Credential `PA Supabase`, 브릿지 `.env`의 `SUPABASE_SECRET_KEY`. 레거시 `service_role` JWT는 쓰지 않는다 (15.6) | Project Settings → API Keys | 각 키가 한 곳에만 있는지 |
+| 10 | Security Advisor·Performance Advisor 경고 확인 | Advisors | 경고 0 (또는 이유를 기록) |
+| 11 | `supabase/verify_production.sql`의 1~13번 실행 | SQL Editor | 24.4 |
+| 12 | 백업: 15.23대로 n8n 서버에서 매일 `pg_dump` 설정 | n8n 서버 | 첫 백업 파일 |
+| 13 | n8n 연결 (n8n_guide 3~6절: Credential, Database Webhook 2개) → 점검 15~17 | n8n, Dashboard | 24.4 |
+| 14 | 브릿지 연결 (`.env`) → 점검 17 | 로컬 PC | Worker Online |
+
+Supabase CLI 명령은 `supabase/README.md`에 있다. 1~12는 Lovable·n8n·브릿지 없이 끝낼 수 있다.
+
+### 24.4 적용 후 점검
+
+`supabase/verify_production.sql`은 조회만 한다. 블록마다 실행해서 기대 결과와 비교한다.
+
+| # | 확인 | 기대 | 다르면 |
+|---|---|---|---|
+| 1 | 마이그레이션 버전 | 0001~0007 | `supabase db push` 다시 실행, 오류 메시지 확인 |
+| 2 | RLS가 꺼진 테이블 | 0행 | Dashboard에서 테이블을 직접 만든 흔적. 지우고 마이그레이션으로 |
+| 3·4 | anon의 테이블·함수 권한 | 0행 | 0005 이후 Dashboard에서 권한을 바꾼 것. 0005의 회수 블록을 새 마이그레이션으로 다시 적용 |
+| 5 | authenticated가 실행할 수 있는 함수 | Operator RPC 11개만 | Worker RPC가 보이면 **즉시** 회수 마이그레이션 (Lovable이 상태를 마음대로 바꿀 수 있음) |
+| 6 | service_role의 Worker RPC 실행 | 모두 true | 0005·0007 grant 확인 |
+| 7 | authenticated의 `status`·`role`·`user_id` 쓰기 권한 | `personas.status`만 | 다른 줄이 있으면 회수 |
+| 8 | 가입 트리거 | `on_auth_user_created` → `private.handle_new_user` 하나 | 다른 가입 트리거가 있으면 제거 (24.2) |
+| 9 | 허용 목록·계정 | 본인 이메일, `admin` | 24.3 7·8번 |
+| 10·11 | 버킷·Storage 정책 | `media` 공개, `persona-private` 비공개, 정책 4개 | 0005 Storage 블록 |
+| 12 | Realtime 대상 | `assets`, `automation_jobs`, `content_jobs`, `posts`, `worker_status` | 0001·0007 publication 블록 |
+| 13·14 | pg_cron | `recover-stale-jobs` 1분, 실행 성공 | 24.3 3번 |
+| 15·16 | DB Webhook | `pa_content_jobs`, `pa_automation_jobs`, 응답 200 | n8n_guide 5절, n8n Production URL·Secret |
+| 17 | Worker 상태 | 브릿지·n8n Online | n8n_guide 9절 |
+| 18 | 실행 설정 | 기본값 (15.18, 14.11, 11.6) | 필요하면 `update_app_setting`(admin)으로 조정 |
+
+### 24.5 실제 프로젝트에서 동작 확인
+
+로컬 테스트(21.19)가 같은 규칙을 이미 검증하지만, 실제 프로젝트의 Auth·Storage·네트워크와 함께 한 번 더 확인한다.
+
+**사용자 격리** (계정 두 개)
+
+1. 허용 목록에 두 번째 이메일을 넣고 그 계정으로 로그인한다.
+2. 첫 계정의 Persona·Content Job·Asset·참조 이미지가 두 번째 계정에 **하나도 보이지 않는지** 화면과 Supabase JS 콘솔(`select('*')`)로 확인한다.
+3. 두 번째 계정으로 첫 계정의 `persona_id`를 넣어 `create_content_job`을 부르면 `PT404`가 나는지 확인한다.
+4. 허용 목록에 없는 세 번째 Google 계정은 가입이 거부되고 `/login`에 안내가 뜨는지 확인한다.
+5. 확인이 끝나면 두 번째 이메일을 허용 목록에서 지운다 (이미 만든 `auth.users`는 Dashboard에서 삭제).
+
+**Claim과 중복 방지**
+
+- WF-003 Webhook과 1분 안전망이 같은 generation Job을 거의 동시에 보내도 `automation_jobs.attempts`가 1만 늘고 `execution_logs`에 `BUILD`가 한 번만 있는지 확인한다 (브릿지 `409`).
+- 같은 Content Job을 다시 만들기 하면 `run_number`가 오르고 키가 다른 새 Job이 생기는지 확인한다 (20.6).
+
+**회수**
+
+- 생성 중에 브릿지를 강제로 끈다 → 3분 안에 Job이 `pending`(재시도 대기)으로 돌아가고 `system_errors`에 `HEARTBEAT_TIMEOUT`이 생기는지 → 브릿지를 켜면 다시 진행되는지 확인한다 (21.12, 16.13).
+
+### 24.6 원안 요구사항 대응
+
+원안 24.37 체크리스트와 24.38 완료 조건이 어디서 보장되는지 정리한다.
+
+| 원안 요구 | 구현 | 확인 |
+|---|---|---|
+| Google 사용자 자동 생성 | `private.handle_new_user` (허용 목록 포함) | 점검 8·9, 24.5-4 |
+| 자기 Persona만 보기, 만들기·수정·보관 | RLS + 칼럼 권한, 보관 = `inactive` | 24.5 격리, 21.19 테스트 |
+| Persona Asset 격리 | `persona_assets_owner` 정책 + 경로 검증 트리거 + Storage 정책 | 점검 11 |
+| Content Job 생성, DRAFT/PENDING 선택 | `create_content_job(p_submit)` → `queued` 또는 `draft` | 21.11 |
+| Automation Job 생성·중복 방지 | `create_automation_job` + `idempotency_key` + `automation_jobs_one_active_step` | 20.6 |
+| Atomic Claim, 여러 Worker가 같은 Job을 못 잡음 | `claim_*` RPC (`for update skip locked`, `pending`만) | 24.5 Claim |
+| 실행 기록 ↔ Automation Job | `execution_logs.automation_job_id` (NOT NULL FK) | 20.13 |
+| Asset ↔ Persona·Content Job | `assets.persona_id`, `content_job_id` NOT NULL, `register_asset`이 Job의 것으로만 등록 | 19.15 |
+| Private Asset은 Signed URL | 참조 이미지(`persona-private`)만 Signed URL, 생성 결과물은 공개 ⚙️ | 15.13 |
+| 실패 Job 재시도 | `retry_content_job`, `retry_automation_job`, 자동 재시도는 `fail_automation_job` | 20.11 |
+| 멈춘 Job 회수 | `recover_stale_jobs` (Heartbeat, pg_cron 1분) | 점검 13·14, 24.5 회수 |
+| Realtime이 Lovable에 도달 | publication 5개 테이블 | 점검 12 |
+| 오류 → Job 추적 | `system_errors.automation_job_id`·`persona_id` | 20.13 |
+| 다른 사용자 데이터 접근 불가 | RLS, anon 권한 없음, Worker RPC는 service_role만 | 점검 2~7, 24.5 |
+| Frontend에 비밀값 없음 | publishable key만, secret key는 n8n·브릿지 각각 | 24.3-9, 22.21 |
+| DB가 상태의 정본 | 전환 트리거 + 감사 기록, `status` 칸 쓰기 권한 없음 | 점검 7, 21.7 |
+
+### 24.7 운영 규칙
+
+- **스키마 변경:** 이 저장소에 새 마이그레이션 파일(0008~)을 추가하고 `tests/db`에 테스트를 붙인 뒤 `supabase db push`. Dashboard Table Editor·SQL Editor로 스키마를 바꾸지 않는다. Lovable이 제안한 SQL도 실행하지 않는다 (22.22).
+- **타입:** 스키마가 바뀌면 `supabase gen types typescript --project-id <ref> > src/types/database.ts`로 Lovable 저장소의 타입을 갱신하고, Lovable 프롬프트 §1 데이터 모델도 고친다.
+- **키 교체:** secret key는 `n8n`·`bridge`를 따로 폐기·재발급한다. 교체 순서는 15.14.
+- **설정 변경:** 허용 목록·실행 한도는 Lovable Settings(admin)로 바꾼다. SQL로 바꿨다면 `state_transitions`가 아닌 Supabase Log에만 남으므로 가능하면 화면을 쓴다.
+- **정기 점검:** 월 1회 `verify_production.sql` 2~8번과 Advisors를 다시 확인한다. Supabase가 새 기능(예: 새 API Key 체계)을 내면 15.6과 이 장을 함께 고친다.
+- **복구:** DB를 백업에서 복구하면 `processing` Job을 모두 `pending`으로 되돌린 뒤 n8n·브릿지를 켠다 (15.23).
+
+### 24.8 원안에서 조정한 부분과 이유
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 내용 | 테이블·RLS·RPC SQL을 다시 정의 | 적용 절차·점검·대응표 | 0001~0007이 이미 구현·테스트됨 (21번). 원안 SQL은 충돌과 보안 후퇴를 만든다 (24.2) |
+| 가입 | 누구나 가입 → `operator` | 허용 목록 트리거 | 15.3 |
+| 상태 값·칼럼 | 대문자, `retry_count`, `CLAIMED` 등 | 21.6 소문자 값, 실제 칼럼 | 마이그레이션 CHECK |
+| Content Job UPDATE | 상태 제한 없는 정책 | `draft`일 때만, `status`는 RPC | 11.12 |
+| Asset INSERT | Operator 정책 | 브릿지 `register_asset`만 | 19.15 |
+| Claim | 인자 없이 아무 Job, `attempts < max_attempts` | job_type·worker별, 특정 Job, `run_after` | 21.11 |
+| 회수 | `locked_at` 15분 | Heartbeat + job_type별 제한 | 21.12 |
+| 자식 테이블 RLS | `automation_jobs → content_jobs → personas` JOIN | 자식 테이블의 `persona_id` 한 단계 | 21.10 |
+| `execution_logs.automation_job_id` | – | 원안과 같음 (NOT NULL) | – |
+| Storage | `generated-assets`(비공개), `persona-assets`, `{user_id}/{persona_id}/…` | `media`(공개), `persona-private`, `persona/{persona_id}/…` | 15.5, 15.13, 브릿지 경로 |
+| Realtime | `system_errors` 포함 | `worker_status` 포함, `system_errors` 제외 | 21.15 |
+| 상태 소유 표 | Content Job에 REVIEW·APPROVED·SCHEDULED·PUBLISHING | 승인·게시는 Post | 21.6 |
+| 실패 흐름 | `system_errors.error_type = CUDA_ERROR` | `error_type = generation`, `error_code = CUDA_ERROR` | 6.9 분류와 13.12 상세 코드를 나눔 |
+| 추적 ID | `execution_log_id` 포함 | `execution_ref`(n8n 실행 ID·ComfyUI prompt_id)로 연결 | 20.13 |
+| 검증 | 체크리스트만 | `verify_production.sql` + 실제 프로젝트 확인 절차 | 적용된 상태를 증명 |
+

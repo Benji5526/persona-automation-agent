@@ -12,8 +12,11 @@
 | `migrations/0006_cron.sql` | pg_cron: 멈춘 Job 회수 (1분마다) |
 | `migrations/0007_workers_settings.sql` | `worker_status`, 설정 RPC, 오류 해결 RPC |
 | `tests/stubs/supabase_stub.sql` | **로컬 테스트 전용.** 실제 프로젝트에 적용하지 않는다 |
+| `verify_production.sql` | 실제 프로젝트 적용 후 점검 (읽기 전용, TECH_DESIGN 24.4) |
 
 ## 실제 프로젝트에 적용하기 (M0 이후)
+
+전체 순서(Google OAuth, URL 설정, API Key 분리, 백업 포함)는 [TECH_DESIGN.md](../docs/TECH_DESIGN.md) 24.3이 정본이다. 아래는 그중 DB 부분이다.
 
 1. [Supabase CLI](https://supabase.com/docs/guides/cli)를 설치하고 프로젝트에 연결한다.
    ```bash
@@ -36,6 +39,9 @@
    update public.users set role = 'admin' where email = 'you@example.com';
    ```
 6. Dashboard → Advisors → Security Advisor에서 경고가 없는지 확인한다.
+7. SQL Editor에서 `verify_production.sql`을 블록마다 실행하고 주석의 기대 결과와 비교한다 (TECH_DESIGN 24.4).
+
+> 스키마는 이 폴더의 마이그레이션으로만 바꾼다. Dashboard·SQL Editor·Lovable에서 테이블이나 정책을 만들거나 고치지 않는다 (TECH_DESIGN 24.2, 24.7).
 
 ## 로컬 테스트
 
