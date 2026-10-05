@@ -5,7 +5,7 @@
 | 기준 문서 | [PRD v1.0](PRD.md) |
 | 최종 수정 | 2026-10-05 |
 | 상태 | v1.0 기술 설계 1차 완성 |
-| 진행 | 9. System Architecture ✅ · 10. Database / ERD ✅ · 11. State Machine ✅ · 12. API Specification ✅ · 13. ComfyUI Workflow Spec ✅ · 14. n8n Workflow Spec ✅ · 15. Security ✅ · 16. Implementation Plan ✅ · 17. UI/UX Spec ✅ · 18. Frontend Spec ✅ · 19. Backend (Python) Spec ✅ · 20. n8n Implementation Spec ✅ · 21. Supabase Implementation Spec ✅ · 22. Lovable Master Build Spec ✅ · 23. Lovable Master Prompt ✅ · 24. Supabase Production ✅ · 25. 로컬 PC 운영 ✅ · 26. n8n Production 운영 ✅ |
+| 진행 | 9. System Architecture ✅ · 10. Database / ERD ✅ · 11. State Machine ✅ · 12. API Specification ✅ · 13. ComfyUI Workflow Spec ✅ · 14. n8n Workflow Spec ✅ · 15. Security ✅ · 16. Implementation Plan ✅ · 17. UI/UX Spec ✅ · 18. Frontend Spec ✅ · 19. Backend (Python) Spec ✅ · 20. n8n Implementation Spec ✅ · 21. Supabase Implementation Spec ✅ · 22. Lovable Master Build Spec ✅ · 23. Lovable Master Prompt ✅ · 24. Supabase Production ✅ · 25. 로컬 PC 운영 ✅ · 26. n8n Production 운영 ✅ · 27. MVP E2E Test ✅ |
 
 ---
 
@@ -6407,4 +6407,208 @@ Worker 가용성은 `verify_production.sql` 17번 (`worker_status`). GPU 사용�
 | LLM | 선택 단계 (제안 → 사용자 승인) | WF-002·005가 자동 생성, 미리보기·승인 없음 | 17.25 |
 | 배포 | 언급 없음 | `deploy/n8n/` Docker Compose + Caddy | 14.21 원격 서버 결정 |
 | 지표 | 항목만 | SQL로 바로 조회 | 운영자가 Lovable 없이도 확인 |
+
+---
+
+## 27. MVP End-to-End Test & Deployment ✅
+
+> MVP를 **실제 환경에서 한 번 끝까지 성공시키고, 실패·복구·보안까지 확인하는 실행 체크리스트**다. 각 단계의 자세한 절차는 이미 있는 장(24·25·26, n8n_guide, Lovable 프롬프트)을 가리키고, 이 장은 **순서·기대 결과·확인 SQL**을 정한다. 기대 결과는 실제 구현 기준이다. ⚙️ 표시는 원안을 조정한 부분이다 (27.11).
+
+### 27.1 목적과 원칙
+
+원안과 같다: 개별 부품이 아니라 **Google 로그인 → Persona → Content Job → n8n → 브릿지 → ComfyUI → RTX 5080 → 검증 → Storage → Asset → Realtime → Lovable** 전체가 사람 손 없이 끝나는지 본다. 그리고 정상 경로만이 아니라 **일부러 실패시켜서** 재시도·기록·복구를 확인한다.
+
+- 아래쪽부터 쌓는다: DB → 로컬 GPU → n8n → 화면. 앞 단계가 통과해야 다음 단계로 간다. 실패하면 범위가 좁을 때 원인을 찾는다.
+- 확인은 화면이 아니라 **DB로** 한다 (27.3 SQL). 화면은 마지막에 같은 결과가 보이는지 본다.
+- 결과는 27.10의 기록표에 남긴다.
+
+### 27.2 실행 순서
+
+| 단계 | 내용 | 절차 | 통과 기준 |
+|---|---|---|---|
+| **0. 코드** | 다른 PC에서 `.venv\Scripts\python -m pytest tests -q` | supabase/README 로컬 테스트 | 전부 통과 (0008·모델 목록 테스트 포함, 이 PC에서는 미실행) |
+| **1. Supabase** | 프로젝트 생성 → `db push` → Auth → 허용 목록 → admin → API Key 분리 | 24.3 1~12 | `verify_production.sql` 1~14 기대값 |
+| **2. 로컬 PC** | 드라이버·ComfyUI·브릿지·방화벽·전원 | 25.3 | `/v1/health` → `ok`, `comfyui` 모두 true |
+| **3. 첫 생성 (n8n 없이)** | SQL로 Job → 브릿지 직접 호출 | 25.6 | Content Job `ready`, Asset 1행, `public_url` 이미지 |
+| **4. 터널** | Cloudflare Tunnel + Access Service Token | 25.5 | 토큰 없이 차단, 토큰 있으면 `/v1/health` 응답 |
+| **5. n8n** | 서버 배포 → Credential → import → DB Webhook 2개 → 콜백 | 26.3, n8n_guide 3~6 | `verify_production.sql` 15~17 |
+| **6. 파이프라인 (화면 없이)** | SQL로 `queued` Content Job 생성 (가짜 LLM) | n8n_guide 8절 | 27.4 기대 상태 |
+| **7. Lovable** | Phase 1~6 | 23장, `lovable_master_prompt.md` | 각 Phase 확인 항목 |
+| **8. 최종 인수 테스트** | 화면에서 만들고 브라우저를 닫은 채 완료 | 27.8 | 27.8 전부 |
+| **9. 실패·복구·보안** | 27.5~27.7 | 이 장 | 각 표의 기대 결과 |
+| **10. (선택) 실제 LLM** | `llm_mode = claude`, Anthropic Credential | n8n_guide 7절 | 프롬프트 없이 주제만 준 Job이 `ready`, `LLM` 실행 기록에 모델·토큰 수 |
+
+원안 27.3의 "LLM 오류가 나도 기본 생성 파이프라인을 테스트할 수 있어야 한다"는 6단계가 맡는다. 기본값이 가짜 LLM이고, 프롬프트를 직접 준 Job은 LLM을 부르지 않는다 (20.8).
+
+### 27.3 확인 SQL
+
+**Job 하나의 전체 흐름** (Job Detail 타임라인과 같은 내용)
+
+```sql
+-- :cj = 확인할 content_jobs.id
+select created_at as at, 'state' as kind, entity_type || ': ' || coalesce(from_status, '(new)') || ' → ' || to_status as what,
+       actor_type as who, reason as detail
+  from public.state_transitions
+ where entity_id = :'cj' or entity_id in (select id from public.automation_jobs where content_job_id = :'cj')
+union all
+select l.created_at, 'log', j.job_type || ' / ' || l.step || ' ' || l.status, l.service,
+       coalesce(l.error, l.duration_ms::text || 'ms')
+  from public.execution_logs l join public.automation_jobs j on j.id = l.automation_job_id
+ where j.content_job_id = :'cj'
+order by at;
+```
+
+SQL Editor에서는 `:'cj'` 자리에 `'<uuid>'`를 직접 넣는다.
+
+**최종 상태 요약**
+
+```sql
+select c.status as content_job, c.run_number,
+       (select jsonb_object_agg(job_type || ':' || id::text, status || ' (' || attempts || '/' || max_attempts || ')')
+          from public.automation_jobs where content_job_id = c.id) as steps,
+       (select count(*) from public.assets where content_job_id = c.id) as assets,
+       (select count(*) from public.posts p join public.assets a on a.id = p.asset_id where a.content_job_id = c.id) as posts,
+       (select count(*) from public.system_errors e join public.automation_jobs j on j.id = e.automation_job_id
+         where j.content_job_id = c.id) as errors
+  from public.content_jobs c where c.id = '<uuid>';
+```
+
+**중복 검사** (어떤 테스트 뒤에도 0행이어야 한다)
+
+```sql
+-- 같은 회차에 같은 단계 Job이 둘 이상
+select content_job_id, job_type, count(*) from public.automation_jobs
+ where job_type in ('prompt', 'generation')
+ group by content_job_id, job_type, split_part(idempotency_key, ':', 3) having count(*) > 1;
+-- 같은 Asset에 캡션 Post가 둘 이상
+select asset_id, count(*) from public.posts group by asset_id having count(*) > 1;
+```
+
+### 27.4 정상 경로 기대 상태 ⚙️
+
+원안의 `PENDING → GENERATING → GENERATED`, `CLAIMED → RUNNING → SUCCEEDED`, Asset `READY` 대신 실제 상태 값(21.6)으로 확인한다.
+
+| 시점 | `content_jobs` | `automation_jobs` | 기타 |
+|---|---|---|---|
+| 만든 직후 | `queued` | 없음 | – |
+| WF-001 직후 (수 초) | `generating` | prompt `pending` → `processing` | `DISPATCH` 기록 |
+| WF-002 직후 | `generating` | prompt `done`, generation `pending` | `CLAIM`, (`LLM`), `COMPLETE` 기록 |
+| WF-003 직후 | `generating` | generation `processing` (`claimed_by = python:rtx5080-1`) | 브릿지 `BUILD` 기록 |
+| 생성 중 | `generating` | generation `processing`, `heartbeat_at` 30초마다 갱신 | `COMFYUI_QUEUE` → `COMFYUI_WAIT` |
+| 생성 완료 | **`ready`** (`completed_at` 기록) | generation `done` (`result.asset_ids`) | `assets` 행 `generated`, `media/persona/{id}/assets/{asset_id}.png` |
+| WF-004·005 직후 | `ready` | caption `done` (Asset마다) | `posts` 행 `draft` (캡션·해시태그) |
+
+- `attempts`는 모두 1, `system_errors`는 0행, 27.3 중복 검사는 0행이어야 한다.
+- Lovable Job Detail은 새로고침 없이 대기 → 프롬프트 → 생성 대기 → 생성 → 검증 → 업로드 → 완료로 바뀌고, Asset Library에 이미지가 나타난다 (Realtime).
+
+### 27.5 실패 테스트 ⚙️
+
+각 테스트는 테스트용 Persona로 하고, 끝나면 설정을 되돌린다. 기대 결과는 13.12·19.11의 실제 오류 코드다.
+
+| # | 만드는 방법 | 기대 결과 | 원안 기대 |
+|---|---|---|---|
+| F1 ComfyUI 꺼짐 (시작 전) | ComfyUI를 끄고 Content Job 생성 | 브릿지가 **선점하지 않고 `503`**. generation Job은 `pending`, `attempts = 0` 그대로. WF-003 결과 `bridge_unavailable`. ComfyUI를 켜면 1분 안에 진행되어 `ready` | `COMFYUI_UNAVAILABLE`, retryable |
+| F2 ComfyUI 꺼짐 (생성 중) | `COMFYUI_WAIT` 중에 ComfyUI 종료 | `COMFY_UNREACHABLE`(transient) → `pending` + `run_after` 30초 후 → ComfyUI를 켜면 재시도로 `ready`, `attempts = 2` | 같음 |
+| F3 없는 Workflow | `create_content_job(..., p_workflow => 'no_such_workflow')` (SQL, 화면은 목록만 허용) | `WORKFLOW_INVALID`(validation), 재시도 없이 generation `failed` → Content Job `failed` | `WORKFLOW_NOT_FOUND` |
+| F4 없는 Base Model | Persona `visual_settings.base_model`을 없는 파일 이름으로 | `MODEL_NOT_FOUND`, 바로 `failed` (실행 전 검증, ComfyUI에 보내지 않음) | – |
+| F5 없는 LoRA | `default_workflow = image_generation_lora_v1` + 없는 이름의 `lora` persona_asset | `LORA_NOT_FOUND`, 바로 `failed` | 같음 |
+| F6 시간 초과 | 브릿지 `.env`에 `JOB_TIMEOUT_SEC=20`, steps 80·해상도 2048로 생성 | `TIMEOUT` → ComfyUI 작업 정리 → `pending`(30초 → 2분) → 3번째도 실패하면 `failed`. 끝나면 900으로 되돌리고 브릿지 재시작 | `GENERATION_TIMEOUT` |
+| F7 GPU 메모리 부족 (선택) | 해상도 2048×2048 + 후보 4장 (OOM이 안 나면 건너뜀) | `OUT_OF_MEMORY` → 1회 같은 값으로 재시도 → 3번째 시도에서 후보 수를 반으로 줄임 (`generation_metadata.oom_downscaled = true`) → 그래도 실패하면 `failed` (19.12) | 해상도 축소 1회 |
+| F8 LLM 출력 오류 (가짜 LLM) | 가짜 LLM 고정 JSON에서 `subject`를 지운 사본으로 바꿔 둔다 | `LLM_OUTPUT_INVALID`, prompt Job 재시도 후 `failed` → Content Job `failed`. 끝나면 되돌림 | – |
+| F9 LLM 하루 한도 | admin 설정에서 `daily_llm_calls_limit = 0` (`claude` 모드) | `reserve_llm_call` 거부 → `RATE_LIMITED`, Claude API는 호출되지 않음, `security_events`에 기록 | – |
+
+**재시도 확인** (F2·F6): `automation_jobs`의 `attempts`, `run_after`, `error_code`, `error_message`(`[시도 n/3]`)가 바뀌는지, `system_errors`가 시도마다 1행씩 생기는지 본다. 원안의 `RETRY_WAIT`은 `pending` + 미래의 `run_after`, `DEAD`는 `failed`다 (20.11). 실패한 Job은 화면의 [실패한 단계만 다시 실행] / [처음부터 다시 실행]으로 되살아나는지도 본다.
+
+### 27.6 중복·취소·복구 테스트
+
+| # | 방법 | 기대 결과 |
+|---|---|---|
+| D1 브릿지 중복 호출 | 같은 `job_id`로 `POST /v1/jobs`를 연속 두 번 (25.6의 PowerShell) | 첫 번째 `202`, 두 번째 `409 JOB_NOT_CLAIMABLE`. `BUILD` 기록 1개, Asset 중복 없음 |
+| D2 Job 중복 생성 | `create_automation_job`을 같은 `idempotency_key`로 두 번 | 같은 `id`가 돌아옴 |
+| D3 Webhook + 안전망 | 정상 경로 중 n8n 실행 기록에서 같은 Job이 두 경로로 들어온 경우 | 27.3 중복 검사 0행 |
+| C1 대기 중 취소 | `queued`·생성 대기에서 화면의 [취소] | Content Job·하위 Job `cancelled`, Asset 없음 |
+| C2 생성 중 취소 | `COMFYUI_WAIT` 중 [취소] | 하위 Job `cancelled`. 브릿지가 다음 Heartbeat(최대 30초)에 멈추고 ComfyUI 작업 정리. 늦게 끝난 결과는 `register_asset`이 거부 → **Asset 0행** |
+| R1 n8n 재시작 | `docker compose restart n8n` 중 Content Job 생성 | 다시 켜진 뒤 1분 안에 안전망이 이어서 처리 |
+| R2 브릿지 정상 종료 | 생성 중 브릿지 콘솔 `Ctrl+C` | Job이 `SHUTDOWN`(재시도)으로 `pending` → 브릿지를 켜면 처리 |
+| R3 브릿지 강제 종료 | 작업 관리자로 종료 | 3분 안에 `HEARTBEAT_TIMEOUT`으로 `pending` (pg_cron) → 브릿지를 켜면 처리 |
+| R4 ComfyUI 재시작 | F2와 같음 | 같음 |
+| R5 PC 재부팅 | 생성 중 재부팅 | 로그온 후 자동 시작(25.4) → Heartbeat 회수 → 재시도로 `ready`. Job은 사라지지 않음 |
+
+### 27.7 보안 테스트
+
+| # | 방법 | 기대 결과 |
+|---|---|---|
+| S1 번들 비밀값 | Lovable 빌드 결과(또는 동기화된 코드)에서 `sb_secret`, `service_role`, `sk-ant-`, `BRIDGE`, `8188` 검색 | 0건 (publishable key만) |
+| S2 DB 권한 | `verify_production.sql` 2~8 | 기대값 |
+| S3 사용자 격리 | 24.5 (계정 두 개, 다른 사람 Persona로 `create_content_job` → `PT404`, 허용 목록 밖 계정 가입 거부) | 서로 보이지 않음 |
+| S4 Storage 격리 | 다른 계정으로 첫 계정의 참조 이미지 경로 `createSignedUrl` | 거부 |
+| S5 브릿지 인증 | 터널 주소에 Access 토큰 없이 요청 / Access 토큰은 있고 `X-Bridge-Token` 없이 요청 | Cloudflare 차단 / `401` (10회 넘으면 `429 BLOCKED`) |
+| S6 ComfyUI 비공개 | 다른 기기에서 `http://<PC IP>:8188`, `:8000` | 연결 안 됨 (방화벽, `127.0.0.1` 바인딩) |
+| S7 로그 비밀값 | `select count(*) from execution_logs where input_data::text ~* 'sb_secret|bearer|sk-ant' or output_data::text ~* 'sb_secret|bearer|sk-ant' or error ~* 'sb_secret|bearer|sk-ant'` (같은 검사를 `system_errors.message`에도) | 0 |
+| S8 Signed URL 만료 | 참조 이미지 Signed URL을 1시간 뒤 다시 열기 | 만료로 거부 |
+
+### 27.8 최종 인수 테스트 (원안 27.29)
+
+사람이 한 번 실행한다. **6번부터 15번까지 브라우저를 닫아 둔다.**
+
+1. Google 로그인 (허용 목록 계정)
+2. Persona 생성 (이름·설명)
+3. Visual Identity: Workflow `image_generation_v1`, Base Model(드롭다운), 기본 해상도
+4. [테스트 이미지 생성] → 미리보기에 이미지 (17.8)
+5. Content Job 생성: 주제 "Coffee shop morning", 프롬프트는 **비워 둔다** (파이프라인이 만든다), Negative "blurry, distorted face, extra fingers, low quality", Instagram, 보통
+6. 상태가 `대기`인 것을 확인하고 **브라우저를 닫는다**
+7. ~ 15. n8n → 브릿지 → ComfyUI → RTX 5080 → 검증 → Storage → Asset → caption (27.4 표대로 진행)
+16. 다시 로그인
+17. Content Job이 `준비됨`, 진행 단계가 모두 완료
+18. Asset Library에 이미지, Asset Detail에 생성 정보(Workflow, 모델, seed, steps, 해상도)
+19. Job Detail 실행 기록에 단계별 시각, 캡션 초안
+20. 27.3 최종 상태 요약 SQL로 같은 내용 확인, 중복 검사 0행
+
+통과하면 MVP 핵심 자동화는 완료다 (16.14 최종 테스트).
+
+### 27.9 운영 전 확인과 모니터링
+
+원안 27.27의 Production Readiness는 각 장의 체크리스트로 대신한다.
+
+| 영역 | 확인 |
+|---|---|
+| Supabase | 24.3 1~12, `verify_production.sql` 전부 |
+| 로컬 PC | 25.3 1~8, 25.4 자동 시작, 25.5 터널 |
+| n8n | 26.3 1~9 (2FA, 공개 API 끔, 백업) |
+| Lovable | 23장 Phase 6 점검, 22.21 보안 체크리스트 |
+| 모델 | `models\checkpoints`·`loras` 파일, `worker_status.models`에 표시 |
+| 백업 | Supabase `pg_dump`, n8n 볼륨, `N8N_ENCRYPTION_KEY` 오프라인 (26.4) |
+
+모니터링은 원안처럼 별도 플랫폼 없이 시작한다: Lovable Overview·Automation (22.8, 22.13), Header 시스템 상태 (22.7), 운영 SQL (26.6).
+
+### 27.10 결과 기록
+
+테스트마다 아래 형식으로 저장소 밖(또는 이슈)에 남긴다. 실패하면 27.3 흐름 SQL 결과를 함께 붙인다.
+
+| 항목 | 예 |
+|---|---|
+| 날짜·환경 | 2026-10-xx, Supabase `<ref>`, n8n `<version>`, 브릿지 커밋 `<sha>`, ComfyUI 버전, 드라이버 |
+| 테스트 | F2 ComfyUI 꺼짐 (생성 중) |
+| 결과 | 통과 / 실패 |
+| 근거 | Content Job id, `attempts`, `error_code`, 소요 시간 |
+| 조치 | (실패 시) 원인, 수정 커밋 |
+
+### 27.11 원안에서 조정한 부분과 이유
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 형태 | 테스트 케이스 목록 | 실행 순서 + 기대 상태 + 확인 SQL + 기록 형식 | 바로 실행할 수 있게. 세부 절차는 24·25·26장 재사용 |
+| 상태 값 | `PENDING`·`GENERATED`·`CLAIMED`·`RUNNING`·`SUCCEEDED`·`READY`·`RETRY_WAIT`·`DEAD` | 21.6 실제 값 (27.4) | 마이그레이션 CHECK |
+| 환경 변수 | 각 시스템에 Supabase service role·Python token 환경 변수 | Lovable은 publishable key만, n8n은 Credential, 브릿지는 bridge 전용 secret key | 15.6, 20.16, 24.3 |
+| Python 입력 | `automation_job_id`·`content_job_id`·`persona_id` | `job_id`만 | 19.4 |
+| Storage | `generated-assets/{user_id}/…`, Asset `READY` | `media/persona/{persona_id}/assets/…`, Asset `generated` | 19.15 |
+| ComfyUI 꺼짐 | `COMFYUI_UNAVAILABLE`로 실패 후 재시도 | 시작 전이면 선점하지 않음(시도 횟수 그대로), 생성 중이면 `COMFY_UNREACHABLE` | 12.6, 19.11 |
+| 오류 코드 | `WORKFLOW_NOT_FOUND`, `GENERATION_TIMEOUT` | `WORKFLOW_INVALID`, `TIMEOUT` | 13.12 |
+| OOM 대응 | 해상도를 두 단계 축소 | 같은 값 1회 → 후보 수 또는 해상도 1회 축소 | 19.12 |
+| 멱등성 확인 | 이미 성공한 Asset이 있으면 기존 결과 반환 | 두 번째 요청은 선점 실패 `409`, Job 생성은 같은 키로 기존 행 | 19.7 |
+| 취소 | n8n·Python이 감지 | DB가 하위 Job을 취소하고, 브릿지는 Heartbeat에서 멈추고 결과를 버림 | 19.14 |
+| 실패·보안 테스트 | 항목 | 만드는 방법과 기대 결과, 로그 비밀값 SQL | 재현 가능하게 |
+| 최종 테스트 | 프롬프트 직접 입력 | 프롬프트를 비워 파이프라인 전체(LLM 단계 포함) 확인 | 기본 사용 흐름과 같게 |
+| 테스트 순서 | 화면부터 | DB → 로컬 → n8n → 화면 | 실패 범위를 좁게 |
+| LLM | 필수 경로 아님 | 기본은 가짜 LLM, 실제 LLM은 선택 단계 10 | 20.8, n8n_guide 7절 |
 
