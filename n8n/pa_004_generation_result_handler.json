@@ -1,0 +1,372 @@
+{
+  "name": "[PA] 004 - Generation Result Handler",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "pa/generation-result",
+        "authentication": "headerAuth",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "pa004-webhook",
+      "name": "브릿지 콜백",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "pa-generation-result"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.body.event }}",
+              "rightValue": "generation.completed",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "c2",
+              "leftValue": "={{ $json.body.status }}",
+              "rightValue": "done",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "pa004-if-done",
+      "name": "생성 완료?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://YOUR-PROJECT-REF.supabase.co/rest/v1/assets?select=id,persona_id,content_job_id,content_jobs(metadata)&status=eq.generated&content_job_id=eq.{{ /^[0-9a-f-]{36}$/i.test(String($json.body.content_job_id)) ? $json.body.content_job_id : '00000000-0000-0000-0000-000000000000' }}&id=in.({{ ($json.body.asset_ids || []).filter((a) => /^[0-9a-f-]{36}$/i.test(String(a))).join(',') || '00000000-0000-0000-0000-000000000000' }})",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "pa004-get-assets",
+      "name": "콜백 Asset 조회",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        -80
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "pa004-failed",
+      "name": "실패: 기록만 (V1에서 WF-010 알림)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        480,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "pa004-schedule",
+      "name": "안전망: 5분마다",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://YOUR-PROJECT-REF.supabase.co/rest/v1/assets?select=id,persona_id,content_job_id,content_jobs(metadata),posts(id)&posts=is.null&status=eq.generated&created_at=gte.{{ encodeURIComponent($now.minus({ days: 1 }).toISO()) }}&created_at=lte.{{ encodeURIComponent($now.minus({ minutes: 2 }).toISO()) }}&order=created_at.desc&limit=50",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "pa004-list-assets",
+      "name": "최근 Asset 조회",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Asset마다 caption Job 하나 (caption:{asset_id}). 테스트 이미지(visual_test, 17.8)는 캡션을 만들지 않는다.\nconst a = $json;\nif (a.content_jobs?.metadata?.purpose === 'visual_test') return { json: { skip: true, asset_id: a.id } };\nreturn { json: {\n  skip: false,\n  asset_id: a.id,\n  params: {\n    p_job_type: 'caption',\n    p_persona_id: a.persona_id,\n    p_content_job_id: a.content_job_id,\n    p_worker: 'n8n',\n    p_payload: { asset_id: a.id },\n    p_priority: null,\n    p_max_attempts: 3,\n    p_idempotency_key: `caption:${a.id}`\n  }\n} };"
+      },
+      "id": "pa004-caption-params",
+      "name": "caption Job 준비",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.skip }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "pa004-if-caption",
+      "name": "캡션 대상?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        960,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR-PROJECT-REF.supabase.co/rest/v1/rpc/create_automation_job",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.params) }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "pa004-create-caption",
+      "name": "create_automation_job (caption)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1200,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 새로 만들어진(pending) caption Job만 WF-005로 보낸다. 이미 있는 Job(같은 키)은 그대로 둔다.\n// Content Job이 취소·보관된 경우 DB가 INVALID_TRANSITION을 돌려준다 → 건너뛴다.\nconst out = [];\n$input.all().forEach((it, i) => {\n  const r = it.json;\n  if (r.statusCode >= 200 && r.statusCode < 300) {\n    if (r.body?.status === 'pending' && r.body?.attempts === 0) out.push({ json: { job_id: r.body.id }, pairedItem: { item: i } });\n    return;\n  }\n  if (r.statusCode === 409 || r.body?.code === 'PT409' || r.body?.code === 'PT404') return;\n  throw new Error(`create_automation_job(caption) ${r.statusCode}: ${JSON.stringify(r.body).slice(0, 300)}`);\n});\nreturn out;"
+      },
+      "id": "pa004-created",
+      "name": "새 caption Job",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_WF005_ID",
+          "mode": "id"
+        },
+        "options": {
+          "waitForSubWorkflow": false
+        },
+        "mode": "each"
+      },
+      "id": "pa004-exec-wf005",
+      "name": "WF-005 실행",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        1680,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## [PA] 004 - Generation Result Handler (TECH 14.9)\n브릿지가 결과를 DB에 쓴 **다음에** 보내는 콜백(12.7). 상태를 바꾸지 않고 다음 단계만 시작한다.\n\n- `generation.completed` → 콜백의 Asset을 DB에서 다시 확인 → Asset마다 caption Job (`caption:{asset_id}`) → WF-005\n- `generation.failed` → MVP는 기록만 (`system_errors`·Dashboard). V1에서 WF-010 알림 연결\n- 안전망 (5분): 최근 1일 `generated` Asset 중 Post가 없는 것(최신순 50건)에 caption Job을 만든다. 콜백이 빠졌을 때 복구용. 키가 같아 중복 없음. 새 Job은 WF-005 안전망이 가져간다\n\n**import 후:** `YOUR-PROJECT-REF` 치환, `WF-005 실행` 노드에서 `[PA] 005 - Caption Generator` 선택\nCredential: Webhook → `PA Callback Token` (Header Auth, Name `X-Callback-Token`), Supabase 노드 → `PA Supabase`\nWebhook Production URL → 브릿지 `.env`의 `N8N_CALLBACK_URL`\nSettings → Error Workflow: `[PA] 006 - Error Handler`",
+        "height": 440,
+        "width": 720
+      },
+      "id": "pa004-note",
+      "name": "메모",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -560
+      ]
+    }
+  ],
+  "connections": {
+    "브릿지 콜백": {
+      "main": [
+        [
+          {
+            "node": "생성 완료?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "생성 완료?": {
+      "main": [
+        [
+          {
+            "node": "콜백 Asset 조회",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "실패: 기록만 (V1에서 WF-010 알림)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "콜백 Asset 조회": {
+      "main": [
+        [
+          {
+            "node": "caption Job 준비",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "안전망: 5분마다": {
+      "main": [
+        [
+          {
+            "node": "최근 Asset 조회",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "최근 Asset 조회": {
+      "main": [
+        [
+          {
+            "node": "caption Job 준비",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "caption Job 준비": {
+      "main": [
+        [
+          {
+            "node": "캡션 대상?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "캡션 대상?": {
+      "main": [
+        [
+          {
+            "node": "create_automation_job (caption)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "create_automation_job (caption)": {
+      "main": [
+        [
+          {
+            "node": "새 caption Job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "새 caption Job": {
+      "main": [
+        [
+          {
+            "node": "WF-005 실행",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "pinData": {}
+}

@@ -1,0 +1,288 @@
+{
+  "name": "[PA] 006 - Error Handler",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "pa006-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 실패한 Execution 정보 정리 + 비밀값 가리기 + error_type 분류 (TECH 14.12, 15.21)\nconst e = $input.first().json;\nconst exec = e.execution || {};\nconst wf = e.workflow || {};\nconst trig = e.trigger || {};\nconst raw = String(exec.error?.message || trig.error?.message || 'unknown error');\nconst redact = (s) => s\n  .replace(/eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+/g, '[REDACTED]')\n  .replace(/sb_(secret|publishable)_[A-Za-z0-9_-]+/g, '[REDACTED]')\n  .replace(/sk-ant-[A-Za-z0-9_-]+/g, '[REDACTED]')\n  .replace(/(bearer)\\s+[A-Za-z0-9._~+\\/=-]+/gi, '$1 [REDACTED]');\nconst message = redact(raw).slice(0, 1000);\nconst httpCode = String(exec.error?.httpCode ?? '');\nconst lower = `${httpCode} ${message} ${String(exec.error?.description || '')}`.toLowerCase();\nlet error_type = 'unknown', error_code = 'N8N_WORKFLOW_ERROR', retryable = true;\nif (/timeout|timed out|etimedout|esockettimedout/.test(lower)) { error_type = 'timeout'; error_code = 'TIMEOUT'; }\nelse if (/econnreset|econnrefused|enotfound|socket hang up|network/.test(lower)) { error_type = 'transient'; error_code = 'NETWORK_ERROR'; }\nelse if (/\\b429\\b|rate limit/.test(lower)) { error_type = 'api'; error_code = 'RATE_LIMIT'; }\nelse if (/\\b5\\d\\d\\b|service unavailable|bad gateway/.test(lower)) { error_type = 'api'; error_code = 'TEMPORARY_API_ERROR'; }\nelse if (/\\b401\\b|\\b403\\b|unauthorized|forbidden|authorization failed/.test(lower)) { error_type = 'authentication'; error_code = 'INVALID_AUTH'; retryable = false; }\nconst workflow_name = String(wf.name || 'unknown workflow');\nconst last_node = String(exec.lastNodeExecuted || trig.node?.name || 'unknown node');\nreturn [{ json: {\n  execution_id: exec.id ? String(exec.id) : null,\n  workflow_name, last_node,\n  step: last_node.slice(0, 100),\n  message: `[${workflow_name} / ${last_node}] ${message}`.slice(0, 1000),\n  error_type, error_code, retryable\n} }];"
+      },
+      "id": "pa006-normalize",
+      "name": "오류 정리",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://YOUR-PROJECT-REF.supabase.co/rest/v1/execution_logs?select=automation_job_id,input_data&service=eq.n8n&step=eq.CLAIM&execution_ref=eq.{{ encodeURIComponent($json.execution_id || 'none') }}&order=id.desc&limit=1",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "pa006-find-claim",
+      "name": "CLAIM 기록 찾기",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        0
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 각 Workflow가 선점 직후 남긴 CLAIM 기록에서 Job ID와 locked_at을 찾는다\nconst info = $('오류 정리').first().json;\nconst r = $input.first().json;\nconst row = (r.statusCode === 200 && Array.isArray(r.body)) ? r.body[0] : null;\nreturn [{ json: { ...info, job_id: row?.automation_job_id || '', locked_at: row?.input_data?.locked_at || '' } }];"
+      },
+      "id": "pa006-resolve",
+      "name": "Job 찾기 결과",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.job_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "c2",
+              "leftValue": "={{ $json.locked_at }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "pa006-has-job",
+      "name": "Job 있음?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        960,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR-PROJECT-REF.supabase.co/rest/v1/rpc/log_execution",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ p_job_id: $json.job_id, p_step: 'N8N_ERROR', p_service: 'n8n', p_status: 'failed', p_input: { workflow: $json.workflow_name, node: $json.last_node }, p_execution_ref: $json.execution_id, p_error: $json.message }) }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "pa006-log",
+      "name": "실행 기록: 실패",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1200,
+        -120
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR-PROJECT-REF.supabase.co/rest/v1/rpc/fail_automation_job",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ p_job_id: $('Job 찾기 결과').item.json.job_id, p_locked_at: $('Job 찾기 결과').item.json.locked_at, p_error_type: $('Job 찾기 결과').item.json.error_type, p_error_code: $('Job 찾기 결과').item.json.error_code, p_message: $('Job 찾기 결과').item.json.message, p_retryable: $('Job 찾기 결과').item.json.retryable, p_step: $('Job 찾기 결과').item.json.step }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "pa006-fail",
+      "name": "fail_automation_job",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1440,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR-PROJECT-REF.supabase.co/rest/v1/system_errors",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ service: 'n8n', step: $json.step, error_type: $json.error_type, error_code: $json.error_code, message: $json.message, retryable: false }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "pa006-system-error",
+      "name": "system_errors 기록",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1200,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## [PA] 006 - Error Handler (TECH 14.12)\n다른 [PA] Workflow의 **Settings → Error Workflow**에 이 Workflow를 지정한다.\n\n1. 실패한 Execution ID로 `execution_logs`의 `CLAIM` 기록을 찾는다 (WF-002·005가 선점 직후 남김)\n2. 찾으면: 실행 기록(`failed`) → `fail_automation_job` (재시도 여부는 DB가 결정)\n3. 못 찾으면 (Trigger 단계 오류, WF-001·003·004 오류): `system_errors`에만 기록\n\n메시지는 비밀값을 가린 뒤 1,000자로 자른다.\nError Trigger는 **Active 상태의 자동 실행**에서만 동작한다 (수동 실행은 X).\n\n**import 후:** `YOUR-PROJECT-REF` 치환, Supabase 노드 4개에 `PA Supabase` (Custom Auth) 연결. 이 Workflow 자신은 Error Workflow를 지정하지 않는다.",
+        "height": 380,
+        "width": 620
+      },
+      "id": "pa006-note",
+      "name": "메모",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -460
+      ]
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "오류 정리",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "오류 정리": {
+      "main": [
+        [
+          {
+            "node": "CLAIM 기록 찾기",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CLAIM 기록 찾기": {
+      "main": [
+        [
+          {
+            "node": "Job 찾기 결과",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Job 찾기 결과": {
+      "main": [
+        [
+          {
+            "node": "Job 있음?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Job 있음?": {
+      "main": [
+        [
+          {
+            "node": "실행 기록: 실패",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "system_errors 기록",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "실행 기록: 실패": {
+      "main": [
+        [
+          {
+            "node": "fail_automation_job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "pinData": {}
+}

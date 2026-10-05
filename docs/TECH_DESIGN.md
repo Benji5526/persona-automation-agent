@@ -2250,8 +2250,8 @@ n8n Workflow는 하나의 거대한 Workflow로 만들지 않고 **기능별로 
 |---|---|---|---|---|
 | WF-001 | Content Job Dispatcher | MVP | DB Webhook + 안전망 Schedule | `queued` Content Job 선점 → 첫 Automation Job 생성 |
 | WF-002 | Prompt Generator | MVP | WF-001 호출, 안전망 Schedule | `prompt` Job 선점 → LLM Structured Prompt → 검증 → `prompt_parts` 저장 → `generation` Job 생성 |
-| WF-003 | Generation Dispatcher | MVP | DB Webhook + 안전망 Schedule | `pending` `generation` Job을 브릿지 `POST /jobs`로 전달 (✅ 현재 `n8n/01_media_dispatch.json`) |
-| WF-004 | Generation Result Handler | MVP | 브릿지 콜백 Webhook | 완료면 `caption` Job 생성, 실패면 알림 (✅ 현재 `n8n/02_media_done.json`을 확장) |
+| WF-003 | Generation Dispatcher | MVP | DB Webhook + 안전망 Schedule | `pending` `generation` Job을 브릿지 `POST /v1/jobs`로 전달 (✅ `n8n/pa_003_generation_dispatcher.json`) |
+| WF-004 | Generation Result Handler | MVP | 브릿지 콜백 Webhook | 완료면 `caption` Job 생성, 실패면 알림 (✅ `n8n/pa_004_generation_result_handler.json`) |
 | WF-005 | Caption Generator | MVP | WF-004 호출, 안전망 Schedule | `caption` Job 선점 → LLM Caption·Hashtag → `posts`(`draft`) |
 | WF-006 | Error Handler | MVP | n8n Error Trigger | 모든 Workflow의 예기치 못한 실패를 기록하고 Job 실패 처리 |
 | WF-007 | SNS Publisher | V1 | 승인 후 즉시 게시 | `publish` Job → SNS 서브 워크플로우 |
@@ -3221,10 +3221,10 @@ Lovable에는 secret key·service_role key를 절대 넣지 않는다. 브릿지
 | 순서 | Workflow | 근거 |
 |---|---|---|
 | 1 | WF-006 Error Handler (다른 Workflow가 연결해야 하므로 먼저) | 14.12 |
-| 2 | WF-003 Generation Dispatcher (현재 `01_media_dispatch.json` 개편) | 14.8 |
+| 2 | WF-003 Generation Dispatcher (`01_media_dispatch.json` 개편 → `pa_003_generation_dispatcher.json`) | 14.8 |
 | 3 | WF-001 Content Job Dispatcher | 14.6 |
 | 4 | WF-002 Prompt Generator + `prompt_generation.v1` 검증 | 14.7, 12.9 |
-| 5 | WF-004 Generation Result Handler (현재 `02_media_done.json` 개편) | 14.9 |
+| 5 | WF-004 Generation Result Handler (`02_media_done.json` 개편 → `pa_004_generation_result_handler.json`) | 14.9 |
 | 6 | WF-005 Caption Generator + `caption_generation.v1` 검증 | 14.14, 12.9 |
 | 7 | Supabase Database Webhook 2개 연결, 1분 안전망 Schedule | 12.7, 14.4 |
 
@@ -3232,6 +3232,26 @@ Lovable에는 secret key·service_role key를 절대 넣지 않는다. 브릿지
 - 모든 HTTP 노드: Timeout(14.18), 브릿지 호출은 Never Error + 연결 실패 3회 재시도, Credential만 사용.
 
 **완료 조건:** 가짜 LLM 응답(고정 JSON)과 실제 브릿지로 `queued → … → ready`가 사람 손 없이 진행됨.
+
+**구현 메모 (M3 작성 결과)** ⚙️: 파일은 `n8n/pa_*.json`, 설치·연결 방법은 [n8n_guide.md](n8n_guide.md). 14번 흐름을 따르되 아래를 정했다.
+
+| 항목 | 결정 | 이유 |
+|---|---|---|
+| WF-001의 첫 Job | 항상 `prompt` Job을 만든다. 프롬프트·`prompt_parts`가 이미 있으면 WF-002가 LLM 없이 generation Job으로 넘긴다 (14.6은 바로 generation) | 선점 뒤 생기는 실패(하루 생성 한도 등)가 모두 Automation Job 실패로 기록되어 Rollup(11.9 R2)으로 Content Job이 `failed`가 된다. 바로 generation을 만들다 실패하면 Content Job이 하위 Job 없이 `generating`에 멈춘다 |
+| idempotency_key | `prompt:{content_job_id}:{run_number}`, `generation:{content_job_id}:{run_number}`, `caption:{asset_id}` | `retry_content_job`·`regenerate_content_job`이 `run_number`를 올리므로 회차마다 새 Job (14.17) |
+| generation Job 생성 시점 | WF-002가 `save_prompt_parts` → generation Job 생성 → `complete_automation_job` 순서 | prompt Job이 끝났는데 generation Job이 없는 상태를 만들지 않는다. 생성 한도에 걸리면 prompt Job을 `RATE_LIMITED`로 다음 UTC 자정(한도 초기화) 뒤 재시도. 이전 시도의 generation이 이미 끝나 Content Job이 `generating`이 아니면(`PT409`) prompt Job은 완료 처리 |
+| 멈춘 Content Job 복구 | WF-001 안전망이 5분 넘게 `generating`인 Content Job에 같은 키로 prompt Job 생성을 다시 시도 | 선점 직후 네트워크 오류로 prompt Job을 못 만든 경우. 키가 같아 중복이 생기지 않는다 |
+| WF-006이 Job을 찾는 방법 | WF-002·005가 선점 직후 `log_execution(step = 'CLAIM', execution_ref = n8n 실행 ID, input.locked_at)`을 남기고, WF-006이 실행 ID로 이 기록을 찾는다. CLAIM 기록에 실패하면 그 자리에서 멈추고 Heartbeat 회수에 맡긴다. 하위 Workflow는 Job마다 따로 실행한다 (Execute Workflow `mode: each`) | Error Trigger는 실행 데이터를 주지 않는다. n8n API Key 없이 Supabase만으로 찾는다 |
+| WF-006이 Job을 못 찾을 때 | `system_errors`에 직접 기록 (`service = 'n8n'`) | WF-001·003·004는 Automation Job을 선점하지 않는다. 하위 Workflow에서 Error Workflow가 돌지 않아도 Heartbeat 회수(11.6)가 Job을 되살린다 |
+| LLM 호출 | 하위 Workflow `[PA] LLM - Structured Call` 하나. `llm_mode = fake`(고정 JSON, 기본) / `claude` | 완료 조건의 가짜 LLM과 실제 LLM을 같은 경로로. 공급자를 바꿀 때 한 곳만 고친다 |
+| 실제 LLM | Claude API `claude-opus-5-5`, effort `low`, `output_config.format`(json_schema), `fallbacks: "default"` | Structured Output으로 형식을 강제하고, n8n이 12.9 스키마(길이·형식)로 다시 검증한다. API용 스키마에는 Structured Output이 지원하는 키워드만 넣는다 |
+| LLM Timeout | 90초 (Supabase 호출은 10초) | n8n Job은 Heartbeat를 보내지 않으므로 prompt·caption Heartbeat 제한(120초)보다 짧아야 한다 |
+| WF-003 안전망 | 1분마다 `run_after`가 지난 pending generation Job 5건을 `job_id`로 보낸다 (기존: `{}`로 1건) | 한 번에 여러 Job을 GPU 대기열에 넣는다. 대기열 Job도 Heartbeat를 받는다 (19.13) |
+| WF-003 응답 처리 | `202`·`409`·`503`·`429`·연결 실패는 정상 흐름, `401`·`403`·기타만 오류 | PC나 ComfyUI가 꺼져 있을 때마다 오류가 쌓이지 않게. Job은 `pending`으로 남는다 |
+| WF-004 안전망 | 5분마다 최근 1일 `generated` Asset 중 Post가 없는 것(최신순 50건)에 caption Job 생성 (같은 키) | 브릿지 콜백은 실패해도 다시 보내지 않는다 (12.7) |
+| 캡션 제외 | `metadata.purpose = 'visual_test'` Content Job의 Asset (17.8) | 테스트 이미지는 게시 대상이 아님 |
+| Caption 재시도 | 이전 시도의 `result.post_id`가 있으면 초안을 다시 만들지 않는다 | `create_post_draft` 직후 실패한 Job의 재시도에서 Post가 두 개 생기지 않게 |
+| 비밀값 | Supabase는 Custom Auth(`apikey` + `x-actor: n8n`), 브릿지는 Custom Auth(`X-Bridge-Token` + Cloudflare Access 헤더 2개) | 15.6, 15.7. 노드 파라미터에는 주소만 있다 |
 
 ### 16.9 M4: Lovable Control Center
 

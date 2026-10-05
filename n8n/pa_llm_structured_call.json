@@ -1,0 +1,214 @@
+{
+  "name": "[PA] LLM - Structured Call",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "pallm-trigger",
+      "name": "WF-002·005에서 호출",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "m1",
+              "name": "llm_mode",
+              "value": "fake",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "pallm-mode",
+      "name": "LLM 모드 (fake | claude)",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.llm_mode }}",
+              "rightValue": "claude",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "pallm-if-real",
+      "name": "실제 LLM?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        480,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "anthropic-beta",
+              "value": "server-side-fallback-2026-07-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'claude-opus-5-5', max_tokens: $json.max_tokens || 8000, system: $json.system, messages: [ { role: 'user', content: $json.user } ], output_config: { effort: 'low', format: { type: 'json_schema', schema: $json.schema } }, fallbacks: 'default' }) }}",
+        "options": {
+          "timeout": 90000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "pallm-claude",
+      "name": "Claude API (Messages)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        -120
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Claude 응답 → { ok, data } 또는 { ok: false, error_* } (14.11 오류 분류). 예외를 던지지 않는다.\nconst r = $input.first().json;\nconst out = (o) => [{ json: o }];\nif (typeof r.statusCode !== 'number') return out({ ok: false, error_type: 'transient', error_code: 'NETWORK_ERROR', message: String(r.error?.message || 'LLM request failed').slice(0, 500), retryable: true });\nconst s = r.statusCode, b = r.body || {};\nif (s === 429 || s === 529) {\n  const ra = Number(r.headers?.['retry-after']);\n  return out({ ok: false, error_type: 'api', error_code: 'RATE_LIMIT', message: `LLM ${s}`, retryable: true, retry_after: Number.isFinite(ra) && ra > 0 ? Math.ceil(ra) : null });\n}\nif (s >= 500 || s === 408 || s === 409) return out({ ok: false, error_type: 'api', error_code: 'TEMPORARY_API_ERROR', message: `LLM ${s}`, retryable: true });\nif (s === 401 || s === 403) return out({ ok: false, error_type: 'authentication', error_code: 'INVALID_AUTH', message: `LLM ${s}: check the PA Anthropic credential`, retryable: false });\nif (s >= 400) return out({ ok: false, error_type: 'api', error_code: 'LLM_REQUEST_INVALID', message: `LLM ${s}: ${JSON.stringify(b.error || b).slice(0, 300)}`, retryable: false });\nif (b.stop_reason === 'refusal') return out({ ok: false, error_type: 'policy', error_code: 'POLICY_ERROR', message: `LLM declined (${b.stop_details?.category ?? 'no category'})`, retryable: false });\nif (b.stop_reason === 'max_tokens') return out({ ok: false, error_type: 'validation', error_code: 'LLM_OUTPUT_INVALID', message: 'LLM output was cut off (max_tokens)', retryable: true });\nconst text = (b.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('');\nlet data;\ntry { data = JSON.parse(text); } catch (e) { return out({ ok: false, error_type: 'validation', error_code: 'LLM_OUTPUT_INVALID', message: 'LLM output is not valid JSON', retryable: true }); }\nreturn out({ ok: true, data, model: b.model, usage: { input_tokens: b.usage?.input_tokens ?? null, output_tokens: b.usage?.output_tokens ?? null } });"
+      },
+      "id": "pallm-parse",
+      "name": "응답 해석",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 가짜 LLM (M3 완료 조건: 고정 JSON). 실제 LLM과 같은 { ok, data } 형식으로 돌려준다.\nconst input = $input.first().json;\nconst fixtures = {\n  'prompt_generation.v1': {\n    schema_version: 'prompt_generation.v1',\n    prompt_parts: {\n      subject: 'young Korean woman',\n      appearance: 'long dark brown hair, natural makeup',\n      outfit: 'cream knit sweater',\n      location: 'modern Seoul cafe',\n      action: 'sitting at a window table holding a latte',\n      camera: '35mm portrait photography',\n      lighting: 'soft natural window light',\n      mood: 'calm',\n      style: 'photorealistic, realistic skin texture, high detail'\n    },\n    negative_additions: ['text', 'watermark']\n  },\n  'caption_generation.v1': {\n    schema_version: 'caption_generation.v1',\n    caption: '오늘은 창가 자리에서 라떼 한 잔 ☕ 여러분의 오후는 어떤가요?',\n    hashtags: ['카페', '서울카페', '일상'],\n    language: 'ko'\n  }\n};\nconst data = fixtures[input.schema_version];\nif (!data) return [{ json: { ok: false, error_type: 'validation', error_code: 'LLM_REQUEST_INVALID', message: `no fake fixture for ${input.schema_version}`, retryable: false } }];\nreturn [{ json: { ok: true, data, model: 'fake', usage: null } }];"
+      },
+      "id": "pallm-fake",
+      "name": "가짜 LLM (고정 JSON)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## [PA] LLM - Structured Call (TECH 12.9, 14.7, 14.14)\nWF-002·WF-005가 부르는 하위 Workflow. LLM 공급자를 바꿀 때 이 Workflow만 고친다.\n\n**입력:** `schema_version`, `system`, `user`, `schema` (API용 스키마), `max_tokens`\n**출력:** `{ ok: true, data }` 또는 `{ ok: false, error_type, error_code, message, retryable, retry_after }`\n스키마 전체 검증(길이·형식)은 호출한 Workflow가 한다.\n\n**모드:** `LLM 모드` 노드의 `llm_mode`\n- `fake` (기본): 고정 JSON. M3 완료 조건 (16.8)\n- `claude`: Claude API (`claude-opus-5-5`, effort `low`, Structured Output). 거절되면 서버 쪽 fallback(`fallbacks: \"default\"`)이 다른 모델로 다시 시도한다\n\n**import 후:** `Claude API` 노드에 `PA Anthropic` (Header Auth, Name `x-api-key`) 연결\nLLM Timeout 90초: prompt·caption Job의 Heartbeat 제한(120초)보다 짧게 둔다",
+        "height": 460,
+        "width": 680
+      },
+      "id": "pallm-note",
+      "name": "메모",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -560
+      ]
+    }
+  ],
+  "connections": {
+    "WF-002·005에서 호출": {
+      "main": [
+        [
+          {
+            "node": "LLM 모드 (fake | claude)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM 모드 (fake | claude)": {
+      "main": [
+        [
+          {
+            "node": "실제 LLM?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "실제 LLM?": {
+      "main": [
+        [
+          {
+            "node": "Claude API (Messages)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "가짜 LLM (고정 JSON)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude API (Messages)": {
+      "main": [
+        [
+          {
+            "node": "응답 해석",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "pinData": {}
+}

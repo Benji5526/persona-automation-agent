@@ -1,0 +1,499 @@
+{
+  "name": "[PA] 001 - Content Job Dispatcher",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "pa/content-jobs",
+        "authentication": "headerAuth",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "pa001-webhook",
+      "name": "DB Webhook (content_jobs)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "pa-content-jobs"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.body.record.status }}",
+              "rightValue": "queued",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "c2",
+              "leftValue": "={{ $json.body.old_record?.status ?? '' }}",
+              "rightValue": "queued",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "pa001-if-queued",
+      "name": "queued로 바뀜?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "pa001-schedule",
+      "name": "안전망: 1분마다",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://YOUR-PROJECT-REF.supabase.co/rest/v1/content_jobs?select=id&status=eq.queued&order=priority.desc,created_at.asc&limit=10",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "pa001-list-queued",
+      "name": "queued Content Job 조회",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const id = $json.body?.record?.id ?? $json.id;\nif (!/^[0-9a-f-]{36}$/i.test(String(id || ''))) throw new Error(`invalid content job id: ${id}`);\nreturn { json: { content_job_id: id } };"
+      },
+      "id": "pa001-cj-id",
+      "name": "Content Job ID 정리",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR-PROJECT-REF.supabase.co/rest/v1/rpc/claim_content_job",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ p_content_job_id: $json.content_job_id }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "pa001-claim",
+      "name": "claim_content_job",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// 선점에 성공한 Content Job (queued → generating). 0행이면 이 노드까지 오지 않는다.\n// 항상 prompt Job을 만든다. 프롬프트가 이미 있으면 WF-002가 LLM 없이 generation Job으로 넘긴다 (16.8 구현 메모).\nconst cj = $json;\nreturn { json: {\n  p_job_type: 'prompt',\n  p_persona_id: cj.persona_id,\n  p_content_job_id: cj.id,\n  p_worker: 'n8n',\n  p_payload: {},\n  p_priority: cj.priority,\n  p_max_attempts: 3,\n  p_idempotency_key: `prompt:${cj.id}:${cj.run_number}`\n} };"
+      },
+      "id": "pa001-prompt-params",
+      "name": "prompt Job 준비",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR-PROJECT-REF.supabase.co/rest/v1/rpc/create_automation_job",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "pa001-create-prompt",
+      "name": "create_automation_job (prompt)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1200,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR-PROJECT-REF.supabase.co/rest/v1/rpc/log_execution",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ p_job_id: $json.id, p_step: 'DISPATCH', p_service: 'n8n', p_status: 'succeeded', p_input: { workflow: 'WF-001', content_job_id: $json.content_job_id }, p_execution_ref: $execution.id }) }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "pa001-log",
+      "name": "실행 기록: DISPATCH",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1440,
+        0
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "pending",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "pa001-if-pending",
+      "name": "새 prompt Job?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1440,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "return { json: { job_id: $json.id } };"
+      },
+      "id": "pa001-wf002-input",
+      "name": "WF-002 입력",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_WF002_ID",
+          "mode": "id"
+        },
+        "options": {
+          "waitForSubWorkflow": false
+        },
+        "mode": "each"
+      },
+      "id": "pa001-exec-wf002",
+      "name": "WF-002 실행",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        1920,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://YOUR-PROJECT-REF.supabase.co/rest/v1/content_jobs?select=id,persona_id,priority,run_number&status=eq.generating&updated_at=lt.{{ encodeURIComponent($now.minus({ minutes: 5 }).toISO()) }}&order=updated_at.asc&limit=100",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "pa001-list-stuck",
+      "name": "멈춘 generating Content Job 조회",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// 선점 후 prompt Job을 만들기 전에 실패한 Content Job 복구.\n// 같은 idempotency_key라 이미 Job이 있으면 기존 행이 돌아올 뿐 새로 생기지 않는다 (14.17).\nconst cj = $json;\nreturn { json: {\n  p_job_type: 'prompt',\n  p_persona_id: cj.persona_id,\n  p_content_job_id: cj.id,\n  p_worker: 'n8n',\n  p_payload: {},\n  p_priority: cj.priority,\n  p_max_attempts: 3,\n  p_idempotency_key: `prompt:${cj.id}:${cj.run_number}`\n} };"
+      },
+      "id": "pa001-recover-params",
+      "name": "복구용 prompt Job 준비",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR-PROJECT-REF.supabase.co/rest/v1/rpc/create_automation_job",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "pa001-recover-create",
+      "name": "create_automation_job (복구)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        480
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "content": "## [PA] 001 - Content Job Dispatcher (TECH 14.6)\n- 위: Supabase Database Webhook (`content_jobs` INSERT·UPDATE) → `queued`로 바뀐 Job만\n- 가운데: 1분마다 `queued` Content Job 10건 (놓친 Webhook)\n- 아래: 1분마다 5분 넘게 `generating`인 Content Job에 prompt Job이 있는지 확인 (선점 직후 실패 복구, 키가 같아 중복 없음). 새로 생긴 Job은 WF-002의 안전망이 가져간다\n\n`claim_content_job` → prompt Job 생성 (`prompt:{content_job_id}:{run_number}`) → WF-002 호출 (기다리지 않음)\n\n**import 후:** `YOUR-PROJECT-REF` 치환, `WF-002 실행` 노드에서 `[PA] 002 - Prompt Generator` 선택\nCredential: Webhook → `PA Webhook Secret`, Supabase 노드 → `PA Supabase`\nSettings → Error Workflow: `[PA] 006 - Error Handler`",
+        "height": 420,
+        "width": 680
+      },
+      "id": "pa001-note",
+      "name": "메모",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -500
+      ]
+    }
+  ],
+  "connections": {
+    "DB Webhook (content_jobs)": {
+      "main": [
+        [
+          {
+            "node": "queued로 바뀜?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "queued로 바뀜?": {
+      "main": [
+        [
+          {
+            "node": "Content Job ID 정리",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "안전망: 1분마다": {
+      "main": [
+        [
+          {
+            "node": "queued Content Job 조회",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "멈춘 generating Content Job 조회",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "queued Content Job 조회": {
+      "main": [
+        [
+          {
+            "node": "Content Job ID 정리",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Content Job ID 정리": {
+      "main": [
+        [
+          {
+            "node": "claim_content_job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "claim_content_job": {
+      "main": [
+        [
+          {
+            "node": "prompt Job 준비",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "prompt Job 준비": {
+      "main": [
+        [
+          {
+            "node": "create_automation_job (prompt)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "create_automation_job (prompt)": {
+      "main": [
+        [
+          {
+            "node": "실행 기록: DISPATCH",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "새 prompt Job?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "새 prompt Job?": {
+      "main": [
+        [
+          {
+            "node": "WF-002 입력",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "WF-002 입력": {
+      "main": [
+        [
+          {
+            "node": "WF-002 실행",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "멈춘 generating Content Job 조회": {
+      "main": [
+        [
+          {
+            "node": "복구용 prompt Job 준비",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "복구용 prompt Job 준비": {
+      "main": [
+        [
+          {
+            "node": "create_automation_job (복구)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "pinData": {}
+}

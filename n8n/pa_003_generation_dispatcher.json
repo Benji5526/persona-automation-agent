@@ -1,0 +1,261 @@
+{
+  "name": "[PA] 003 - Generation Dispatcher",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "pa/automation-jobs",
+        "authentication": "headerAuth",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "pa003-webhook",
+      "name": "DB Webhook (automation_jobs INSERT)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "pa-automation-jobs"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.body.type }}",
+              "rightValue": "INSERT",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "c2",
+              "leftValue": "={{ $json.body.record.job_type }}",
+              "rightValue": "generation",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "c3",
+              "leftValue": "={{ $json.body.record.status }}",
+              "rightValue": "pending",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "pa003-if-new",
+      "name": "새 generation Job?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "pa003-schedule",
+      "name": "안전망: 1분마다",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://YOUR-PROJECT-REF.supabase.co/rest/v1/automation_jobs?select=id&job_type=eq.generation&status=eq.pending&run_after=lte.{{ encodeURIComponent($now.toISO()) }}&order=priority.desc,created_at.asc&limit=5",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "pa003-list-pending",
+      "name": "대기 중 generation Job 조회",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Webhook 본문(record.id) 또는 조회 결과(id) → job_id\nconst job_id = $json.body?.record?.id ?? $json.id;\nif (!/^[0-9a-f-]{36}$/i.test(String(job_id || ''))) throw new Error(`invalid automation job id: ${job_id}`);\nreturn { json: { job_id } };"
+      },
+      "id": "pa003-job-id",
+      "name": "Job ID 정리",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR-BRIDGE-DOMAIN/v1/jobs",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ job_id: $json.job_id }) }}",
+        "options": {
+          "timeout": 15000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "pa003-bridge",
+      "name": "브릿지: POST /v1/jobs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        120
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// 브릿지 응답 분류 (TECH 12.6, 14.8). DB 상태는 브릿지가 기록하므로 여기서는 쓰지 않는다.\nconst r = $json;\nconst job_id = $('Job ID 정리').item.json.job_id;\nconst status = typeof r.statusCode === 'number' ? r.statusCode : null;\nlet outcome;\nif (status === null) outcome = 'bridge_unreachable';          // PC·터널 꺼짐: Job은 pending으로 남고 안전망이 다시 보냄\nelse if (status === 202) outcome = 'accepted';\nelse if (status === 409) outcome = 'already_claimed';          // 다른 경로가 이미 선점했거나 재시도 대기 중 (정상)\nelse if (status === 503) outcome = 'bridge_unavailable';       // ComfyUI 꺼짐 또는 Worker 중지. 선점하지 않았으므로 attempts 그대로\nelse if (status === 429 && r.body?.error?.code === 'BLOCKED') throw new Error('bridge blocked this IP after repeated token failures: check the PA Bridge credential');\nelse if (status === 429) outcome = 'bridge_rate_limited';\nelse if (status === 401 || status === 403) throw new Error(`bridge auth failed (${status}): check the PA Bridge credential and Cloudflare Access service token`);\nelse throw new Error(`bridge returned unexpected ${status}: ${JSON.stringify(r.body ?? '').slice(0, 300)}`);\nreturn { json: { job_id, outcome, status } };"
+      },
+      "id": "pa003-classify",
+      "name": "응답 분류",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## [PA] 003 - Generation Dispatcher (TECH 14.8)\n- 위: Supabase Database Webhook (`automation_jobs` INSERT) → 즉시 전달\n- 아래: 1분마다 `run_after`가 지난 pending generation Job 5건 (놓친 Job, 재시도 대기, Heartbeat 회수)\n\n브릿지에는 **job_id만** 보낸다. 202면 끝 (GPU 작업은 Async, 결과는 WF-004 콜백).\n409·503·429·연결 실패는 정상 흐름이다. Job은 pending으로 남고 안전망이 다시 보낸다. 401·403·그 밖의 응답만 오류로 올려 WF-006이 기록한다.\n\n**import 후:** `YOUR-PROJECT-REF`, `YOUR-BRIDGE-DOMAIN` 치환\nCredential: Webhook → `PA Webhook Secret` (Header Auth), 조회 → `PA Supabase`, 브릿지 → `PA Bridge` (Custom Auth: X-Bridge-Token + CF-Access 2개)\nSettings → Error Workflow: `[PA] 006 - Error Handler`",
+        "height": 400,
+        "width": 660
+      },
+      "id": "pa003-note",
+      "name": "메모",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -480
+      ]
+    }
+  ],
+  "connections": {
+    "DB Webhook (automation_jobs INSERT)": {
+      "main": [
+        [
+          {
+            "node": "새 generation Job?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "새 generation Job?": {
+      "main": [
+        [
+          {
+            "node": "Job ID 정리",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "안전망: 1분마다": {
+      "main": [
+        [
+          {
+            "node": "대기 중 generation Job 조회",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "대기 중 generation Job 조회": {
+      "main": [
+        [
+          {
+            "node": "Job ID 정리",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Job ID 정리": {
+      "main": [
+        [
+          {
+            "node": "브릿지: POST /v1/jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "브릿지: POST /v1/jobs": {
+      "main": [
+        [
+          {
+            "node": "응답 분류",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "pinData": {}
+}

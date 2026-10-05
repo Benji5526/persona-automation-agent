@@ -1086,7 +1086,7 @@ n8n을 자동화 Orchestrator로 쓴다. n8n Workflow는 가능한 한 **Busines
 Supabase → Pending Job Detection → Job Claim → Python Bridge → ComfyUI → Result → Supabase
 ```
 
-(✅ `n8n/01_media_dispatch.json`, `n8n/02_media_done.json`으로 구현됨)
+(✅ M3 `n8n/pa_001`~`pa_006` Workflow로 구현됨, TECH 16.8)
 
 **6. Python Local Execution**
 
