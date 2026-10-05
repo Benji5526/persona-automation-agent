@@ -2254,7 +2254,7 @@ n8n Workflow는 하나의 거대한 Workflow로 만들지 않고 **기능별로 
 | WF-012 | AI Strategy Runner ⚙️ | V2 | `decision` Job (수동·매일 09:00·이벤트) | Decision Context → LLM → `ai_decisions` → 검증·승인 → Content Job 생성 (`source = 'agent'`, 30.15) |
 | WF-013 | Fan Message Processor ⚙️ | V2 | SNS Webhook + 안전망 Polling + `reply_draft` Job | 댓글·DM 수집, 응답 초안 (31.5) |
 | WF-014 | Fan Memory | V2 | `memory` Job | Memory 추출·저장 (31.12) |
-| WF-015 | Autonomous Operation Loop | Long-term | Schedule | Observe → … → Learn |
+| WF-015 | Autonomous Operation Controller ⚙️ | V2b | Schedule (30분) | 이벤트 감지 → `decision` Job 생성만 (실행은 기존 Workflow, 32.2) |
 | WF-016 | Token Refresh | V1 | Schedule (매일) | 만료가 가까운 SNS 장기 토큰 갱신 → Vault (20.3) |
 | WF-017 | Fan Reply Sender | V2 | `reply_send` Job | 전송 전 검사 → SNS Reply (31.5) |
 
@@ -7398,7 +7398,7 @@ PRD 8.10에서 AI Decision(L3)은 **V2**다. V1은 "모든 게시물을 사람�
 |---|---|---|
 | `MANUAL_TRIGGER` | Lovable [AI 전략 실행] → RPC `request_decision_run(p_persona_id, p_platform)` | V2a |
 | `DAILY_SCHEDULE` | 매일 09:00 (`app_settings.agent.daily_run_time`, 29.20 timezone). WF-011 분석(08:00) 뒤 | V2a |
-| `VIRAL_DETECTED` | 24h Snapshot에서 🔥 High Performer (29.8) | V2b |
+| `VIRAL_DETECTED` | 24h Snapshot에서 🔥 High Performer (29.8). 이벤트 3종은 WF-015가 감지한다 (32.2) | V2b |
 | `UNDERPERFORMANCE` | 최근 게시물 3개 연속 ⚠️ Underperformer | V2b |
 | `QUEUE_EMPTY` | 앞으로 48시간 안에 예약·승인된 Post가 없음 | V2b |
 | `POST_PUBLISHED`, `PERFORMANCE_THRESHOLD`, `CONTENT_SHORTAGE`, `ACCOUNT_EVENT` | 두지 않는다 ⚙️: 게시마다 실행은 너무 잦고, 나머지 둘은 위 VIRAL·UNDER·QUEUE_EMPTY와 같다. 계정 이벤트(토큰 만료)는 AI가 아니라 알림(WF-010) 대상이다 | – |
@@ -7554,7 +7554,7 @@ PRD 8.10에서 AI Decision(L3)은 **V2**다. V1은 "모든 게시물을 사람�
 
 **자동\*의 조건** (하나라도 어긋나면 승인 대기로 보낸다)
 
-- AI Confidence ≥ 0.6 (원안 30.11: Low면 Human Review)
+- AI Confidence ≥ 0.8 ⚙️ (32.5에서 원안 32.23에 맞춰 0.6 → 0.8. 0.6~0.8은 승인 대기, 0.6 미만은 "참고용" 승인 대기)
 - 근거 `evidence_refs` 중 표본 수준이 보통 이상이고 |`delta_pct`| ≥ 20%인 것이 있음 (29.12)
 - 충돌 없음 (30.10)
 - `app_settings.agent_enabled = true`
@@ -7740,7 +7740,7 @@ Trigger (DB Webhook: decision Job / Schedule 09:00 / 안전망 Polling)
 | 영역 | V2a | V2b |
 |---|---|---|
 | DB | `ai_decisions`(30.7), `content_jobs.ai_decision_id` FK, `decision` job_type·부모 제약 예외, `approvals.ai_decision_id`·`decision` 유형, `personas.agent_permission_level`, `app_settings.agent`·`agent_enabled`·`limits.agent`, `request_decision_run`, `resolve_ai_decision`, `get_ai_decision_detail`, `get_decision_context`, `record_ai_decisions`, `private.execute_ai_decision`, `evaluate_ai_decisions` cron, 전환 규칙에 `ai_decisions` | `personas.posting_plan`, `next_publish_slot`, `approvals.proposed_scheduled_at`, `run_experiment`·`pause_content`·`schedule_post`·`propose_strategy` 실행, 이벤트 Trigger |
-| n8n | WF-012 AI Strategy Runner (Webhook·09:00·안전망), `ai_decision.v1` 검증기 | 이벤트 Trigger (WF-009 뒤 이상치 확인, 큐 확인) |
+| n8n | WF-012 AI Strategy Runner (Webhook·09:00·안전망), `ai_decision.v1` 검증기 | 이벤트 Trigger는 WF-015 (32.2) |
 | Lovable | `/ai-decisions`, Decision Detail, Approvals "AI 결정" 탭, AI 긴급 정지, Persona AI 권한 수준 | 게시 계획 편집, 실험 결과 비교, `/ai-activity` |
 
 ### 30.18 테스트
@@ -7797,7 +7797,7 @@ Trigger (DB Webhook: decision Job / Schedule 09:00 / 안전망 Polling)
 | `/execute` API | 있음 | 없음 | 승인과 실행 사이 틈을 없앰 |
 | 검증 위치 | Validator 하나 | 형식·근거는 n8n, 권한·예산·중복·충돌·실행은 DB 함수 하나 | DB가 최종 강제 (15.18) |
 | Confidence 기준 | High 0.8 / Medium 0.6 | 그대로, 29.12도 0.6으로 맞춤 | 기준 하나로 |
-| Low Confidence | Human Review 가능 | 0.6 미만은 항상 승인 대기 | 확정 |
+| Low Confidence | Human Review 가능 | 0.8 미만은 승인 대기 (32.5에서 0.6 → 0.8) | 확정 |
 | 충돌 해결 | Evidence → Priority → Confidence 비교 | 자동 판정 없이 둘 다 승인 대기 | AI가 매긴 값으로 AI 결정을 고르지 않음 |
 | Trigger | 9종 | MANUAL·DAILY (V2a), VIRAL·UNDER·QUEUE_EMPTY (V2b), 나머지는 없음 | 중복·과다 실행 |
 | 예산 | 하루 10 Job | + 큐 상한 3, AI 전용 LLM 호출 50, Run당 5, 하루 Run 3 | 공용 한도 보호 (원안 30.40) |
@@ -8025,7 +8025,7 @@ V2의 첫 플랫폼은 28장처럼 Instagram이다. 구현 전에 확인할 제�
 **자동 승인 조건** (하나라도 어긋나면 승인 대기)
 
 - 위험 등급이 그 수준의 자동 범위 안 (HIGH·CRITICAL은 어떤 수준에서도 자동 없음)
-- `confidence` ≥ 0.7 (콘텐츠의 0.6보다 높다: 바로 사람에게 전달되는 말이다)
+- `confidence` ≥ 0.8 (콘텐츠 자동 승인과 같은 기준, 32.5)
 - Conversation `active`이고 `minor_suspected`·`injection_attempt`·`spam` 표시가 없음
 - 응답 창 안, 한도 안 (31.10)
 - `app_settings.agent_enabled = true`
@@ -8291,7 +8291,7 @@ V2의 첫 플랫폼은 28장처럼 Instagram이다. 구현 전에 확인할 제�
 | LLM 응답 형식 | `risk_level`·`tone`·`memory_candidates` 포함 | `risk_categories`만, 등급은 시스템. `tone` 없음. Memory는 별도 Job. `no_reply`·`escalate` 추가 | LLM이 자기 위험도를 낮출 수 있음, 실패 격리 |
 | 위험 분류 | 9개 범주 | + `IDENTITY`·`PROMPT_INJECTION`·`MINOR`·`SPAM`, 규칙 분류 + LLM + 채널의 최댓값 | 규칙으로 잡히는 것은 규칙으로 |
 | 응답 권한 | Level 0~5 (`agent_permission_level`과 같은 축) | 별도 `fan_reply_level` 0~3, 원안 L1·L2 합침 | 콘텐츠와 대화는 위험이 다름 |
-| 자동 응답 Confidence | 정하지 않음 | 0.7 이상 | 바로 전달되는 말 |
+| 자동 응답 Confidence | 정하지 않음 | 0.8 이상 (32.5와 같은 기준) | 바로 전달되는 말 |
 | 수정 후 승인 | [Edit] | 허용 (`human_edited`), 30.12의 예외 | 대화는 수정이 기본 동작 |
 | Memory 종류 | 12개 | 7개 | 민감 정보·분류 없는 기억 방지 |
 | Memory 수치 | 중요도 구간만 | 중요도 0.3 미만·확실도 0.6 미만 저장 안 함, 0.6~0.8은 `tentative` | 확정 |
@@ -8305,3 +8305,330 @@ V2의 첫 플랫폼은 28장처럼 Instagram이다. 구현 전에 확인할 제�
 | Trace ID | 새 ID | 기존 연결(Conversation·Job·Decision·Message) | 새 칸 없이 추적 가능 |
 | `/fan-memory` | 별도 화면 | Conversation 상세 패널 + 탭 | 18.3 |
 | AI Decision 연결 | 팬 기억 → 콘텐츠 결정 | 주제별 팬 수 집계만, 단독으로는 자동 승인 근거가 안 됨 | 개인정보, 말한 관심 ≠ 실제 반응 |
+
+---
+
+## 32. Autonomous Operation Loop (V2b·Long-term) ✅
+
+> 29~31장의 시스템을 하나의 순환으로 잇는다. 이 장은 새 구성 요소를 거의 만들지 않는다. 루프의 각 단계가 이미 어디서 돌아가는지 정리하고, 원안에서 열려 있던 부분(WF-015의 역할, 이벤트 처리 방식, 진동 방지, 전체 긴급 정지, Persona 운영 상태, Level 4 승급 조건, 실험 평가, 비용 추적)을 정한다. **아직 구현되지 않았다.** ⚙️ 표시는 원안을 조정한 부분이다 (32.16).
+
+### 32.1 루프는 이미 있다: 단계별 담당
+
+원안의 루프는 하나의 거대한 Workflow가 아니라 **DB를 통해 이어진 독립 Workflow들**로 돈다. 각 단계는 앞 단계가 남긴 행(Job, Snapshot, Decision)을 읽어서 시작한다.
+
+| 단계 | 하는 일 | 담당 | 설계 |
+|---|---|---|---|
+| Observe | 큐·게시·성과·팬·계정·Worker·오류 상태 | DB (Source of Truth) | 10장 |
+| Understand | 정규화, 기준선, 차원 분석, 팬 집계 | 분석 SQL·RPC, WF-011 | 29장, 31.18 |
+| Decide | Decision Context → LLM → Decision | WF-012 | 30장 |
+| Validate | 형식·근거 (n8n) + 권한·예산·중복·충돌 (DB) | WF-012, `record_ai_decisions` | 30.8 |
+| Create | Content Job → 프롬프트 → 생성 → 캡션 | WF-001~005, Python, ComfyUI | 14·19장 |
+| Publish | 승인 → 예약 → 게시 | WF-007·008, SNS Adapter | 28장 |
+| Interact | 댓글·DM → 초안 → 전송 → Memory | WF-013·014·017 | 31장 |
+| Measure | 1·6·24·48·168시간 Snapshot | WF-009 | 29.4 |
+| Learn | Decision 평가, 실험 평가 → 다음 Context | `evaluate_ai_decisions`, 32.9 | 30.11 |
+
+원안의 4계층은 9장 아키텍처와 같다: Control Plane(Lovable·Supabase), Intelligence Plane(분석 SQL·LLM·Decision·Memory), Orchestration Plane(n8n), Execution Plane(Python·ComfyUI·RTX 5080·SNS Adapter). **AI는 Execution Plane을 직접 부르지 않는다** (원안 32.12, 11.11).
+
+**Workflow 대응** (원안 32.31의 번호는 예전 목록이다 ⚙️. 14.3이 정본)
+
+| 원안 | 현재 |
+|---|---|
+| 001 Content Dispatcher, 002 Image Generation | WF-001 Content Job Dispatcher, WF-002 Prompt Generator, WF-003 Generation Dispatcher, WF-004 Result Handler, WF-005 Caption |
+| 003 Generation Monitor, 004 Retry Handler | 만들지 않음. 재시도는 DB 함수, 멈춘 Job은 pg_cron (14.3) |
+| 005 Error Handler | WF-006 |
+| 006 Social Publisher, 007 Scheduled Post Dispatcher | WF-007, WF-008 |
+| 008 Social Token Monitor | WF-016 Token Refresh |
+| 009 Performance Collector | WF-009 |
+| 010 AI Strategy Runner | WF-012 (010은 Notification) |
+| 011 Fan Message Processor, 012 Fan Response Sender, 013 Fan Memory Processor | WF-013, WF-017, WF-014 |
+| 020 Autonomous Operation Controller | **WF-015** (32.2) |
+
+### 32.2 WF-015 Autonomous Operation Controller ⚙️
+
+원안의 Master Controller(`[PA] 020`)는 14.3에 이미 있는 **WF-015**로 둔다. 원안처럼 **직접 실행하지 않고, 무엇을 돌릴지만 정한다.** 구체적으로는 "지금 Decision Run을 만들어야 하는가"를 판단하는 감지기다.
+
+```text
+Schedule (30분)
+ → 전역 스위치 확인 (agent_enabled, 32.6)
+ → 대상 Persona: active, agent_paused = false, agent_permission_level ≥ 1
+ → Persona마다 detect_operation_events(persona_id)   (DB 함수, 결정적)
+     ├ VIRAL_DETECTED     새 24h Snapshot이 🔥 (29.8)
+     ├ UNDERPERFORMANCE   최근 3개 연속 ⚠️
+     └ QUEUE_EMPTY        48시간 안 예약·승인 Post 없음 + 콘텐츠 부족 (32.4)
+ → 시스템 상태 확인: Worker Online, LLM 하위 Workflow 최근 성공, 계정 active
+     └ 나쁘면 건너뜀 (기록만)
+ → 이벤트마다 request_decision_run(trigger) → decision Job (멱등 키로 같은 이벤트 1회)
+ → 실행 결과는 기다리지 않고 종료
+```
+
+- 원안 흐름의 "Run AI Decision Engine → Validate → Create Action Jobs → Execute → Monitor → Collect Results → Update Learning"은 WF-015 안에 두지 않는다. 각각 WF-012, `record_ai_decisions`, WF-001 이후, WF-009, `evaluate_ai_decisions`가 이미 한다. 하나로 묶으면 한 곳의 실패가 루프 전체를 멈춘다 (원안 32.35).
+- `DAILY_SCHEDULE`(09:00)과 `MANUAL_TRIGGER`는 30.4대로 WF-012가 직접 받는다. WF-015는 V2b의 이벤트 실행만 맡는다.
+- WF-015가 멈춰도 매일 실행·수동 실행·기존 큐·게시·수집·팬 응답은 그대로 돈다.
+
+### 32.3 이벤트와 Observation Snapshot ⚙️
+
+**Event Bus는 만들지 않는다** (원안 32.19). 이벤트는 이미 DB의 행과 상태 변화로 존재하고, 받는 쪽도 정해져 있다.
+
+| 원안 이벤트 | 실제 처리 |
+|---|---|
+| `POST_PUBLISHED` | `complete_publish`가 `analytics` Job 5개 예약 (28.8) |
+| `PERFORMANCE_SPIKE`, `VIRAL_DETECTED`, `UNDERPERFORMANCE`, `PERFORMANCE_THRESHOLD` | WF-015 → `decision` Job |
+| `QUEUE_EMPTY`, `CONTENT_SHORTAGE` | WF-015 → `decision` Job (하나로 합침) |
+| `FAN_MESSAGE_RECEIVED` | WF-013 (Webhook) |
+| `FAN_ACTIVITY` | Decision 트리거가 아니다. 매일 실행의 `fan_signals`로 들어간다 (31.18) |
+| `TOKEN_EXPIRING`, `ACCOUNT_EVENT` | WF-016, 실패 시 WF-010 알림 |
+| `SYSTEM_EVENT` | WF-010 알림, WF-015는 건너뜀 |
+| `DAILY_SCHEDULE`, `MANUAL_TRIGGER` | WF-012 (30.4) |
+
+이벤트 감지는 `detect_operation_events`의 SQL 조건이고, 같은 이벤트로 두 번 실행되지 않는 것은 `decision` Job의 멱등 키(`decision:{persona_id}:{trigger}:{post_id 또는 날짜}`)가 보장한다. 장기적으로 이벤트 종류가 많아지면 그때 이벤트 테이블을 검토한다.
+
+**Operation Snapshot** (원안 32.5)은 30.5 Decision Context와 같은 것이다. 이름을 따로 두지 않고, 30.5에 다음 칸만 더한다.
+
+| 칸 | 내용 |
+|---|---|
+| `system` | Worker 상태, 연결 계정 상태, 최근 24시간 미해결 오류 수(종류별) |
+| `content_need` | 32.4 계산값 |
+| `experiments` | 진행 중·최근 평가된 실험 (32.9) |
+
+원안 예의 `top_topics`·`weak_topics`는 29.14와 같은 이유로 넣지 않는다 (결론이 아니라 근거를 넘긴다). 원안 32.7의 Context Builder 역할(압축, 선택, 오래된 정보 제거, 중복 제거, 민감 정보 제거, 숫자 검증, 출처 연결)은 각각 29.14(표본·품질 제외, `ref`), 29.15(숫자 금지), 31.18(팬은 집계만)에서 이미 정했다.
+
+### 32.4 우선순위, 예산, 콘텐츠 필요량
+
+**우선순위** (원안 32.9): 원안은 "토큰 만료 9, 시스템 장애 10"처럼 시스템 작업과 콘텐츠 결정을 한 척도에 둔다. 여기서는 **나누어 둔다** ⚙️. 시스템 작업(토큰 갱신, 장애 복구, 수집)은 AI Decision이 아니라 전용 Workflow가 자기 일정으로 처리하고, `automation_jobs`는 `job_type`별로 선점하므로 콘텐츠 Job과 큐를 다투지 않는다. Decision의 1~10 우선순위는 콘텐츠 결정끼리만 비교한다 (Agent 상한 6, 30.6).
+
+**예산** (원안 32.10의 4개)
+
+| 원안 | 현재 |
+|---|---|
+| `daily_content_budget` | `limits.agent.daily_content_jobs` (Persona별 10) + `max_queued` 3 (30.10) |
+| `daily_publish_budget` | `limits.daily_publish_limit` (Persona별 10) + Agent 3 (15.18). V2에서 AI는 게시하지 않으므로 Level 4부터 의미가 있다 |
+| `daily_ai_decision_budget` | `agent.max_runs_per_day` 3, `max_decisions_per_run` 5, `limits.agent.daily_llm_calls` 50 (30.10) |
+| `daily_message_budget` | `limits.fan` (31.10) |
+
+**콘텐츠 필요량** ⚙️ (원안 예의 "Queue + Daily Budget을 함께 확인"을 계산식으로 정한다, V2b)
+
+```text
+content_need = 앞으로 7일 게시 계획 수 (posting_plan.posts_per_week)
+             − (예약·승인된 Post + 게시 전 draft·pending_approval Post + 생성 중·대기 Content Job의 예상 Asset)
+```
+
+- `content_need ≤ 0`이면 `record_ai_decisions`가 `create_content`·`vary_content`·`run_experiment`를 **자동 승인하지 않는다** (승인 대기, 이유 "콘텐츠 충분"). 원안 32.8의 "Queue가 충분하면 NO_ACTION"을 시스템이 강제한다.
+- 게시 계획이 없는 Persona(V2a)는 이 검사를 건너뛰고 30.10 한도만 적용한다.
+
+### 32.5 진동 방지와 안정성 규칙
+
+원안 32.21~32.23. 30장의 규칙에 아래를 더한다.
+
+| 규칙 | 내용 | 원안 |
+|---|---|---|
+| 같은 결정 반복 금지 | `decision_key` 24시간 (30.10) | 32.21 Cooldown 24h |
+| 전략 변경 냉각 기간 ⚙️ | 같은 `setting`의 `propose_strategy`가 승인·적용된 뒤 14일 동안 같은 `setting` 제안은 `duplicate` | 32.21 |
+| 되돌리기 확인 ⚙️ | 최근 14일 안에 실행된 Decision과 **같은 대상·반대 방향**(예: 늘린 주제를 줄임, 바꾼 시간대를 되돌림)이면 자동 승인하지 않는다 (이유 "최근 결정 되돌림") | 32.22 Oscillation |
+| 평가 전 반대 결정 금지 | 같은 대상의 이전 Decision이 아직 `outcome = pending`이면 반대 방향 결정은 승인 대기 | 32.22 |
+| 쏠림 방지 ⚙️ | 최근 7일 Agent Content Job 중 한 `topic_category`가 60%를 넘으면 그 주제의 `create_content`는 승인 대기 (`agent.max_topic_share`) | – (성과 좋은 주제 하나로만 몰리는 것) |
+| 기준선 평활 | 최근 20개 **중앙값** (29.6) | 32.22 Baseline |
+
+**자동 승인 기준 조정** ⚙️ (원안 32.23): 원안의 "Confidence ≥ 0.80이면 자동 가능, 0.60~0.79는 사람 승인, 0.60 미만은 제안만"을 따른다. 30.9의 자동 조건을 **0.6 → 0.8**로 올린다. 표본 기준(10개 이상 + 20% 차이, 30.9)은 원안 "Sample Size < 10이면 전략 변경 안 함"과 같다.
+
+| Confidence | 처리 |
+|---|---|
+| ≥ 0.8 | 다른 자동 조건(30.9, 위 표)을 모두 만족하면 자동 |
+| 0.6 ~ 0.8 | 승인 대기 |
+| < 0.6 | 승인 대기, 화면에 "참고용" 표시 |
+
+### 32.6 운영 상태와 전체 긴급 정지 ⚙️
+
+**Persona 운영 상태** (원안 32.32의 7개): 새 상태 칸 대신 기존 값의 조합으로 표시하고, 칸은 `personas.agent_paused` 하나만 더한다.
+
+| 원안 | 조건 |
+|---|---|
+| `ACTIVE` | `personas.status = 'active'` |
+| `PAUSED` | `agent_paused = true`: 이 Persona의 새 Decision Run·자동 승인·팬 자동 응답 중지 (수동 작업은 됨) |
+| `MAINTENANCE` | `personas.status = 'inactive'` |
+| `AUTONOMOUS` | `agent_permission_level ≥ 2` 또는 `fan_reply_level ≥ 2`, 그리고 멈춘 것 없음 |
+| `HUMAN_REVIEW` | 두 권한 수준이 모두 1 이하 |
+| `EMERGENCY_STOP` | 전역 스위치 중 하나가 꺼짐 (아래) |
+| `ERROR` | 계산값: 연결 계정 `inactive`, 미해결 CRITICAL 오류 |
+
+상태를 칸으로 저장하면 권한 수준·스위치와 어긋날 수 있다. `agent_paused`는 권한 수준 값을 지우지 않고 멈출 수 있게 하려고 둔다.
+
+**전체 긴급 정지** [모든 자동화 멈춤] (원안 32.33): admin RPC `emergency_stop_all()`이 세 스위치를 한 번에 끈다.
+
+| 스위치 | 끄면 | 기존 |
+|---|---|---|
+| `publishing_enabled` | 새 게시 없음 (15.11) | V1 |
+| `agent_enabled` | 새 Decision Run·자동 승인·AI 팬 초안 없음, 안 보낸 자동 승인 팬 응답 취소 (30.13, 31.14) | V2 |
+| `generation_enabled` ⚙️ | WF-001이 새 Content Job을 시작하지 않음, 브릿지가 새 `generation` Job을 선점하지 않음 | **새로 추가** (V1 마이그레이션) |
+
+- **진행 중인 작업은 끊지 않고 끝낸다** (원안 "안전하게 종료"): GPU에서 생성 중인 Job은 완료까지, 플랫폼에 보내는 중인 게시는 checkpoint까지 진행한다. 중간에 끊으면 오히려 중복 게시·고아 파일이 생긴다.
+- **수집은 멈추지 않는다:** 성과 수집(WF-009), 팬 메시지 저장(WF-013), 토큰 갱신(WF-016)은 계속 돈다. 멈추면 데이터를 잃을 뿐 위험을 줄이지 않는다.
+- **다시 켤 때는 스위치마다 따로 켠다.** "모두 다시 시작" 버튼은 두지 않는다 (사고 원인을 확인하지 않고 한 번에 되살리지 않게).
+- 끄고 켤 때마다 `security_events`에 누가·언제를 남긴다.
+
+### 32.7 장애 격리 (Graceful Degradation)
+
+원안 32.35~32.36 "연결되어 있지만 결합되어 있지 않다". 구성 요소가 멈췄을 때 계속 도는 것:
+
+| 멈춘 것 | 계속 되는 것 | 멈추는 것 | 복구 |
+|---|---|---|---|
+| LLM | 이미 만든 프롬프트의 생성, 예약 게시, 성과 수집, 팬 메시지 저장, Operator 직접 답장 | 새 프롬프트·캡션·Decision·팬 초안·Memory | Job 재시도 → 실패분은 [다시 실행] |
+| PC·GPU (브릿지) | 예약 게시, 수집, 팬 기능, Decision (단, 생성 자동 승인 안 함, 30.10) | 생성 | `recover_stale_jobs`, 켜지면 큐 재개 (25장) |
+| n8n 서버 | 브릿지의 이미 받은 생성, Lovable 조회 | 모든 Workflow | 재시작 시 안전망 Polling이 밀린 Job 처리 (26장) |
+| SNS API | 생성, 분석, Decision | 게시·수집·팬 전송 | 재시도, 수집은 `late` 표시 (29.4) |
+| WF-015 | 매일·수동 Decision, 나머지 전부 | 이벤트 실행 | 다음 30분 주기 |
+| Lovable | 모든 백엔드 | 화면·승인 | – (승인 대기는 만료 규칙대로) |
+| Supabase | 없음 (Source of Truth) | 전부 | Supabase 복구 후 각 Workflow 재개. Job은 DB에 있으므로 유실 없음 |
+
+### 32.8 Human-in-the-Loop과 자율 단계
+
+원안 32.24의 방향(Operator는 작업자가 아니라 **감독자**)을 따른다. 사람이 남는 곳: 예외(CRITICAL 팬 대화, 실패), 고위험(게시 승인, 전략 변경), 전략(게시 계획, Persona 정의), 승인.
+
+**자율 단계** (원안 32.25~32.29) ⚙️: 용어가 두 개라 섞이지 않게 정리한다. PRD 8.10의 L0~L5는 **제품 전체의 자율성**이고, 15.19의 `agent_permission_level` 0~5와 31.9의 `fan_reply_level` 0~3은 **Persona별 권한 설정**이다.
+
+| 단계 | PRD 8.10 | `agent_permission_level` | `fan_reply_level` | 원안 |
+|---|---|---|---|---|
+| MVP | L2 (정해진 Workflow 자동 실행) | 없음 | 없음 | L0~L1 |
+| V1 | L2 (게시 전 사람 승인) | 없음 | 없음 | L1~L2 |
+| V2a | L3 시작 | 0~2 | 0~1 | – |
+| V2b | L3 | 0~3 | 0~3 | L2~L3 |
+| Long-term | L4~L5 | 4~5 (32.10 승급 조건) | 4~5 | L4~L5 |
+
+원안의 "MVP L0~L1, V1 L1~L2"는 30.2에서 정한 대로 V2로 옮긴다 (MVP·V1에는 AI Decision이 없다).
+
+### 32.9 Learn: 결정 평가와 실험
+
+**결정 평가**는 30.11 그대로다 (24h 기준선 비율 → `positive`/`neutral`/`negative`/`inconclusive`). 원안 32.17의 수치형 `effectiveness: 0.91`은 두지 않는다 ⚙️. 원안이 스스로 짚었듯 주제·시각·캡션·외부 추세 같은 다른 변수가 섞여 있어서, 소수점 점수는 실제보다 정확해 보인다. 기준선 대비 비교가 Persona 전체의 추세 변화는 어느 정도 걸러준다.
+
+**변수를 분리하는 방법은 실험이다** (`run_experiment`, V2b). 실험 평가 규칙:
+
+| 항목 | 규칙 |
+|---|---|
+| 설계 | 변수 하나(`visual_style` / `posting_time` / `caption_style`)만 다르고 나머지 params는 같은 arm 2~3개 (30.6) |
+| 최소 표본 | arm마다 게시물 3개 이상. 그 전까지 `running` |
+| 측정 | arm별 24h `views` 중앙값 ÷ Persona 기준선 |
+| 판정 | 가장 좋은 arm이 다른 모든 arm보다 20% 이상 높으면 `winner`, 아니면 `no_difference`. 21일 안에 표본을 못 채우면 `inconclusive` |
+| 저장 | `ai_decisions.outcome_detail.experiment` (arm별 수치, SQL 값) |
+| 반영 | 결과는 다음 Decision Context의 `experiments`로 들어간다. 이긴 arm을 기본 전략으로 바꾸는 것은 `propose_strategy`(사람 승인)다. 실험 결과가 자동으로 Persona 설정을 바꾸지 않는다 |
+
+실험 Content Job은 `metadata.experiment = {id, variable, arm}`(30.11)로 구분하고, 29.11 차원 분석에서도 "실험" 표시로 볼 수 있다.
+
+### 32.10 Long-term 권한 승급 조건 ⚙️
+
+28.13에서 "반려율 등 신뢰 지표를 갖춘 뒤 검토"로 미룬 것을 정한다. 세부 Tool 권한과 차단 규칙은 33장에서 확정한다.
+
+**`agent_permission_level` 4 (저위험 자동 게시)로 올릴 수 있는 조건** (모두 만족, Persona별로 admin이 명시적으로 켬)
+
+| 조건 | 기준 |
+|---|---|
+| 운영 기간 | Level 3에서 60일 이상 |
+| 경험 | Agent가 만든 게시물 50개 이상이 사람 승인을 거쳐 게시됨 |
+| 반려율 | 최근 30일 Agent Post 게시 승인 반려율 < 10% |
+| 사고 | 최근 60일 `POLICY_ERROR`, 플랫폼 제재, 게시 후 Operator 삭제 0건 |
+| 결정 품질 | 평가된 Decision 20개 이상, Effectiveness ≥ 50% (30.11) |
+
+- Level 4의 자동 게시 대상도 좁다: 광고·협찬이 아니고, 캡션 검사(28.8 7번)를 통과하고, `content_rules`의 민감 주제가 아니고, Agent 하루 게시 한도(3) 안인 Post만. `publishing_enabled`는 그대로 우선한다.
+- **자동 강등:** Level 4에서 위 사고가 1건이라도 생기거나 7일 반려율이 20%를 넘으면 DB가 Level 3으로 내리고 WF-010으로 알린다. 다시 올리는 것은 사람이 한다.
+- `fan_reply_level` 4~5도 같은 형식(기간, 응답 수, 사람 수정·반려율, CRITICAL 사고 0건)으로 33장에서 정한다.
+
+### 32.11 실행 주기와 하루 흐름
+
+원안 32.20 "Continuous가 곧 무제한 실행이 아니다". 실행 주기와 모든 루프에 걸리는 제한:
+
+| 시각·주기 | 실행 | 담당 |
+|---|---|---|
+| 07:00 | 전날까지의 Decision·실험 평가 | `evaluate_ai_decisions` (pg_cron) |
+| 08:00 | 성과 분석 | WF-011 |
+| 09:00 | 매일 Decision Run | WF-012 |
+| 10분 | 성과 수집 | WF-009 |
+| 30분 | 이벤트 감지 (V2b) | WF-015 |
+| 실시간 | 팬 메시지 | WF-013 |
+| 1분 | 예약 게시 | WF-008 |
+
+| 단계 | 원안 | 현재 |
+|---|---|---|
+| MVP | 매일 1회 | AI Decision 없음 |
+| V1 | 하루 여러 번 | AI Decision 없음 |
+| V2 | Event-driven | V2a 매일 + 수동, V2b + 이벤트 (WF-015) |
+| Long-term | Continuous | WF-015 주기를 줄일 수 있으나 같은 제한(예산, 한도, 권한, 위험도, 냉각 기간)을 그대로 받는다 |
+
+### 32.12 자율 운영 지표 (V2b)
+
+원안 32.37. `get_autonomy_summary(p_persona_id, p_days)`로 SQL 계산하고 `/strategy` 화면(18.3)에 둔다.
+
+| 지표 | 정의 |
+|---|---|
+| Autonomous Cycles | `decision` Job 수 (트리거별) |
+| 결정 상태별 수 | 자동 승인·사람 승인·반려·차단·중복·`invalid` |
+| No-Action Rate | `no_action` ÷ 전체 Decision. 원안처럼 낮을수록 좋은 값이 아니다: AI가 기다릴 줄 아는지 본다 |
+| Decision Success Rate | 30.11 Effectiveness (평가 수 함께) |
+| 평균 Confidence | 실행된 Decision 기준, 등급 분포 |
+| Action Latency | Decision → 실행, Decision → 게시 (중앙값) |
+| Loop Failure Rate | 최종 `failed`인 `decision` Job ÷ 전체 |
+| Recovery Rate | 한 번 이상 실패했다가 성공한 `decision` Job ÷ 실패가 있었던 Job |
+| 사람 검토율 | 승인 대기로 간 비율, 그중 반려 비율 |
+
+### 32.13 비용 추적 (V2b) ⚙️
+
+원안 32.38. 실제 청구 금액이 아니라 **추정치**다.
+
+| 항목 | 측정 | 위치 |
+|---|---|---|
+| LLM | 호출마다 입력·출력 토큰과 모델 | LLM 하위 Workflow가 `execution_logs.output_data.usage`에 기록 |
+| GPU | `generation` Job의 ComfyUI 실행 시간 | `execution_logs.duration_ms` |
+| Storage | Asset 파일 크기 합 | `assets` (V2b에 `file_size` 칸 추가) |
+| SNS API | 호출 수 | `execution_logs` (`service = 'sns'`) |
+
+- 단가는 `app_settings.cost_rates` (모델별 토큰 단가, GPU 시간당 전기·감가 추정, Storage GB 단가). 단가를 바꾸면 과거 추정치도 다시 계산된다 (저장하지 않고 계산).
+- 표시: 하루·Persona별 추정 비용, Decision 하나가 만든 Job들의 비용 합(원안의 Cycle Cost). 비용 기준 한도(예: 하루 $5)는 이후 Cost Management 단계에서 15.18 한도에 더한다.
+
+### 32.14 감사 기록과 추적
+
+원안 32.34(What·Why·When·Who·Based On·Risk·Approval·Result)는 30.14 표가 정본이다. 원안 32.39의 "Job ID, Trace ID, Decision ID"는 새 Trace ID 없이 기존 연결로 따라간다 (31.15와 같은 방식): `decision` Job → `ai_decisions` → `content_jobs.ai_decision_id` → `automation_jobs` → `assets` → `posts` → `performance_metrics` → `outcome`. Decision Detail(30.16)과 `/ai-activity`가 이 연결을 시간순으로 보여준다.
+
+### 32.15 작업 목록과 테스트
+
+| 영역 | V1 | V2b | Long-term |
+|---|---|---|---|
+| DB | `app_settings.generation_enabled`, `emergency_stop_all` | `detect_operation_events`, `personas.agent_paused`, `content_need`, 진동·쏠림 규칙(`record_ai_decisions`), 실험 평가, `get_autonomy_summary`, `cost_rates`, `assets.file_size` | 승급 조건 확인·자동 강등 |
+| n8n | WF-001·브릿지가 `generation_enabled` 확인 | WF-015, LLM 하위 Workflow `usage` 기록 | – |
+| Lovable | Header [모든 자동화 멈춤], 스위치별 상태 | `/strategy` 지표·비용, Persona [AI 일시정지], 운영 상태 표시 | 승급 화면 |
+
+**테스트**
+
+| 경우 | 기대 |
+|---|---|
+| 24h Snapshot이 🔥 | WF-015가 `VIRAL_DETECTED` Run 1개, 다음 주기에 중복 없음 |
+| `content_need ≤ 0`에서 `create_content` (Level 2, Confidence 0.9) | 승인 대기 "콘텐츠 충분" |
+| Confidence 0.7 (Level 2) | 승인 대기 (자동 기준 0.8) |
+| 14일 안 반대 방향 결정 | 자동 승인 안 함 "최근 결정 되돌림" |
+| 한 주제가 7일 Agent Job의 60% 초과 | 그 주제 `create_content` 승인 대기 |
+| `emergency_stop_all()` | 새 게시·Decision·생성 시작 없음, 생성 중 Job은 완료, 수집·팬 메시지 저장 계속, `security_events` 기록 |
+| 스위치 하나만 다시 켬 | 그 기능만 재개 |
+| LLM 하위 Workflow 장애 | Decision·초안 실패, 예약 게시·수집·생성(프롬프트 있는 Job) 계속 |
+| WF-015 비활성화 | 매일 Run 정상 |
+| 실험 arm당 3개 미만으로 21일 | `inconclusive` |
+| Level 4에서 `POLICY_ERROR` 1건 | 자동으로 Level 3, 알림 |
+
+### 32.16 원안 조정
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| Master Controller | `[PA] 020`, Trigger부터 Learning까지 한 흐름 | WF-015, 이벤트 감지 후 `decision` Job만 만듦 | 실행은 기존 Workflow, 한 곳 실패가 루프 전체를 멈추지 않게 |
+| Workflow 목록 | 001~013, 020 | 14.3 번호 (Generation Monitor·Retry Handler 없음) | 이미 정한 구조 |
+| Event Bus | Event Router | 만들지 않음. DB 행·상태 + 전용 Workflow + 멱등 키 | 이벤트 종류가 적다 |
+| 이벤트 11종 | 각각 Trigger | VIRAL·UNDER·QUEUE_EMPTY만 Decision 트리거, 나머지는 기존 Workflow나 집계로 | 30.4 |
+| Operation Snapshot | 새 구조 | 30.5 Decision Context + `system`·`content_need`·`experiments` | 같은 것을 두 번 만들지 않음 |
+| 우선순위 | 시스템 작업과 콘텐츠를 한 척도 | 시스템 작업은 전용 Workflow, Decision 우선순위는 콘텐츠끼리만 | 큐를 다투지 않는 구조 |
+| 콘텐츠 예산 | Queue + Budget 확인 | `content_need` 계산식, 0 이하면 자동 승인 안 함 | 계산 가능하게 |
+| Cooldown | 24h | 같은 결정 24h + 전략 변경 14일 | 전략 효과가 나타날 시간 |
+| Oscillation 방지 | 원칙 | 되돌리기 확인, 평가 전 반대 결정 금지, 주제 쏠림 60% | 규칙으로 |
+| 자동 승인 Confidence | 0.8 이상 | 원안 채택, 30.9를 0.6 → 0.8로 | 원안 32.23 |
+| Persona 운영 상태 | 7개 상태 | 기존 값 조합 + `agent_paused` 하나 | 상태와 권한이 어긋나지 않게 |
+| 긴급 정지 | 4가지 중지 | 세 스위치(`generation_enabled` 추가) 한 번에, 진행 중 작업은 완료, 수집 계속, 개별 재개 | 중복 게시·데이터 유실 방지 |
+| 자율 단계 | MVP L0~1, V1 L1~2 | PRD L와 Persona 권한 수준을 구분, AI Decision은 V2부터 | 30.2 |
+| Effectiveness | 0~1 수치 | 범주(30.11) + 실험으로 변수 분리 | 다른 변수가 섞여 있음 |
+| 실험 | 언급 | arm당 3개, 20% 차이, 21일, 결과 반영은 사람 승인 | 확정 |
+| Level 4 진입 | 언급 없음 | 기간·경험·반려율·사고·결정 품질 조건 + 자동 강등 | 28.13에서 미룬 것 |
+| 비용 | Cycle Cost | 토큰·GPU 시간·파일 크기·호출 수 × 단가 추정, 저장하지 않고 계산 | 단가 변경에 대응 |
+| Trace ID | 새 ID | 기존 FK 연결 | 31.15 |
