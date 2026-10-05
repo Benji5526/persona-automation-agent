@@ -1,6 +1,6 @@
 # Supabase 마이그레이션
 
-설계: [TECH_DESIGN.md](../docs/TECH_DESIGN.md) 10번(DB), 11번(State Machine), 12번(API), 15번(Security)
+설계: [TECH_DESIGN.md](../docs/TECH_DESIGN.md) 10번(DB), 11번(State Machine), 12번(API), 15번(Security), 21번(Supabase 구현 정리)
 
 | 파일 | 내용 |
 |---|---|
@@ -10,6 +10,7 @@
 | `migrations/0004_rpc_worker.sql` | n8n·브릿지가 쓰는 Worker RPC |
 | `migrations/0005_security.sql` | 권한 회수, RLS, 가입 허용 목록, Storage 버킷·정책 |
 | `migrations/0006_cron.sql` | pg_cron: 멈춘 Job 회수 (1분마다) |
+| `migrations/0007_workers_settings.sql` | `worker_status`, 설정 RPC, 오류 해결 RPC |
 | `tests/stubs/supabase_stub.sql` | **로컬 테스트 전용.** 실제 프로젝트에 적용하지 않는다 |
 
 ## 실제 프로젝트에 적용하기 (M0 이후)
@@ -38,7 +39,7 @@
 
 ## 로컬 테스트
 
-Docker 없이 내장 PostgreSQL(`pgserver`)에 Supabase 흉내 스키마와 0001~0005를 적용해 테스트한다. 0006(pg_cron)은 로컬에 확장이 없어 문법만 확인한다.
+Docker 없이 내장 PostgreSQL(`pgserver`)에 Supabase 흉내 스키마와 0001~0007을 적용해 테스트한다. 0006(pg_cron)은 로컬에 확장이 없어 문법만 확인한다.
 
 ```bash
 .venv/Scripts/python -m pip install -r requirements-dev.txt

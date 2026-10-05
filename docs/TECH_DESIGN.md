@@ -5,7 +5,7 @@
 | 기준 문서 | [PRD v1.0](PRD.md) |
 | 최종 수정 | 2026-10-05 |
 | 상태 | v1.0 기술 설계 1차 완성 |
-| 진행 | 9. System Architecture ✅ · 10. Database / ERD ✅ · 11. State Machine ✅ · 12. API Specification ✅ · 13. ComfyUI Workflow Spec ✅ · 14. n8n Workflow Spec ✅ · 15. Security ✅ · 16. Implementation Plan ✅ · 17. UI/UX Spec ✅ · 18. Frontend Spec ✅ · 19. Backend (Python) Spec ✅ · 20. n8n Implementation Spec ✅ |
+| 진행 | 9. System Architecture ✅ · 10. Database / ERD ✅ · 11. State Machine ✅ · 12. API Specification ✅ · 13. ComfyUI Workflow Spec ✅ · 14. n8n Workflow Spec ✅ · 15. Security ✅ · 16. Implementation Plan ✅ · 17. UI/UX Spec ✅ · 18. Frontend Spec ✅ · 19. Backend (Python) Spec ✅ · 20. n8n Implementation Spec ✅ · 21. Supabase Implementation Spec ✅ |
 
 ---
 
@@ -5101,3 +5101,338 @@ AI가 만든 Content Job도 Operator가 만든 것과 **같은 경로(WF-001 이
 | LLM이 정하는 값 | MVP부터 `workflow_id`·Parameter | MVP는 `prompt_parts`만, Workflow 선택은 V2 이후 | 14.7, 13.4 |
 | 권한 수준 | V1에서 Level 2~3 | V2부터 (V1에는 AI Decision 없음) | PRD 단계, 15.19 |
 | Timeout | Python 30초, Monitor 10분 | 브릿지 15초, LLM 90초, Supabase 10~30초 | 202 즉시 응답, Heartbeat 제한 |
+
+---
+
+## 21. Supabase Implementation Specification ✅
+
+> 10번(DB)·11번(State Machine)·12.3~12.5(RPC)·15.3~15.5(권한·Storage)를 실제 SQL로 옮긴 결과를 정리한다. **정본은 `supabase/migrations/0001~0007`**이고, 이 장은 그 구조와 이유를 설명한다. 적용·테스트 방법은 [supabase/README.md](../supabase/README.md). ⚙️ 표시는 확정 설계와 마이그레이션에 맞춰 원안을 조정한 부분이다 (21.20).
+
+### 21.1 목적과 원칙
+
+Supabase는 Source of Truth다. 인증, 데이터, 파일, Job 상태, 실행 기록, 이벤트(Realtime), 권한이 모두 여기 있다.
+
+> **모든 중요한 상태는 Supabase에 있다.** n8n Execution History나 Python 메모리에만 있는 상태는 없다. n8n·브릿지가 재시작되어도 DB만 보고 이어서 진행한다 (19.7, 20.1).
+
+| 원칙 | 구현 |
+|---|---|
+| 기본은 닫고 필요한 것만 연다 (Fail Closed) | 0005가 `anon`·`authenticated`의 모든 권한을 회수한 뒤 칸 단위로 다시 준다 |
+| 상태는 RPC로만 바꾼다 | `status` 칸에는 UPDATE 권한이 없다. 전환은 트리거가 허용 목록으로 검사한다 (21.7) |
+| 규칙은 DB가 강제한다 | CHECK 제약, 전환 Guard, 실행 한도, 잠금 확인을 Frontend·n8n·Python이 아니라 DB 함수가 한다 |
+| 지우지 않고 남긴다 | 외래 키는 대부분 `on delete restrict`. 상태(`archived`, `cancelled`, `resolved`)로 정리한다 (21.17) |
+
+### 21.2 구성
+
+```text
+Supabase
+ ├─ Auth        Google만, 가입 허용 목록 트리거 (21.13)
+ ├─ Postgres
+ │   ├─ public   테이블, Operator·Worker RPC
+ │   └─ private  도우미 함수, 전환 허용표 (API로 노출되지 않음)
+ ├─ Storage     media (공개), persona-private (비공개) (21.14)
+ ├─ Realtime    content_jobs, automation_jobs, assets, posts, worker_status (21.15)
+ ├─ pg_cron     recover_stale_jobs 1분 (0006)
+ ├─ pg_net      Database Webhook → n8n (20.4)
+ └─ Vault       SNS 토큰 (V1, 10.9)
+```
+
+### 21.3 마이그레이션 구조 ⚙️
+
+| 파일 | 내용 |
+|---|---|
+| `0001_core_tables.sql` | `private` 스키마, `updated_at` 트리거, MVP 테이블 15개, 제약, 인덱스, Realtime |
+| `0002_state_machine.sql` | 전환 허용표, 전환 Guard 트리거, `state_transitions` 기록, Rollup 트리거 |
+| `0003_rpc_operator.sql` | Lovable이 부르는 Operator RPC, 입력 검증 트리거 |
+| `0004_rpc_worker.sql` | n8n·브릿지가 부르는 Worker RPC, Heartbeat 회수 |
+| `0005_security.sql` | 권한 회수·부여, RLS, 가입 허용 목록, Storage 버킷·정책 |
+| `0006_cron.sql` | pg_cron 등록 (로컬 테스트에서는 건너뜀) |
+| `0007_workers_settings.sql` | `worker_status`, 설정 RPC, 오류 해결 RPC (18.19) |
+
+원안은 테이블마다 파일을 나눠 17개로 둔다. 현재는 **관심사별 7개**다. 테이블·트리거·권한이 서로 참조해서, 테이블별로 나누면 파일 사이 순서 의존이 더 복잡해진다. 문제가 생긴 위치는 파일이 아니라 **테스트 이름**으로 찾는다 (`tests/db`, 21.19).
+
+적용: `supabase db push` (supabase/README). 이미 적용한 마이그레이션은 고치지 않고 다음 번호 파일을 추가한다.
+
+### 21.4 공통 규칙
+
+| 항목 | 규칙 | 원안과 차이 |
+|---|---|---|
+| 이름 | 테이블 `snake_case` 복수형, 인덱스 `{table}_{col}_idx`, 정책 `{table}_{동작}_{대상}` | 같음 |
+| PK | 주요 Entity는 `uuid default gen_random_uuid()` | 같음. `uuid-ossp` 확장은 쓰지 않는다 ⚙️ (PostgreSQL 13+ 기본 함수) |
+| 기록용 테이블 PK | `execution_logs`, `system_errors`, `state_transitions`, `security_events`는 `bigint generated always as identity` ⚙️ | 외부에 ID를 노출하지 않고 행이 많아 작은 키가 낫다. 이 테이블은 RLS로 소유자만 읽는다 |
+| 시각 | 모든 시각은 `timestamptz not null default now()` | 원안은 `null` 허용 |
+| `updated_at` | 바뀌는 테이블마다 `private.set_updated_at()` BEFORE UPDATE 트리거 | 함수가 `private` 스키마에 있어 API로 호출할 수 없다 |
+| 상태 칸 | `text not null` + 소문자 값 `CHECK` | 원안 대문자 값 대신 11번 값 (21.6) |
+| JSON 칸 | `jsonb not null default '{}'` (목록은 `'[]'`) | `null`과 빈 값 두 가지가 생기지 않게 |
+| 길이·범위 | 사용자 입력 칸마다 `CHECK` (예: `topic` 500자, `priority` 1~10) | 21.8 |
+| 함수 | `security definer` + `set search_path = ''`, 테이블 이름은 `public.` 붙여 씀 | search_path 공격 방지 |
+
+**UUID를 쓰는 이유**는 원안과 같다. 예측할 수 없어 ID 나열 공격이 어렵고, n8n·Python·Storage 경로에서 같은 ID로 추적한다. Asset ID는 브릿지가 업로드 전에 만든다 (12.5).
+
+### 21.5 테이블 (MVP)
+
+| 테이블 | 역할 | 주요 칸 |
+|---|---|---|
+| `app_settings` | 시스템 설정 | `allowed_emails`, `limits`, `publishing_enabled`, `retry_backoff_seconds`, `heartbeat_timeout_seconds` |
+| `users` | `auth.users`와 1:1 프로필 | `email`, `display_name`, `avatar_url`, `role` (`operator`·`admin`) |
+| `personas` | Persona | `name`, `slug`(사용자별 unique), 성격·말투·규칙·`visual_settings` JSON, `status` |
+| `persona_assets` | Visual Identity 파일 | `asset_type`, `name`, `storage_path`, `is_active` |
+| `content_jobs` | 무엇을 만들 것인가 | `content_type`, `topic`, `prompt`, `prompt_parts`, `workflow`, `params`, `input_images`, `variants`, `platform`, `priority`, `run_number`, `status` |
+| `automation_jobs` | 어떻게 실행할 것인가 | `job_type`, `worker`, `claimed_by`, `idempotency_key`, `attempts`, `run_after`, `locked_at`, `heartbeat_at`, `payload`, `result`, `error_*` |
+| `assets` | 생성 결과물 | Storage 위치, URL, 크기, `prompt`, `workflow`, `generation_metadata`, `status` |
+| `social_accounts` | SNS 계정 (V1 연동) | `platform`, `account_id`, 토큰 **Vault secret id**, `token_expires_at` |
+| `posts` | 게시물 (MVP는 초안) | `caption`(2,200자), `hashtags text[]`(30개), `status`, 게시 결과 |
+| `execution_logs` | 단계별 실행 기록 | `step`, `service`, `status`, `input_data`, `output_data`, `duration_ms`, `execution_ref` |
+| `system_errors` | 오류 | `error_type`, `error_code`, `retryable`, `resolved` |
+| `state_transitions` | 상태 변경 감사 기록 | 객체, 이전·다음 상태, `actor_type`, `reason` |
+| `comfy_workflows` | 로컬 Registry 사본 | `params`(범위), `inputs`, `enabled` |
+| `security_events` | 보안 이벤트 | 인증 실패, 한도 초과 등 (15.22) |
+| `worker_status` | 브릿지·GPU 상태 (0007) | `last_seen_at`, `comfyui_ok`, GPU 정보 |
+
+원안과 다른 주요 칸 ⚙️:
+
+- **자식 테이블에 `persona_id`를 둔다** (`automation_jobs`, `assets`, `posts`, `system_errors`, `state_transitions`). RLS가 `content_jobs`를 거쳐 JOIN하지 않고 한 단계로 소유자를 확인한다 (21.10).
+- `content_jobs`의 `retry_count`·`max_retries` 대신 `run_number`(회차)를 둔다. 재시도 횟수는 단계별로 `automation_jobs.attempts`가 센다.
+- `automation_jobs.content_job_id`는 `null`을 허용한다. V1의 `publish`·`analytics` Job은 Post에 붙기 때문이다 (`post_id`, 둘 중 하나는 필수).
+- `automation_jobs`에 `run_after`(재시도 대기), `heartbeat_at`, `claimed_by`, `payload`·`result`, `idempotency_key`(unique)가 처음부터 있다.
+- `execution_logs.execution_ref`: n8n 실행 ID 또는 ComfyUI prompt_id (20.13).
+- `posts.hashtags`는 `text[]`이다 (원안 `jsonb`). 개수 CHECK를 걸 수 있다.
+
+### 21.6 상태 값 ⚙️
+
+11번과 마이그레이션 CHECK가 정본이다. Frontend는 `src/lib/status.ts`에 같은 값을 둔다 (18.6).
+
+| 객체 | 값 | 원안 |
+|---|---|---|
+| Persona | `active`, `inactive` | `ACTIVE`, `PAUSED`, `ARCHIVED` → 보관은 `inactive` |
+| Content Job | `draft`, `queued`, `generating`, `ready`, `published`, `failed`, `cancelled` | `PENDING`→`queued`, `GENERATED`→`ready`. `REVIEW`·`APPROVED`·`SCHEDULED`·`PUBLISHING`은 **Post·Approval 상태**로 옮김 |
+| Automation Job | `pending`, `processing`, `done`, `failed`, `cancelled` | `CLAIMED`·`RUNNING`→`processing`, `SUCCEEDED`→`done`, `RETRY_WAIT`→`pending`+미래 `run_after`, `DEAD`→`failed` (20.11) |
+| Asset | `generated`, `approved`, `rejected`, `archived` | `GENERATING`·`PROCESSING`·`FAILED` 없음: 실행 후 검증을 통과한 파일만 행이 생긴다 (19.15). `REVIEW`는 V1 Approval |
+| Post | `draft`, `pending_approval`, `approved`, `scheduled`, `publishing`, `published`, `failed`, `rejected`, `cancelled` | 승인 흐름(V1) 상태 추가 |
+
+Content Job에 게시 단계 상태를 넣지 않는 이유: Content Job 하나에서 Asset이 여러 개, Asset 하나에서 Post가 여러 개(플랫폼별) 나온다. 게시 상태는 Post마다 다르므로 Post에 둔다 (11.2).
+
+### 21.7 상태 전환 강제 ⚙️
+
+원안은 장기적으로 `transition_content_job(job_id, new_status)` 같은 범용 RPC를 둔다. 현재는 **두 겹으로** 막는다.
+
+```text
+① 행동별 RPC        create_content_job, cancel_content_job, claim_*, complete_*, fail_* …
+                    호출자(Operator / service_role)와 현재 상태를 확인하고 status를 바꾼다
+② 전환 트리거 (0002) BEFORE INSERT OR UPDATE OF status
+                    private.allowed_transitions에 (객체, 이전, 다음)이 없으면 거부 — service_role도 예외 없음
+                    + Guard: queued는 topic·prompt 중 하나 필수, ready는 유효 Asset 1개 이상, published는 외부 ID 필수 …
+```
+
+| 장치 | 내용 |
+|---|---|
+| 감사 기록 | 모든 상태 변경을 `state_transitions`에 남긴다 (누가: `operator`·`n8n`·`python`·`system`, 이유) |
+| 누가 바꿨는지 | Operator는 `auth.uid()`, n8n·Python은 요청 헤더 `x-actor`, 내부 Rollup은 `system` |
+| Rollup | 하위 상태 변화가 상위에 반영된다 (11.9 R1~R8). 예: generation `done` → Content Job `ready` |
+| 범용 전환 RPC | 두지 않는다. "Python이 승인 상태로 바꾸는" 같은 일은 그런 RPC가 없어서 불가능하고, 트리거가 한 번 더 막는다 |
+
+원안 21.36의 전환표는 11.3(Content Job)·11.8(Post)·11.10(Approval)로 나뉘어 있다.
+
+### 21.8 제약과 Unique
+
+| 종류 | 예 |
+|---|---|
+| 범위 | `priority between 1 and 10`, `variants between 1 and 4`, `max_attempts between 1 and 10`, `attempts >= 0`, `width > 0` |
+| 길이 | `topic` 500자, `prompt` 4,000자, `caption` 2,200자, `hashtags` 30개, Persona `name` 1~100자 |
+| 형식 | `slug ~ '^[a-z0-9-]{1,60}$'`, `workflow ~ '^[a-z0-9_]+$'` |
+| 불변식 | `published` Post는 `external_post_id` 필수, `scheduled` Post는 `scheduled_at` 필수, Automation Job은 `content_job_id`·`post_id` 중 하나 필수 |
+| Unique | `personas (user_id, slug)`, `social_accounts (platform, account_id)`, `assets.storage_path`, `automation_jobs.idempotency_key` |
+| 부분 Unique | `automation_jobs_one_active_step`: 같은 Content Job의 prompt·generation이 동시에 둘 이상 `pending`·`processing`일 수 없다 |
+
+원안의 `posts (platform, external_post_id)` Unique는 V1 게시 마이그레이션에서 추가한다 (게시 중복 방지, 20.18).
+
+### 21.9 Index ⚙️
+
+원안처럼 `status` 하나에 일반 인덱스를 거는 대신, **실제 조회 조건에 맞춘 부분 인덱스**를 쓴다. 대부분의 행은 `done`·`ready`라서, 처리할 행만 담은 인덱스가 작고 빠르다.
+
+| 인덱스 | 쓰는 곳 |
+|---|---|
+| `automation_jobs (job_type, priority desc, created_at) where status = 'pending'` | `claim_next_automation_job`, WF-003 안전망 |
+| `automation_jobs (heartbeat_at) where status = 'processing'` | `recover_stale_jobs` |
+| `content_jobs (priority desc, created_at) where status = 'queued'` | WF-001 안전망 |
+| `posts (scheduled_at) where status = 'scheduled'` | WF-008 (V1) |
+| `execution_logs (automation_job_id, created_at)` | Job Detail 타임라인 |
+| `system_errors (persona_id, created_at desc)`, `state_transitions (entity_type, entity_id, created_at)` | Error Center, 활동 기록 |
+| 모든 외래 키 칸 (`persona_id`, `content_job_id`, `asset_id` …) | RLS 확인, JOIN, `restrict` 검사 |
+
+JSONB GIN 인덱스는 지금 만들지 않는다. 원안과 같이 실제 조회 패턴이 생기면 추가한다.
+
+### 21.10 권한: 역할과 RLS
+
+| 역할 | 권한 |
+|---|---|
+| `anon` | 없음 (테이블·함수 모두) |
+| `authenticated` (Lovable, publishable key + 로그인 JWT) | 칸 단위 GRANT + RLS. `status`·`role`·`user_id` 칸은 쓰기 권한 자체가 없다. Operator RPC 실행 |
+| `service_role` (n8n·브릿지, 각자 다른 secret key) | 테이블 전체 + Worker RPC. RLS를 우회하므로 서버에만 둔다 |
+
+Lovable에는 publishable key만 둔다. secret·service_role key는 절대 넣지 않는다 (18.1, 15.6). 원안과 같다.
+
+**RLS 패턴** ⚙️: 모든 자식 테이블에 `persona_id`가 있으므로 한 가지 모양으로 통일한다.
+
+```sql
+create policy assets_select_own on public.assets
+  for select to authenticated
+  using (persona_id in (select p.id from public.personas p
+                         where p.user_id = (select auth.uid())));
+```
+
+- `(select auth.uid())`로 감싸면 행마다 다시 계산하지 않는다 (Supabase 권장).
+- 원안 21.29처럼 `automation_jobs → content_jobs → personas`를 JOIN하지 않는다.
+- Operator가 **쓸 수 있는** 테이블은 `personas`, `persona_assets`, `content_jobs`(`draft`일 때만), `posts`(초안 문구), `users`(표시 이름·아바타)뿐이다. 나머지는 읽기 전용이고, 변경은 RPC로 한다.
+- `app_settings`에는 정책이 없다. 필요한 값은 `get_app_settings()`로만 보이고, 변경은 admin만 `update_app_setting()`으로 한다.
+- 새로 만드는 함수는 기본적으로 닫혀 있다. 0005 이후 마이그레이션에서도 권한을 명시적으로 준다 (테스트로 확인).
+
+### 21.11 RPC
+
+| 구분 | RPC | 호출자 |
+|---|---|---|
+| Operator (12.4) | `create_content_job`, `submit_content_job`, `cancel_content_job`, `retry_content_job`, `regenerate_content_job`, `retry_automation_job`, `archive_asset`, `get_dashboard_summary`, `get_app_settings`, `update_app_setting`, `resolve_system_error` | Lovable (`authenticated`) |
+| Worker 선점 | `claim_content_job`, `create_automation_job`, `claim_automation_job`, `claim_next_automation_job`, `heartbeat_automation_job` | n8n, 브릿지 (`service_role`) |
+| Worker 보고 | `complete_automation_job`, `fail_automation_job`, `log_execution`, `save_prompt_parts`, `register_asset`, `create_post_draft`, `sync_workflow_registry`, `report_worker_status`, `log_security_event` | n8n, 브릿지 |
+| 내부 | `recover_stale_jobs` | pg_cron |
+
+**Atomic Claim** (원안 21.31): 실제 SQL은 20.5에 있다. 원안과 다른 점 ⚙️:
+
+| 원안 | 현재 | 이유 |
+|---|---|---|
+| `claim_automation_job()` 인자 없음, 모든 종류 중 1건 | `claim_next_automation_job(p_job_type, p_worker)`와 `claim_automation_job(p_job_id, p_worker)` | n8n과 Python이 서로 다른 job_type을 가져간다. 특정 Job 선점도 필요 (Webhook·브릿지) |
+| `where attempts < max_attempts` | `where run_after <= now()` | 횟수 판단은 `fail_automation_job`이 한다. 다 쓴 Job은 이미 `failed`라 `pending`에 없다 |
+| `status = 'CLAIMED'` | `processing` + `claimed_by`, `locked_at`, `heartbeat_at` 기록 | 21.6 |
+| 반환 범위 제한은 나중에 | `service_role`에만 EXECUTE | 0005 |
+
+선점 이후 결과를 쓰는 모든 RPC는 `(p_job_id, p_locked_at)`이 맞아야 반영된다. 회수되거나 취소된 Job의 늦은 결과는 버려진다 (11.6).
+
+### 21.12 멈춘 Job 회수 ⚙️
+
+원안은 `locked_at`이 15분 지난 `CLAIMED` Job을 `PENDING`으로 되돌린다. 현재는 **Heartbeat 기준**이다.
+
+```text
+pg_cron 1분 → recover_stale_jobs()
+  status = processing 이고 coalesce(heartbeat_at, locked_at) < now() - job_type별 제한
+   ├─ attempts < max_attempts → pending + run_after = now() + backoff   (HEARTBEAT_TIMEOUT, 재시도)
+   └─ 그 외                    → failed
+  + system_errors 기록
+```
+
+| job_type | 제한 (`app_settings.heartbeat_timeout_seconds`) |
+|---|---|
+| prompt, caption | 120초 (n8n은 Heartbeat를 보내지 않으므로 Workflow 전체 시간 제한) |
+| generation | 180초 (브릿지가 30초마다 Heartbeat) |
+| publish, analytics | 300초 |
+
+`locked_at` 기준이면 15분짜리 정상 GPU 작업과 멈춘 작업을 구분할 수 없다. Heartbeat를 쓰면 긴 작업은 계속 살아 있고, PC가 꺼지면 3분 안에 회수된다. 회수된 Job의 원래 Worker가 뒤늦게 결과를 보내면 잠금이 맞지 않아 버려진다.
+
+### 21.13 인증과 가입 ⚙️
+
+```text
+Lovable → signInWithOAuth(google) → Google → Supabase Auth → auth.users INSERT
+  → on_auth_user_created 트리거 (private.handle_new_user)
+      ├─ app_settings.allowed_emails에 없음 → 예외 → 가입 자체가 취소됨 (Lovable이 안내, 18.4)
+      └─ 있음 → public.users 행 생성 (이름·아바타는 Google 정보)
+```
+
+- Google만 켜고 Email·Phone·Anonymous 로그인은 끈다 (supabase/README 3단계).
+- 원안의 `public.handle_new_user()`는 `private` 스키마로 옮겼다. `public`에 두면 API로 호출할 수 있는 함수가 된다.
+- 원안은 누구나 가입되고 `operator`가 된다. 현재는 1인 운영(PRD)이라 **허용 목록**으로 가입부터 막는다 (15.3). 첫 계정을 `admin`으로 바꾸는 것은 SQL로 한다.
+
+### 21.14 Storage ⚙️
+
+| 버킷 | 공개 | 용도 | 경로 | 쓰기 |
+|---|---|---|---|---|
+| `media` | 공개 (목록 조회 정책 없음) | 생성 결과물, Thumbnail | `persona/{persona_id}/assets/{asset_id}.png`, `…_thumb.webp` | `service_role`(브릿지)만 |
+| `persona-private` | 비공개 | 참조 이미지 (얼굴·스타일) | `persona/{persona_id}/refs/{uuid}.{ext}` | 소유 Operator (RLS) |
+
+- 버킷마다 크기 제한 50MB와 MIME 허용 목록을 둔다.
+- `persona-private` 정책은 경로의 두 번째 칸(`persona_id`)이 자기 Persona인지 확인한다. 원안의 "경로의 `user_id` 확인"과 같은 방식이지만, 소유 단위가 Persona라서 `persona_id`를 쓴다.
+- **생성 결과물은 공개 버킷**이다 (15.13 결정). SNS에 올릴 이미지이고, 주소에 추측할 수 없는 UUID가 들어가며, 목록 조회는 막혀 있다. 원안의 "Private + Signed URL"은 참조 이미지에만 적용한다 (Signed URL 1시간, 18.9).
+- 원안의 `avatars`, `temporary` 버킷은 만들지 않는다. 아바타는 Google URL을 쓰고, 브릿지는 임시 파일을 만들지 않는다 (19.15).
+
+### 21.15 Realtime ⚙️
+
+`supabase_realtime` publication 대상: `content_jobs`, `automation_jobs`, `assets`, `posts` (0001), `worker_status` (0007). Realtime에도 RLS가 적용된다.
+
+원안의 `system_errors`는 넣지 않는다. 오류는 Job 상태 변경(`failed`, 재시도 대기)과 함께 오므로 그 이벤트로 Error Center를 다시 읽으면 된다 (18.8: 이벤트를 받으면 쿼리 무효화). `approvals`는 V1 마이그레이션에서 테이블과 함께 추가한다.
+
+### 21.16 V1·V2 테이블
+
+0001에는 MVP 테이블만 있다. 아래는 해당 단계 마이그레이션에서 추가한다 (10번에 설계가 있다).
+
+| 테이블 | 단계 | 원안과 다른 점 ⚙️ |
+|---|---|---|
+| `performance_metrics` | V1 | `snapshot_hours`(1·6·24·48·168) 칸과 `(post_id, snapshot_hours)` Unique. 원안은 metadata에 둠 (10.11) |
+| `approvals` | V1 | Post 단위 승인, `expires_at`, `expire_approvals()` pg_cron 5분 (11.10) |
+| SNS 토큰 | V1 | **처음부터 Vault**에 저장하고 테이블에는 secret id만 (이미 0001에 칸이 있음). 원안처럼 MVP에 평문 저장 후 나중에 암호화하지 않는다 |
+| `conversations`, `messages` | V2 | 팬 메시지는 신뢰할 수 없는 입력으로 표시 (15.20) |
+| `fan_memories` | V2 | 개인정보 최소 수집·보관 기한 (15.12). 원안의 `PERSONAL_INFO` 종류는 보관 범위를 V2 설계 때 다시 정한다 |
+| `ai_decisions` | V2 | Chain-of-Thought는 저장하지 않고 `reasoning_summary`(500자)·`confidence`(0~1 CHECK)·`action`·결과만 (원안과 같음, 9.8) |
+| `pgvector` | V2 | Fan·Content Memory 검색이 필요해질 때 확장 추가 |
+
+### 21.17 보존과 감사
+
+- 기록 테이블(`execution_logs`, `system_errors`, `state_transitions`, `security_events`)은 지우지 않는다. 오류는 `resolved`로 정리한다 (`resolve_system_error`).
+- 주요 외래 키는 `on delete restrict`다. Content Job·Asset·Post가 있는 Persona는 지울 수 없고 `inactive`로 보관한다. Asset은 `archived`, Job은 `cancelled`로 정리한다.
+- `execution_logs`의 입력·출력·오류는 DB 함수가 한 번 더 비밀값을 가린다 (`private.redact_jsonb`, 15.21).
+- 백업은 15.23을 따른다.
+
+### 21.18 추가 예정: 0008
+
+| 항목 | 내용 | 근거 |
+|---|---|---|
+| LLM 호출 한도 RPC | `reserve_llm_call(p_job_id uuid, p_locked_at timestamptz) returns boolean`. 오늘 호출 수가 `limits.daily_llm_calls_limit` 이상이면 `RATE_LIMITED`(`PT429`), 아니면 카운터 +1. 하루 단위 카운터 테이블(`usage_counters (day, key, count)`)에 저장 | 15.18. n8n LLM 하위 Workflow가 Claude API 호출 전에 부른다 (20.20 미완료 항목) |
+| `posts (platform, external_post_id)` Unique | V1 게시 마이그레이션과 함께 | 21.8 |
+
+0008은 `claude` 모드를 켜기 전에 만든다. 기존 마이그레이션은 고치지 않는다.
+
+### 21.19 테스트와 Definition of Done
+
+`tests/db`는 Docker 없이 `pgserver`(내장 PostgreSQL)에 Supabase 흉내 스키마(`supabase/tests/stubs`)와 0001~0005·0007을 적용해 확인한다. 0006(pg_cron)은 문법만 확인한다.
+
+| 확인 내용 | 테스트 (일부) |
+|---|---|
+| 가입 허용 목록 | `test_signup_rejects_email_not_on_allow_list`, `test_signup_creates_user_row_for_allowed_email` |
+| RLS·칸 권한 | `test_operator_cannot_see_other_operators_data`, `test_operator_cannot_write_status_or_role_directly`, `test_anon_has_no_access`, `test_operator_cannot_call_worker_rpc_or_read_settings` |
+| 전환 강제 | `test_disallowed_transition_is_rejected_even_for_service_role` |
+| 정상 흐름 | `test_happy_path_reaches_ready_with_audit_trail` |
+| Claim·Idempotency | `test_idempotent_job_creation_and_single_claim`, `test_claim_content_job_only_once` |
+| 잠금·재시도·회수 | `test_results_require_the_current_lock`, `test_retryable_failure_backs_off_then_fails_and_rolls_up`, `test_recover_stale_jobs_requeues_then_fails` |
+| 취소 | `test_cancel_cascades_and_discards_late_results` |
+| Storage | `test_storage_private_bucket_is_owner_only`, `test_persona_asset_path_must_stay_in_own_refs_folder` |
+| 함수 기본 닫힘 | `test_functions_created_later_are_closed_by_default` |
+
+| 항목 | 상태 |
+|---|---|
+| 0001~0007 작성, 로컬 테스트 통과 (M1) | ✅ |
+| 실제 Supabase 프로젝트 생성·`db push`·Google 로그인·허용 목록·admin 지정 | ❌ M0 |
+| Security Advisor 경고 없음 확인 | ❌ M0 |
+| 0008 (LLM 호출 한도) | ❌ `claude` 모드 전 |
+| V1·V2 마이그레이션 | 해당 단계 |
+
+### 21.20 원안에서 조정한 부분과 이유
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 마이그레이션 | 테이블별 17개 파일 | 관심사별 0001~0007 | 이미 구현·테스트됨. 테이블·트리거·권한이 서로 참조 |
+| 확장 | `uuid-ossp` | 쓰지 않음 (`gen_random_uuid()`), pg_cron 추가 | PostgreSQL 기본 기능 |
+| 기록 테이블 PK | uuid | `bigint identity` | 외부 노출 없음, 행이 많음 |
+| `updated_at` 함수 | `public.update_updated_at()` | `private.set_updated_at()` | API로 노출하지 않음 |
+| 상태 값 | 대문자, Content Job에 게시 단계 포함 | 11번 소문자 값, 게시 단계는 Post | 21.6 |
+| Persona 상태 | `ACTIVE`·`PAUSED`·`ARCHIVED` | `active`·`inactive` | 10.5. 보관 = 비활성 |
+| `content_jobs` 재시도 칸 | `retry_count`, `max_retries` | `run_number` + 단계별 `attempts` | 단계별 재시도 (20.6) |
+| `automation_jobs` | `content_job_id` 필수, 최소 칸 | `persona_id`, `post_id`, `run_after`, `heartbeat_at`, `claimed_by`, `payload`·`result`, `idempotency_key`, `error_*` | 재시도·회수·V1 게시·RLS |
+| Asset 상태 | `GENERATING`부터 8개 | `generated` 등 4개 | 검증을 통과한 파일만 행이 됨 (19.15) |
+| SNS 토큰 | MVP 평문, 나중에 암호화 | 처음부터 Vault | 나중에 옮기는 단계에서 유출·누락 위험 |
+| `hashtags` | `jsonb` | `text[]` + 개수 CHECK | 형식·개수 강제 |
+| Index | `status` 일반 인덱스 | 조회 조건별 부분 인덱스 | 처리 대상 행만 담아 작고 빠름 |
+| RLS | 자식마다 JOIN | 자식 테이블에 `persona_id`, `(select auth.uid())` | 단순하고 빠름 |
+| Operator 쓰기 | 테이블 직접 INSERT·UPDATE | 칸 단위 GRANT, `status`는 RPC로만 | 11.12, 15.4 |
+| Claim RPC | 인자 없는 `claim_automation_job()` | job_type·worker별, 특정 Job 선점 따로 | 21.11 |
+| Stale 회수 | `locked_at` 15분 | Heartbeat + job_type별 제한, pg_cron 1분 | 긴 작업과 멈춘 작업 구분 (21.12) |
+| 상태 전환 | 나중에 범용 `transition_content_job` | 행동별 RPC + 전환 트리거 + 감사 기록 | 이미 구현, service_role도 우회 불가 |
+| 가입 | 누구나 → `operator` | 허용 목록 트리거, `private` 스키마 | 15.3 |
+| Storage | `assets` 비공개 + Signed URL, `{user_id}/…` 경로 | `media` 공개 + `persona-private` 비공개, `persona/{persona_id}/…` | 15.5, 15.13 결정 |
+| Realtime | `system_errors`, `approvals` 포함 | `worker_status` 포함, `system_errors` 제외, `approvals`는 V1 | 21.15 |
+| V1·V2 테이블 | 0001에 함께 | 단계별 마이그레이션 | 사용하지 않는 테이블을 미리 열지 않음 |
