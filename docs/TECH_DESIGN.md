@@ -4008,6 +4008,7 @@ Frontend가 아는 값은 `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY` �
 | `/social`, `/posts`, `/posts/:id`, `/approvals`, `/analytics` | 13~17 | V1 |
 | `/ai-decisions`, `/ai-activity`, `/conversations`, `/conversations/:id`, `/strategy` | 19~24 | V2 |
 | `/safety` ⚙️ | 33.14 (admin) | V2 |
+| `/experiments`, `/experiments/:id` ⚙️ | 34.14 | V2b |
 
 필터·탭·보기 방식은 URL Query에 둔다. 새로고침하거나 링크를 공유해도 같은 화면이 열린다.
 
@@ -7374,7 +7375,7 @@ PRD 8.10에서 AI Decision(L3)은 **V2**다. V1은 "모든 게시물을 사람�
 | `no_action` | 바꿀 것 없음 | `NO_ACTION` | `none` | – | V2a |
 | `create_content` | Content Job 1개 생성 (주제 분류·스타일·자유 주제) | `CREATE_CONTENT`, `CHANGE_TOPIC`, `CHANGE_STYLE` | `content` | LOW | V2a |
 | `vary_content` | 성과가 좋았던 게시물의 Content Job을 바탕으로 변형 생성 | `REPEAT_PATTERN` | `content` | LOW | V2a |
-| `run_experiment` | 변수 하나만 다른 Content Job 2~3개 (A/B) | `RUN_EXPERIMENT` | `experiment` | MEDIUM (33.3) | V2b |
+| `run_experiment` | 변수 하나만 다른 A/B 실험 생성 (34장) | `RUN_EXPERIMENT` | `experiment` | MEDIUM (33.3) | V2b |
 | `pause_content` | 아직 시작하지 않은 Agent Content Job 취소 | (15.19) | `content` | LOW | V2b |
 | `schedule_post` | 승인 대기 Post에 예약 시각 **제안** (시간대만 고르고 정확한 시각은 Schedule Engine) | `SCHEDULE_CONTENT` | `schedule` | MEDIUM | V2b |
 | `propose_strategy` | 게시 계획(시간대·주당 게시 수)·캡션 규칙 변경 **제안** | `CHANGE_POSTING_TIME`, `CHANGE_FREQUENCY`, `CHANGE_CAPTION` | `strategy` | HIGH | V2b |
@@ -7468,10 +7469,10 @@ PRD 8.10에서 AI Decision(L3)은 **V2**다. V1은 "모든 게시물을 사람�
 | `no_action` | 없음 |
 | `create_content` | `content_type`, `topic_category`, `visual_style`, `topic`, `platform`, `variants`(1~4), (선택) `workflow` |
 | `vary_content` | `source_post_ref`(Context의 `post:` ref), `vary`(`pose` / `background` / `outfit` / `caption`), `topic`, `variants` |
-| `run_experiment` | `variable`(`visual_style` / `posting_time` / `caption_style`), `arms`(2~3개, 각 arm은 그 변수의 값), 나머지는 `create_content`와 같음 |
+| `run_experiment` | `experiment_type`(34.2의 V2b 종류), `control`·`variant`(그 변수의 값 2개), `primary_metric`, 나머지는 `create_content`와 같음 (34.3) |
 | `pause_content` | `content_job_ref` (Context의 대기 중 Agent Job) |
 | `schedule_post` | `post_ref`, `window_ref`(`time:` ref) |
-| `propose_strategy` | `setting`(`posts_per_week` / `posting_windows` / `caption_rules`), `value` |
+| `propose_strategy` | `setting`(`posts_per_week` / `posting_windows` / `caption_rules` / `default_visual_style` / `hashtag_count`), `value`, (선택) 근거 실험 `experiment_ref` (34.9) |
 
 - **프롬프트는 AI Decision이 쓰지 않는다** ⚙️ (원안 30.17 `prompt_strategy`). `topic`·`topic_category`·`visual_style`이 들어간 Content Job이 만들어지면 WF-002가 Persona Context로 기존 방식대로 프롬프트를 만든다. 프롬프트 생성 규칙·검증(12.9 `prompt_generation.v1`)을 한 곳에 둔다.
 - `priority`는 **1~10 정수** ⚙️ (원안 30.8은 0~1, 30.25는 1~10). `content_jobs.priority`와 같은 척도다. Agent Job은 `agent.max_priority`(6)를 넘지 않는다: Operator가 높게 준 Job(7~10)을 AI가 앞지르지 않게 한다.
@@ -7606,7 +7607,7 @@ PRD 8.10에서 AI Decision(L3)은 **V2**다. V1은 "모든 게시물을 사람�
 |---|---|
 | `create_content` | `content_jobs` 1행: `source = 'agent'`, `ai_decision_id`, `status = 'queued'`, `priority = min(priority, 6)`. 기존 DB Webhook → WF-001 |
 | `vary_content` | 원본 게시물의 Content Job을 복사(Workflow·params·`topic_category`·`visual_style`) + `metadata.vary`. 원본 Asset을 참조 이미지로 넣는다 |
-| `run_experiment` | arm마다 Content Job 1개, `metadata.experiment = {id, variable, arm}` |
+| `run_experiment` | `experiments`·`experiment_variants` 생성 → 시작 검사 → 표본 Content Job은 `advance_experiments`가 짝 단위로 만든다 (34.5·34.6) |
 | `pause_content` | 대상 Agent Job `cancel` (아직 `queued`일 때만) |
 | `schedule_post` | Schedule Engine이 고른 시각을 그 Post의 게시 승인 요청에 둔다 (`approvals.proposed_scheduled_at`). Operator가 승인하면 그 시각으로 `scheduled` |
 | `propose_strategy` | 승인되면 Operator 권한으로 `personas.posting_plan` 또는 `content_rules.caption_rules` 갱신 |
@@ -8506,18 +8507,7 @@ content_need = 앞으로 7일 게시 계획 수 (posting_plan.posts_per_week)
 
 **결정 평가**는 30.11 그대로다 (24h 기준선 비율 → `positive`/`neutral`/`negative`/`inconclusive`). 원안 32.17의 수치형 `effectiveness: 0.91`은 두지 않는다 ⚙️. 원안이 스스로 짚었듯 주제·시각·캡션·외부 추세 같은 다른 변수가 섞여 있어서, 소수점 점수는 실제보다 정확해 보인다. 기준선 대비 비교가 Persona 전체의 추세 변화는 어느 정도 걸러준다.
 
-**변수를 분리하는 방법은 실험이다** (`run_experiment`, V2b). 실험 평가 규칙:
-
-| 항목 | 규칙 |
-|---|---|
-| 설계 | 변수 하나(`visual_style` / `posting_time` / `caption_style`)만 다르고 나머지 params는 같은 arm 2~3개 (30.6) |
-| 최소 표본 | arm마다 게시물 3개 이상. 그 전까지 `running` |
-| 측정 | arm별 24h `views` 중앙값 ÷ Persona 기준선 |
-| 판정 | 가장 좋은 arm이 다른 모든 arm보다 20% 이상 높으면 `winner`, 아니면 `no_difference`. 21일 안에 표본을 못 채우면 `inconclusive` |
-| 저장 | `ai_decisions.outcome_detail.experiment` (arm별 수치, SQL 값) |
-| 반영 | 결과는 다음 Decision Context의 `experiments`로 들어간다. 이긴 arm을 기본 전략으로 바꾸는 것은 `propose_strategy`(사람 승인)다. 실험 결과가 자동으로 Persona 설정을 바꾸지 않는다 |
-
-실험 Content Job은 `metadata.experiment = {id, variable, arm}`(30.11)로 구분하고, 29.11 차원 분석에서도 "실험" 표시로 볼 수 있다.
+**변수를 분리하는 방법은 실험이다** (`run_experiment`, V2b). 실험의 설계·배정·판정·반영 규칙은 **34장**이 정본이다 (처음 여기 둔 "arm당 3개, 20% 차이, 21일"은 34.7에서 Variant당 10개, 10% 개선 + Mann-Whitney 검정, 기본 60일로 바꿨다).
 
 ### 32.10 Long-term 권한 승급 조건 ⚙️
 
@@ -8613,7 +8603,7 @@ content_need = 앞으로 7일 게시 계획 수 (posting_plan.posts_per_week)
 | 스위치 하나만 다시 켬 | 그 기능만 재개 |
 | LLM 하위 Workflow 장애 | Decision·초안 실패, 예약 게시·수집·생성(프롬프트 있는 Job) 계속 |
 | WF-015 비활성화 | 매일 Run 정상 |
-| 실험 arm당 3개 미만으로 21일 | `inconclusive` |
+| 실험 Variant당 10개 미만으로 기간 종료 | `inconclusive` (34.7) |
 | Level 4에서 `POLICY_ERROR` 1건 | 자동으로 Level 3, 알림 |
 
 ### 32.16 원안 조정
@@ -8634,7 +8624,7 @@ content_need = 앞으로 7일 게시 계획 수 (posting_plan.posts_per_week)
 | 긴급 정지 | 4가지 중지 | 세 스위치(`generation_enabled` 추가) 한 번에, 진행 중 작업은 완료, 수집 계속, 개별 재개 | 중복 게시·데이터 유실 방지 |
 | 자율 단계 | MVP L0~1, V1 L1~2 | PRD L와 Persona 권한 수준을 구분, AI Decision은 V2부터 | 30.2 |
 | Effectiveness | 0~1 수치 | 범주(30.11) + 실험으로 변수 분리 | 다른 변수가 섞여 있음 |
-| 실험 | 언급 | arm당 3개, 20% 차이, 21일, 결과 반영은 사람 승인 | 확정 |
+| 실험 | 언급 | 34장으로 대체 (Variant당 10개, 10% + 검정, 60일), 결과 반영은 사람 승인 | 확정 |
 | Level 4 진입 | 언급 없음 | 기간·경험·반려율·사고·결정 품질 조건 + 자동 강등 | 28.13에서 미룬 것 |
 | 비용 | Cycle Cost | 토큰·GPU 시간·파일 크기·호출 수 × 단가 추정, 저장하지 않고 계산 | 단가 변경에 대응 |
 | Trace ID | 새 ID | 기존 FK 연결 | 31.15 |
@@ -8995,3 +8985,369 @@ content_need = 앞으로 7일 게시 계획 수 (posting_plan.posts_per_week)
 | Level 4 자동 게시 | 정하지 않음 | 차단 범주 10개 (하한) | 32.10에서 미룬 것 |
 | 팬 응답 수준 | L0~L5 | 상한 3, 2→3 승급 조건, [문제 신고], 자동 강등 | HIGH·CRITICAL·broadcast는 언제나 사람 |
 | `/safety` | 새 화면 | 채택 (admin) | – |
+
+---
+
+## 34. Experimentation & A/B Testing System (V2b) ✅
+
+> AI의 추측을 실제 데이터로 검증하는 증거 생성 시스템이다. 30.3·30.6의 `run_experiment`와 32.9의 실험 평가 규칙을 실험 엔티티로 키우고, 원안에서 열려 있던 부분(통계 판정, 표본 기준, 배정 방법, 사람 승인이 만드는 편향, 외부 요인 처리, 탐색 비율, 결과 반영 경로)을 정한다. **32.9의 실험 규칙은 이 장으로 대체한다.** **아직 구현되지 않았다.** ⚙️ 표시는 원안을 조정한 부분이다 (34.18).
+
+### 34.1 목적, 원칙, 단계
+
+```text
+관찰 (29장 차원 분석: "cinematic이 18% 높다")  ≠  증거
+  → 가설 → 실험 (A: Control / B: Variant, 무작위 배정) → 게시 → 24h 지표 → 비교·검정
+  → 결과 (CONTROL_WINS / VARIANT_WINS / NO_DIFFERENCE / INCONCLUSIVE)
+  → 다음 Decision Context + Operator의 [결과 적용] → 전략 변경 (사람 승인)
+```
+
+원안의 원칙 6개(가설 먼저, 변수 하나, 결론 전 측정, 실험 ≠ 최적화, 억지 승자 없음, AI Confidence ≠ 통계적 유의성)를 그대로 따른다. 특히 마지막 원칙 때문에 **승자 판정에 AI Confidence를 쓰지 않는다** (34.7).
+
+**단계** ⚙️: 원안은 MVP에 실험을 넣지만, 이 시스템에서 실험은 AI Decision(V2)과 Schedule Engine(V2b) 위에 있다.
+
+| 원안 | 현재 |
+|---|---|
+| MVP 범위 (CRUD, 가설, A/B, 지표, 표본, 배정, 판정, UI, 권한, 예산, 멱등, 감사) | **V2b** |
+| V1 추가 (통계적 유의성, 신뢰 구간, 자동 추천, 다중 변형, 자동 일정, 외부 이벤트 감지, Knowledge Decay, ROI) | 통계 검정·외부 요인 감지·자동 일정·자동 추천은 **V2b에 포함** (34.7·34.9). 다중 변형·신뢰 구간·ROI는 이후 |
+| V2 추가 (Bandit, 교차 플랫폼·Persona, 자동 연쇄) | Long-term (34.16) |
+
+### 34.2 실험 종류
+
+원안 34.7의 7종을 실제로 통제·확인할 수 있는지에 따라 나눈다.
+
+| 종류 | 변수 (Variant 설정) | 통제 방법 | 배정 확인 (34.6) | 단계 |
+|---|---|---|---|---|
+| `VISUAL_STYLE` | `visual_style` (Persona 목록, 29.9) | Content Job 칸 | 칸 값 | V2b |
+| `CONTENT_TOPIC` | `topic_category` (Persona 목록) | Content Job 칸 | 칸 값 | V2b |
+| `POSTING_TIME` | 시간대 `time:` ref (29.9 구간) | Schedule Engine (30.11) | `published_at`이 구간 안 | V2b |
+| `CAPTION_STYLE` | `short` / `storytelling` | WF-005에 캡션 지시 전달 | 29.10 길이 구간 | V2b |
+| `CTA_STYLE` | `none` / `question` | WF-005에 캡션 지시 전달 | 29.10 질문형 CTA | V2b |
+| `HASHTAG_STRATEGY` ⚙️ | 해시태그 **개수** 구간 (`0` / `1-5` / `6-15`) | WF-005에 개수 지시 | 29.10 해시태그 수 | V2b |
+| `CONTENT_FORMAT` | Image vs Carousel | – | – | **이후** (V1은 이미지 1장 게시만, 28.9) |
+
+- `HASHTAG_STRATEGY`를 원안의 "Generic vs Niche"가 아니라 개수로 정한다. "니치한 해시태그인가"는 기계적으로 확인할 수 없어서, 실제로 그 조건으로 게시됐는지 검증할 방법이 없다.
+- 원안 34.8의 이후 종류 중 **팬을 대상으로 하는 것(`FAN_INTERACTION_STYLE`, `RESPONSE_TONE`, `PERSONA_BEHAVIOR`)은 두지 않는다** ⚙️. 팬의 감정 반응을 실험하는 것은 조작에 가깝고(원안 34.29 "Sensitive Fan Manipulation"), Persona 행동 실험은 33.3의 "Persona 변경은 제안도 받지 않음"과 충돌한다. `POSTING_FREQUENCY`, `VIDEO_*`, `THUMBNAIL`, `CONTENT_SEQUENCE`는 해당 기능이 생길 때 검토한다.
+
+### 34.3 테이블 ⚙️
+
+원안 34.5·34.10의 두 테이블을 채택하고, 표본 하나하나를 기록하는 `experiment_samples`를 더한다. 원안 34.11처럼 `content_jobs.metadata`에만 연결하면 표본 단위의 멱등·제외 사유·측정값을 남길 곳이 없다. `content_jobs.metadata.experiment`는 파이프라인(WF-005의 캡션 지시 등)이 읽는 용도로 함께 둔다.
+
+**experiments**
+
+| Column | Type | Description |
+|---|---|---|
+| id | uuid PK | Experiment ID |
+| persona_id | uuid FK → personas | Persona |
+| platform | text | 플랫폼 (실험은 플랫폼 하나에서만) |
+| name | text, ≤ 100자 | 이름 |
+| experiment_type | text | 34.2 종류 |
+| hypothesis | jsonb | 구조화된 가설 (원안 34.9): `variable`, `control`, `variant`, `primary_metric`, `direction` |
+| hypothesis_text | text, ≤ 300자 | 화면용 문장 (구조에서 만든다, 숫자 없음) |
+| primary_metric | text | `views` / `engagement_rate` / `shares` / `saves` / `followers_delta` (원안 `FOLLOWER_GROWTH`) |
+| secondary_metrics | text[] | 보조 지표 (같은 목록에서) |
+| min_samples_per_variant | smallint, 기본 10 | Variant별 최소 표본 (34.7) |
+| min_improvement_pct | numeric, 기본 10 | 최소 개선폭 |
+| confidence_target | numeric, 기본 0.90, CHECK 0.80~0.99 | 통계적 확신도 목표 (34.7) |
+| max_duration_days | smallint, 기본 60 | 최대 기간 |
+| max_posts | smallint, 기본 30 | 최대 게시물 (대체 표본 포함) |
+| status | text | 34.4 |
+| result | text, nullable | `control_wins` / `variant_wins` / `no_difference` / `inconclusive` |
+| validity | text, nullable | `valid` / `questionable` / `invalid` (34.8) |
+| result_detail | jsonb | 판정에 쓴 수치 전부 (SQL 값) |
+| source | text | `operator` / `agent` |
+| ai_decision_id | uuid FK → ai_decisions, nullable | AI가 제안한 경우 |
+| created_by | uuid FK → users, nullable | Operator가 만든 경우 |
+| created_at, started_at, ended_at, updated_at | timestamptz | 시각 |
+
+**experiment_variants**
+
+| Column | Type | Description |
+|---|---|---|
+| id | uuid PK | Variant ID |
+| experiment_id | uuid FK | Experiment |
+| variant_key | text | `A` / `B` |
+| role | text | `control` / `variant` |
+| configuration | jsonb | 이 Variant의 설정 (예: `{"visual_style": "natural"}`) |
+| unique | | `(experiment_id, variant_key)` |
+
+원안의 `target_sample_size`·`actual_sample_size`·`status`는 칸으로 두지 않고 `experiment_samples`에서 센다.
+
+**experiment_samples**
+
+| Column | Type | Description |
+|---|---|---|
+| id | uuid PK | ID |
+| experiment_id, variant_id | uuid FK | 실험, Variant |
+| sample_no | smallint | Variant 안의 순번 |
+| content_job_id | uuid FK, unique | 이 표본의 Content Job |
+| post_id | uuid FK, nullable | 게시된 Post |
+| status | text | `pending` / `included` / `excluded` |
+| exclusion_reason | text | 34.6·34.8 |
+| metric_value | numeric | 기준 시점(24h) 주 지표 값 |
+| unique | | `(experiment_id, variant_id, sample_no)` (원안 `experiment:{id}:variant:{id}:sample:{n}`) |
+
+- **V2b는 A/B 두 개만** 지원한다 ⚙️. 30.6의 "arm 2~3개"는 2개로 줄인다. 하루 1~2개 게시하는 계정에서 세 갈래로 나누면 표본을 모으는 데 너무 오래 걸린다.
+
+### 34.4 상태 ⚙️
+
+```text
+draft ──(시작)──▶ running ──(표본 충족 또는 기간 끝)──▶ analyzing ──▶ completed
+  │                 │  ▲
+  └──▶ cancelled    ▼  │ (재개)
+                  paused ──▶ cancelled
+```
+
+- 원안의 `PLANNED`·`READY`는 `draft`로 합친다. 시작 조건(검증 통과, 충돌 없음)을 만족하면 바로 `running`이다.
+- 원안의 `INCONCLUSIVE`는 **상태가 아니라 결과**(`result`)다. `completed`에 `result = 'inconclusive'`가 붙는다.
+- 원안의 `FAILED`는 두지 않는다. 생성·게시가 계속 실패하면 표본이 모이지 않고, 기간이 끝나면 `completed` + `inconclusive`(사유 기록)가 된다. 실패를 결과의 한 종류로 남겨야 "이 실험은 왜 결론이 없나"를 볼 수 있다.
+- AI가 제안한 실험은 `run_experiment` Decision이 승인될 때 `draft`로 만들어지고 곧바로 시작 검사를 받는다. Operator는 `/experiments`에서 직접 만들 수도 있다 (`source = 'operator'`, Decision 승인 없이 시작 검사만).
+
+### 34.5 시작 검사
+
+`start_experiment(p_experiment_id)`가 아래를 확인한다 (원안 34.3의 Experiment Validator).
+
+| 검사 | 기준 |
+|---|---|
+| 가설 구조 | `variable`이 34.2의 V2b 종류, `control`·`variant`가 서로 다르고 Persona 목록 안의 값 |
+| 안전 | 34.10 금지 실험이 아님, `topic_category` 실험이면 두 값 모두 민감 주제가 아님 (33.3) |
+| 충돌 ⚙️ | 같은 Persona·플랫폼에 `running`·`paused` 실험이 없음 (원안: 같은 변수만 충돌) |
+| 권한 | AI 제안이면 `run_experiment` 정책 (33.5, Level 3 이상). Operator 생성은 소유 Persona |
+| 예산 | `max_posts`가 Agent 하루 콘텐츠 한도·생성 한도 안에서 `max_duration_days`에 들어감 |
+| 기준선 | 그 Persona·플랫폼 기준선이 있음 (29.6, 비교 표시에 필요) |
+
+동시 실험을 **변수와 관계없이 하나**로 제한하는 이유: 하루 게시가 적은 계정에서 두 실험이 같은 게시물을 나눠 쓰면, 한 실험의 Variant가 다른 실험의 결과에 섞인다. 서로 다른 변수를 동시에 시험하는 설계(요인 설계)는 표본이 훨씬 많이 필요하다.
+
+### 34.6 배정, 진행, 편향 관리
+
+**배정** (원안 34.14) ⚙️: **2개씩 짝을 지어 짝 안에서 순서를 무작위로** 정한다 (permuted block, 크기 2). 시드는 실험 ID다.
+
+```text
+짝 1: B A   짝 2: A B   짝 3: B A   짝 4: B A   짝 5: A B …
+```
+
+- 완전 무작위(동전 던지기)는 표본이 적을 때 한쪽으로 몰린다 (예: 앞쪽 7개가 전부 B). 짝 단위로 나누면 언제 멈춰도 A와 B의 수가 1개 이상 차이 나지 않고, 시간에 따른 추세(계정 성장, 계절)가 양쪽에 고르게 들어간다.
+- 짝의 두 게시물은 **이웃한 게시 슬롯**에 놓는다. `POSTING_TIME` 실험이 아니면 두 게시물은 같은 시간대에 둔다. `POSTING_TIME` 실험이면 같은 요일 계열(평일·주말)에 둔다 (Schedule Engine, 30.11).
+- 원안의 우선순위(무작위 → 통제된 일정 → 수동 배정)는 위 방식이 무작위와 통제된 일정을 겸한다. 수동 배정은 두지 않는다 (사람이 고르면 편향이 생긴다).
+
+**진행** ⚙️ (원안 34.13): 원안의 `[PA] 014 - Experiment Manager` Workflow 대신(014는 Fan Memory) **pg_cron 함수 `advance_experiments()`**(30분)로 한다. 하는 일이 전부 DB 안의 일(다음 표본 Content Job 만들기, 표본 상태 갱신, 완료 판정, 분석)이라 외부 호출이 없다.
+
+```text
+running 실험마다:
+  다음 짝이 필요하고, 이전 짝이 게시됐거나 끝났고, 탐색 비율(34.11) 안이면
+    → 짝의 Content Job 2개 생성 (source = 실험의 source, metadata.experiment, experiment_samples 2행)
+  게시된 표본의 24h Snapshot이 들어오면 → metric_value, included/excluded
+  Variant마다 included ≥ min_samples_per_variant 이거나, 기간·max_posts 도달 → analyzing → 분석 (34.7)
+```
+
+- 생성은 기존 파이프라인(WF-001 → … → Python → ComfyUI)을 그대로 쓴다 (원안 34.13).
+- 실험 Content Job도 `content_need`(32.4)에 들어간다. 실험 게시물은 평소 게시물을 **대신하는 것**이지 더하는 것이 아니다.
+
+**표본 제외 사유** (`exclusion_reason`)
+
+| 사유 | 조건 |
+|---|---|
+| `non_adherent` | 배정 확인 실패 (34.2 표: 예약이 구간 밖, 캡션이 지시와 다름) |
+| `rejected` | Operator가 Asset·게시를 반려 → **같은 Variant의 대체 표본**을 만든다 |
+| `failed` | 생성·게시 최종 실패 → 대체 표본 |
+| `quality` | 24h Snapshot에 `late`·`decreased`·`partial` (29.4) |
+| `external` | 외부 요인 의심 (34.8) |
+| `sponsored` | 광고·협찬으로 게시됨 (유료 노출은 비교를 깨뜨린다) |
+
+**사람 승인이 만드는 편향** ⚙️: V2에서는 모든 게시를 사람이 승인한다 (28장). Operator가 한쪽 Variant 이미지를 더 자주 반려하면, 남은 표본은 "Operator 마음에 든 것"만 된다. 그래서 Variant별 반려율을 `result_detail`에 남기고, 두 Variant의 반려율 차이가 20%p를 넘으면 `validity = 'questionable'`이다 (34.8).
+
+### 34.7 판정 ⚙️
+
+원안 34.19의 판정식은 "Confidence ≥ Target"을 쓰지만 그 Confidence가 무엇인지 정해져 있지 않고, 원안 34.2 원칙 6은 AI Confidence를 판정에 쓰지 말라고 한다. 그래서 **계산 가능한 통계량을 V2b부터 쓴다.**
+
+| 항목 | 정의 |
+|---|---|
+| 표본 값 | 표본마다 24h Snapshot의 주 지표 (29.11 기준 시점) |
+| 효과 크기 | `improvement = (Variant 중앙값 − Control 중앙값) ÷ Control 중앙값 × 100` |
+| 검정 | **Mann-Whitney U** (순위 기반, 양측). 중앙값과 같은 이유로 바이럴 하나에 흔들리지 않는다 (29.6). p-값은 정규 근사 + 동순위 보정 |
+| 통계적 확신도 | `1 − p`. 화면에는 "우연일 가능성을 얼마나 배제했나"로 설명하고, AI Confidence와 다른 색·이름으로 보여준다 |
+| 우세 확률 | `U ÷ (n_A × n_B)`: 무작위로 하나씩 뽑았을 때 Variant 쪽이 더 높을 확률 (보조 표시) |
+
+| 결과 | 조건 |
+|---|---|
+| `variant_wins` / `control_wins` | 두 Variant 모두 `included` ≥ `min_samples_per_variant`(10) **그리고** \|improvement\| ≥ `min_improvement_pct`(10%) **그리고** 통계적 확신도 ≥ `confidence_target`(0.90) **그리고** `validity ≠ 'invalid'` |
+| `no_difference` | 표본 충족, \|improvement\| < 10% |
+| `inconclusive` | 표본 미충족(기간·`max_posts` 도달), 또는 차이는 10% 이상인데 확신도가 목표에 못 미침, 또는 `validity = 'invalid'` |
+
+- **표본 기준을 올린다:** 32.9의 "arm당 3개, 20% 차이"는 Variant당 **10개**, 개선 **10%** + 검정으로 바꾼다. 3개로는 검정이 의미 없고, 20% 고정 기준은 우연한 차이를 걸러내지 못한다. 원안 34.18의 "20개(10 + 10)"와 같다.
+- **확신도 목표를 0.90으로 둔다** (원안 예 0.80). 표본이 작고 실험을 여러 번 하면 우연히 "이긴" 결과가 쌓인다. 0.80이면 차이가 없어도 최대 다섯 번에 한 번꼴로 승자가 나올 수 있다 (개선폭 조건이 일부 걸러준다). 실험마다 0.80~0.99로 조정할 수 있다.
+- **원안 34.21의 예 그대로**: Control 4.2%, Variant 5.1%, +21.4%, 30/30이어도 확신도가 0.90 미만이면 `inconclusive`이고, 화면은 "차이는 보이지만 아직 확신할 수 없음 → 재실험 제안"으로 보여준다.
+- 판정은 한 번만 한다. `completed`가 되면 결과를 바꾸지 않는다 (멱등, 원안 `experiment-analysis:{experiment_id}`). 결과를 다시 보고 싶으면 새 실험이다.
+- **기준선 비교** (원안 34.22): `result_detail`에 두 Variant 각각의 Persona 기준선(29.6) 대비 비율을 함께 남긴다. Control이 기준선보다 크게 낮거나 높으면(±30%) 화면에 "이 기간 계정 전체 흐름이 달랐음"을 표시한다.
+- 보조 지표는 같은 방법으로 계산해 보여주기만 하고 판정에 쓰지 않는다 (주 지표는 하나, 원안 34.16).
+
+### 34.8 외부 요인과 타당성
+
+원안 34.15. 외부 요인은 **자동 감지**와 **Operator 표시** 두 가지로 받는다.
+
+| 방법 | 조건 | 결과 |
+|---|---|---|
+| 자동 감지 | 표본의 24h `views`가 Persona 기준선의 5배 이상 (29.8의 🔥 2배보다 훨씬 큼) | `excluded` (`external`). 분석은 "제외한 결과"를 기본으로, "포함한 결과"도 함께 보여준다 |
+| Operator 표시 | Post에 [외부 요인 표시]: 유명 계정 공유, 뉴스·추세, 플랫폼 장애, 유료 홍보, 기타 | 같음 |
+
+**타당성** (`validity`)
+
+| 값 | 조건 |
+|---|---|
+| `valid` | 아래에 해당 없음 |
+| `questionable` | 제외 표본이 전체의 20% 이상, 또는 Variant별 반려율 차이 20%p 초과 (34.6), 또는 Control이 기준선과 ±30% 이상 차이 |
+| `invalid` | 제외 표본이 40% 이상, 또는 실험 도중 Persona 시각 설정·게시 계획이 바뀜 (조건이 실험 중에 달라짐) |
+
+`questionable`이면 승자가 나와도 화면에 경고를 붙이고, [결과 적용] 전에 확인을 한 번 더 받는다. `invalid`면 결과는 `inconclusive`다.
+
+### 34.9 결과의 반영 ⚙️
+
+원안 34.23~34.25의 "Experiment Result → AI Decision → Optimization Candidate → Permission → Strategy Update"를 따르되, 결과를 반영하는 경로를 두 개로 정한다.
+
+1. **Operator가 직접:** 실험 상세의 [결과 적용] → `propose_strategy`를 승인할 때와 같은 RPC로 Persona 설정을 바꾼다. 사람이 결과를 보고 내리는 결정이므로 별도 AI Decision이 필요 없다.
+2. **AI가 다음 Run에서:** 완료된 실험이 Decision Context의 `experiments`(32.3)로 들어가고, Strategy Agent가 Action을 제안한다.
+
+원안 34.23의 AI 행동과 30.3 Action의 대응:
+
+| 원안 | Action | 비고 |
+|---|---|---|
+| `APPLY_VARIANT` | `propose_strategy` (항상 사람 승인, 33.3) | `setting`에 `default_visual_style`, `caption_rules`, `posting_windows`, `hashtag_count` 추가 (30.6) |
+| `KEEP_CONTROL`, `NO_ACTION` | `no_action` | – |
+| `RETEST`, `CREATE_NEW_EXPERIMENT` | `run_experiment` | 같은 변수의 재실험은 이전 실험 완료 후 14일 냉각 (32.5와 같은 값) |
+
+- `variant_wins`가 아닌 실험을 근거로 한 `propose_strategy`는 `invalid`다 (검증 3단계, 30.8). AI가 "결론 없음"을 "이겼다"로 바꿔 말할 수 없다.
+- **실험 결과가 Persona 설정을 자동으로 바꾸지 않는다** (원안 34.2 원칙 4, 32.9와 같음).
+- 원안 34.24 예의 `decision_type: CONTENT_EXPERIMENT`는 30.3대로 `action`에서 정해진다.
+
+### 34.10 금지 실험
+
+원안 34.29. 금지는 "검사"가 아니라 **표현할 수 없게** 만든다.
+
+- 실험 변수는 34.2의 닫힌 목록이고, 값은 Persona 목록(`topic_categories`, `styles`)이나 정해진 열거값(`short`/`storytelling` 등)뿐이다. 자유 텍스트 가설은 없다. 그래서 "어떤 거짓말을 해야 댓글이 늘어나나" 같은 실험은 만들 수 있는 칸이 없다.
+- 팬 대상 실험, Persona 행동 실험은 두지 않는다 (34.2).
+- 민감 주제(33.3)가 들어간 `CONTENT_TOPIC` 실험, 광고·협찬 게시물, 금전 보상을 미끼로 하는 캡션은 시작 검사(34.5)와 캡션 검사(28.8)에서 걸린다.
+- 실험 Content Job도 모든 일반 검사(캡션 규칙, 이미지 안전 33.9, 게시 승인)를 그대로 받는다. 실험이라서 완화되는 검사는 없다.
+
+### 34.11 탐색 비율 (Exploration vs Exploitation)
+
+원안 34.32의 80/20을 **상한**으로 둔다: 최근 28일 동안 그 Persona·플랫폼 게시물 중 **Variant 쪽 게시물**이 20%를 넘지 않게 한다 (`experiment.max_exploration_share`, 기본 0.2). Control 쪽 게시물은 평소 전략 그대로라 탐색으로 세지 않는다.
+
+- 하루 1개 게시하는 계정이면 Variant 10개를 모으는 데 약 50일이 걸린다. 그래서 `max_duration_days` 기본값을 60일로 둔다 (32.9의 21일에서 늘림). Operator는 비율을 0.5까지 올려 기간을 줄일 수 있다.
+- AI가 비율을 자동 조정하는 것은 Long-term이다 (원안 34.32).
+
+### 34.12 결과의 수명 (Knowledge Decay) ⚙️
+
+원안 34.30·34.31은 결과를 "Knowledge"로 저장하고 시간에 따라 Confidence를 깎는다 (0.84 → 0.75 → 0.64). 여기서는 **완료된 실험 행 자체가 Knowledge**이고, 수치를 깎는 대신 나이로 다룬다.
+
+| 나이 (완료 후) | 처리 |
+|---|---|
+| 90일 이내 | Decision Context에 그대로 |
+| 90~180일 | Context에 `stale: true`로. 화면에 "오래된 결과, 재실험 권장" |
+| 180일 초과 | Context에서 뺀다 (기록은 남음) |
+
+통계적 확신도는 그 실험의 데이터로 계산한 값이라, 시간이 지난다고 다른 숫자로 바꾸면 근거 없는 숫자가 된다. "지금도 맞는가"는 재실험으로만 답한다.
+
+### 34.13 실패와 멱등
+
+원안 34.34·34.35.
+
+| 대상 | 멱등 키 / 보호 |
+|---|---|
+| 실험 생성 | AI: `experiment:{ai_decision_id}` (Decision 하나에 실험 하나) / Operator: 화면에서 만든 uuid |
+| 표본 Content Job | `experiment_samples`의 `(experiment_id, variant_id, sample_no)` Unique |
+| 지표 | `analytics:{post_id}:{snapshot_hours}` (29.4, 원안 `metrics:{post_id}:{snapshot_type}`) |
+| 분석 | `completed`는 다시 판정하지 않음 |
+
+| 실패 | 처리 |
+|---|---|
+| 생성 실패 | 그 Content Job만 재시도 (기존). 최종 실패면 `failed` 제외 + 대체 표본 |
+| 게시 실패 | 실험 전체를 실패시키지 않는다 (원안 34.35). 대체 표본 |
+| 지표 수집 실패 | WF-009 재시도. 24h Snapshot이 끝내 없으면 `quality` 제외 |
+| 표본 부족 | 기간·`max_posts` 도달 시 `inconclusive` |
+| 긴급 정지 (32.6) | `advance_experiments`가 새 표본을 만들지 않는다. 실험 기간은 계속 흐르므로, 길어지면 Operator가 `paused`로 바꾼다 (`paused` 동안은 기간을 세지 않음) |
+
+### 34.14 화면
+
+경로: `/experiments`, `/experiments/:id` (18.3에 추가, V2b).
+
+**`/experiments`** (원안 34.36·34.38)
+
+| 영역 | 내용 |
+|---|---|
+| 상단 | 진행 중·완료 수, 결과별 수(승자·차이 없음·결론 없음), 평균 기간, 평균 표본, 현재 탐색 비율 / 상한, [새 실험] |
+| 카드 | 이름, 종류, 상태, A·B 중앙값, 개선폭, 표본 `included / 목표` (Variant별), 통계적 확신도, 타당성 경고 |
+
+**`/experiments/:id`** (원안 34.37 순서)
+
+```text
+개요        종류 · 상태 · 기간 · 출처 (Operator / AI Decision 링크)
+가설        variable · Control 값 → Variant 값 · 주 지표 · 기대 방향
+표본        Variant별 포함 / 제외(사유별) / 진행 중, 반려율
+비교        A·B 표본 값 분포 (점 그림) · 중앙값 · 개선폭 · 보조 지표
+기준선      A·B 각각 Persona 기준선 대비
+통계        통계적 확신도 (목표선) · 우세 확률 · "AI Confidence와 다름" 설명
+외부 요인   자동 감지·표시된 표본, 포함했을 때 결과
+결론        결과 · 타당성 · [결과 적용] (variant_wins일 때만) · [재실험]
+```
+
+- 진행 중에는 중간 결과를 **보여주되 "확정 아님"**으로 표시하고, 중간에 승자를 확정하는 버튼은 두지 않는다. 중간에 들여다보고 멈추면 우연한 승자가 많아진다.
+- 실험 지표(원안 34.44)는 `/strategy`(32.12)에도 둔다: 실험 수, 완료율, 승자 비율, 결론 없음 비율, 평균 개선폭. ROI(개선폭 ÷ 추정 비용, 32.13)는 이후.
+
+### 34.15 AI 실험 제안 (원안 34.39)
+
+Strategy Agent는 29장의 차원 분석에서 차이가 보이는 그룹(표본 수준 보통 이상, |`delta_pct`| ≥ 20%)을 근거로 `run_experiment`를 제안할 수 있다. 카드에는 "관찰 ≠ 증거"를 분명히 쓴다: "cinematic 게시물의 참여율이 기준선보다 높았지만(관찰), 주제·시간이 섞여 있어 원인은 확인되지 않음 → 실험으로 확인". 정책상 `run_experiment`는 MEDIUM, Level 3부터 자동이다 (33.3·33.5).
+
+### 34.16 Long-term: Bandit
+
+원안 34.33의 단계를 따르되 시점을 옮긴다: V2b 규칙 기반 + 검정 → Long-term Multi-Armed Bandit(Thompson Sampling) → Contextual Bandit. Bandit은 "더 좋아 보이는 쪽에 더 많이 배정"하므로 고정 A/B보다 손해가 적지만, 결론의 해석이 어렵고 표본이 많아야 안정된다. 게시 수가 하루 몇 개인 지금 규모에서는 고정 A/B가 맞다. 교차 플랫폼·교차 Persona 실험도 Long-term이다.
+
+### 34.17 작업 목록과 테스트
+
+| 영역 | V2b |
+|---|---|
+| DB | `experiments`·`experiment_variants`·`experiment_samples`, `start_experiment`, `advance_experiments`(pg_cron 30분), 배정(짝 무작위), 배정 확인, Mann-Whitney U 함수, 판정·타당성, `run_experiment` 실행을 "실험 생성"으로 변경(30.11), `propose_strategy` setting 추가, Context `experiments`, RLS |
+| n8n | WF-005가 `metadata.experiment`의 캡션·CTA·해시태그 지시를 프롬프트에 넣음 |
+| Lovable | `/experiments`, `/experiments/:id`, [새 실험], [결과 적용], [재실험], Post의 [외부 요인 표시] |
+
+| 경우 | 기대 |
+|---|---|
+| 같은 Persona에 실험 두 개 시작 | 두 번째는 시작 검사에서 거부 (충돌) |
+| 표본 20개 배정 | 짝마다 A·B 하나씩, 어느 시점에도 수 차이 ≤ 1 |
+| 캡션이 지시와 다름 | `non_adherent` 제외 |
+| B 이미지 반려 | B 대체 표본 생성, 반려율 기록 |
+| A 반려율 0%, B 반려율 30% | `questionable` |
+| 표본 하나가 기준선 6배 | `external` 제외, "포함 결과"도 표시 |
+| 10/10, +21%, p = 0.04 | `variant_wins` |
+| 10/10, +21%, p = 0.20 | `inconclusive` (확신도 미달) |
+| 10/10, +4% | `no_difference` |
+| 60일에 6/7 | `inconclusive` (표본 부족) |
+| 완료된 실험 다시 분석 | 결과 변경 없음 |
+| `inconclusive` 실험을 근거로 `propose_strategy` | `invalid` |
+| 실험 도중 Persona `visual_settings` 변경 | `invalid` |
+| 탐색 비율 20% 도달 | 다음 짝 생성 보류 |
+| Mann-Whitney 함수 | 알려진 예제 값과 같은 U·p (단위 테스트) |
+
+### 34.18 원안 조정
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 단계 | MVP에서 실험 | V2b (통계 검정·외부 요인 감지 포함) | AI Decision·Schedule Engine 위에 있음 |
+| 실험 종류 | 7종 | 6종 V2b, `CONTENT_FORMAT`은 Carousel 이후. 해시태그는 개수 기준 | 통제·확인할 수 있는 것만 |
+| 이후 종류 | 팬·Persona 행동 실험 포함 | 두지 않음 | 조작 위험, 33.3 |
+| 테이블 | 2개, `content_jobs.metadata`로 연결 | 3개 (`experiment_samples` 추가), metadata는 파이프라인용으로 병행 | 표본 단위 멱등·제외 사유·측정값 |
+| Variant 수 | A/B, 이후 A~D | V2b는 A/B만 (30.6의 2~3개를 2개로) | 게시 수가 적음 |
+| 상태 | 10개 | 6개, `INCONCLUSIVE`는 결과, `FAILED`는 `inconclusive` + 사유 | 상태와 결과 분리 |
+| 동시 실험 | 같은 변수만 충돌 | Persona·플랫폼당 하나 | 게시물을 나눠 쓰면 결과가 섞임 |
+| 배정 | 무작위 → 통제 일정 → 수동 | 짝 단위 무작위(크기 2), 이웃 슬롯, 수동 배정 없음 | 적은 표본에서 균형, 시간 추세 상쇄 |
+| Experiment Manager | n8n `[PA] 014` | pg_cron `advance_experiments()` | 외부 호출 없음, 014는 Fan Memory |
+| 판정 | Confidence ≥ Target (정의 없음) | Mann-Whitney U, 통계적 확신도 1 − p ≥ 0.90, 개선 10%, Variant당 10개 | 원안 원칙 6, 계산 가능하게 |
+| 표본 기준 | 20개 (예) | Variant당 10개 (32.9의 3개에서 올림) | 3개로는 검정 불가 |
+| 확신도 목표 | 0.80 (예) | 기본 0.90, 0.80~0.99 조정 | 여러 실험에서 우연한 승자 누적 |
+| 사람 승인 편향 | 언급 없음 | Variant별 반려율, 차이 20%p면 `questionable`, 대체 표본 | 승인이 표본을 고른다 |
+| 외부 요인 | 기록 | 자동 감지(기준선 5배) + Operator 표시, 제외/포함 두 결과, 타당성 3단계 | 판정에 반영 |
+| 결과 반영 | Result → AI Decision → Optimization | Operator [결과 적용] 또는 다음 Run의 `propose_strategy` (항상 승인) | 사람이 본 결과를 다시 AI에 돌릴 필요 없음 |
+| AI 행동 5개 | 새 Action | 30.3 Action에 대응 | 기존 목록 |
+| 탐색 비율 | 80/20 | 최근 28일 Variant 게시물 ≤ 20% (상한), 기간 기본 60일 | 평소 전략 보호 |
+| Knowledge Decay | Confidence 감소 | 나이로 다룸 (90일 stale, 180일 제외), 수치 유지 | 데이터 없이 숫자를 바꾸지 않음 |
+| 중간 결과 | 카드에 표시 | 표시하되 "확정 아님", 중간 확정 버튼 없음 | 들여다보고 멈추는 편향 |
+| Bandit | V2 | Long-term | 현재 게시 규모 |
+| 32.9 실험 규칙 | – | 이 장으로 대체 | – |
