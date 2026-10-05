@@ -5,7 +5,7 @@
 | 기준 문서 | [PRD v1.0](PRD.md) |
 | 최종 수정 | 2026-10-05 |
 | 상태 | v1.0 기술 설계 1차 완성 |
-| 진행 | 9. System Architecture ✅ · 10. Database / ERD ✅ · 11. State Machine ✅ · 12. API Specification ✅ · 13. ComfyUI Workflow Spec ✅ · 14. n8n Workflow Spec ✅ · 15. Security ✅ · 16. Implementation Plan ✅ · 17. UI/UX Spec ✅ · 18. Frontend Spec ✅ |
+| 진행 | 9. System Architecture ✅ · 10. Database / ERD ✅ · 11. State Machine ✅ · 12. API Specification ✅ · 13. ComfyUI Workflow Spec ✅ · 14. n8n Workflow Spec ✅ · 15. Security ✅ · 16. Implementation Plan ✅ · 17. UI/UX Spec ✅ · 18. Frontend Spec ✅ · 19. Backend (Python) Spec ✅ |
 
 ---
 
@@ -4325,3 +4325,360 @@ Frontend는 아래 계약만 지키면 교체할 수 있다. 엔진(Supabase·n8
 ### 18.20 확정된 결정
 
 17.25를 따른다: AI 프롬프트 미리보기 없음, UI 문구는 한국어.
+
+---
+
+## 19. Backend / Python Execution Specification ✅
+
+> GPU 작업을 실제로 실행하는 Python 브릿지(Local Execution Layer)의 구현 규격이다. 12.6(Bridge API)·13번(ComfyUI)·15.8(로컬 보안)을 코드 단위로 묶고, M2에서 만든 `app/`을 기준으로 쓴다. ⚙️ 표시는 확정 설계와 현재 코드에 맞춰 원안을 조정한 부분이다 (19.21).
+
+### 19.1 목적과 원칙
+
+```text
+n8n → Python 브릿지 → ComfyUI → RTX 5080 → 실행 후 검증 → Supabase Storage → assets
+```
+
+> **Python은 스스로 전략을 결정하지 않는다. 선점한 Job을 안전하게 실행하고, 결과와 실패를 DB에 정확히 남긴다.**
+
+| Python이 하는 일 | Python이 하지 않는 일 |
+|---|---|
+| `generation` Job 선점·실행 (Worker RPC) | Job 생성 (Lovable·n8n), Orchestration (n8n) |
+| Registry Workflow 조립 (Workflow·Prompt Builder) | 프롬프트 구성 요소 생성 (LLM, WF-002) |
+| 실행 전 검증 (Parameter·Model·LoRA) | 상위 상태(Content Job·Post·Approval) 직접 변경 |
+| ComfyUI 실행·대기·중단 | 재시도 시점 계산 (DB `fail_automation_job`, 14.11) |
+| 실행 후 검증, Thumbnail, Storage 업로드, Asset 등록 | SNS 게시, 사용자 UI |
+| Heartbeat, 실행 기록, 오류 분류, 완료 콜백, Worker 상태 보고 | 최종 AI 의사결정 (V2 Decision Engine) |
+
+상태 변경은 전부 Worker RPC(12.5)로만 한다. 브릿지가 일으키는 전환은 `automation_jobs`의 `processing → done/pending/failed`뿐이고, Content Job 상태는 DB Rollup 트리거(11.9)가 따라서 바꾼다 ⚙️.
+
+### 19.2 Stack
+
+| 기술 | 역할 |
+|---|---|
+| Python 3.12+, FastAPI, Uvicorn | Bridge API `/v1` (12.6) |
+| httpx (async) | Supabase PostgREST·Storage, ComfyUI, n8n 콜백 호출 ⚙️ (Supabase Python Client 대신) |
+| Pillow | 실행 후 검증, 입력 이미지 검증, WebP Thumbnail |
+| python-dotenv | `.env` 로드 |
+| logging + `RedactingFilter` | 로그, 비밀값 가리기 (15.21) ⚙️ |
+| pytest + `pgserver` | 실제 PostgreSQL에 마이그레이션을 적용한 테스트 (가짜 ComfyUI) |
+
+`tenacity`·`structlog`·Pydantic 요청 모델은 쓰지 않는다 ⚙️. 재시도는 DB가 정하고(14.11), 요청 본문은 `job_id` 하나뿐이라 직접 검증한다.
+
+### 19.3 모듈 구조 ⚙️
+
+```text
+app/
+├── main.py              create_app(): 의존성 조립(주입 가능), lifespan에서 Worker·Heartbeat·상태 보고 시작, 종료 처리
+├── config.py            Settings.from_env(): 환경변수 검증 (토큰 길이, ComfyUI localhost 강제)
+├── api.py               /v1/jobs, /v1/health, /v1/status, /v1/jobs/{id}/cancel
+├── security.py          토큰 비교, 토큰 오류 IP 차단, Rate Limit, 비밀값 가리기
+├── errors.py            JobError(error_type, error_code, retryable), LockLost, DbError
+├── database.py          Repository 프로토콜 + PostgrestRepository (Worker RPC 호출)
+├── storage.py           Supabase Storage 업로드·다운로드, 경로 검증 (safe_path)
+├── worker.py            GpuWorker (대기열, 실행, Heartbeat, 취소, 종료), Notifier (n8n 콜백)
+└── comfyui/
+    ├── client.py        ComfyClient (system_stats, object_info, upload_image, queue_prompt, wait, cancel, view)
+    ├── registry.py      registry.json 로드·검증, 필요한 노드 확인
+    ├── builder.py       Workflow Builder (값 병합, Parameter 검증, OOM 축소, 자리표시자 치환)
+    ├── prompt_builder.py  prompt_parts → 프롬프트 문자열, Negative 병합
+    └── validation.py    실행 전 Model·LoRA 확인, 실행 후 이미지 검증, Thumbnail
+workflows/               registry.json + Workflow 템플릿 5개 (13.4)
+tests/bridge/            API·Worker·단위 테스트 (실제 DB + 가짜 ComfyUI)
+```
+
+원안의 `api/ core/ models/ services/ clients/ repositories/ builders/ workers/` 계층은 쓰지 않는다. 브릿지 전체가 1,500줄 정도라 계층을 나누면 파일만 늘어난다. 대신 외부와 닿는 부분(`Repository`, `Storage`, `ComfyClient`, `Notifier`)은 `create_app()`에 주입할 수 있게 해서 테스트에서 바꿔 끼운다.
+
+### 19.4 Bridge API
+
+12.6이 정본이다. 요약만 둔다.
+
+| Endpoint | 인증 | 역할 |
+|---|---|---|
+| `POST /v1/jobs` | `X-Bridge-Token` | `{ "job_id": "<automation_job_id>" }` → 선점 후 GPU 대기열에 넣고 **즉시 `202`** |
+| `GET /v1/health` | 없음 | `{ ok, comfyui, queue_size, busy }` (최소 정보) |
+| `GET /v1/status` | `X-Bridge-Token` | 실행 중 Job, 대기열, GPU 이름·VRAM, Workflow 사용 여부, 버전 |
+| `POST /v1/jobs/{job_id}/cancel` | `X-Bridge-Token` | 대기열에서 빼거나, 실행 중이면 ComfyUI 작업 정리 |
+
+**요청 본문에 프롬프트·Parameter·LoRA를 넣지 않는다** ⚙️. 원안은 n8n이 `prompt`, `parameters`, `lora`를 보내지만, 그러면 n8n이 DB와 다른 값을 보낼 수 있고 브릿지는 터널로 들어온 값을 믿어야 한다. 브릿지는 `automation_job_id`만 받고, 나머지는 선점한 뒤 DB(`content_jobs`, `personas`, `persona_assets`)에서 읽는다 (13.6).
+
+**Job 상태 조회 API는 없다** ⚙️. 상태의 정본은 Supabase다(9.4). n8n과 Lovable은 `automation_jobs`·`execution_logs`를 읽고, 브릿지는 끝났을 때 콜백(12.7)을 보낸다. n8n이 브릿지를 Polling하지 않으므로 HTTP 연결을 오래 붙잡지 않는다.
+
+**응답 규칙:** 오류는 `{ "error": { "code", "message" } }`. 본문은 4KB까지, `docs`·`openapi.json`은 열지 않는다, CORS 헤더 없음 (15.24).
+
+### 19.5 실행 흐름
+
+`GpuWorker._run()` 순서다. 단계 이름은 그대로 `execution_logs.step`에 남는다 ⚙️.
+
+```text
+POST /v1/jobs
+ → 토큰 확인 → Rate Limit → Worker 루프 확인 → ComfyUI 연결 확인(5초 캐시)
+ → claim_automation_job (pending → processing, attempts + 1, locked_at)
+ → 대기열 (202 응답)
+
+GPU Worker (한 번에 하나)
+ BUILD          content_job·persona·persona_assets 읽기 → Workflow 결정 → Registry 확인
+                → 값 병합·Parameter 검증 → Model·LoRA 실행 전 검증 (object_info)
+ INPUT_UPLOAD   입력 이미지 ID → Storage 다운로드 → 형식 검증 → ComfyUI /upload/image   (i2i·faceswap만)
+ COMFYUI_QUEUE  자리표시자 치환 → /prompt (prompt_id를 브릿지가 먼저 만든다)
+ COMFYUI_WAIT   /history Polling (1초), JOB_TIMEOUT_SEC를 넘으면 정리 후 TIMEOUT
+ VALIDATE       출력 파일마다 /view → Pillow 검증 → WebP Thumbnail
+ UPLOAD         전부 업로드한 뒤 register_asset (일부만 등록되는 일 방지)
+ COMPLETE       complete_automation_job → (DB Rollup) Content Job → n8n 콜백 generation.completed
+```
+
+`register_asset`·`complete_automation_job`이 잠금 불일치로 빈 결과를 돌려주면 `LockLost`로 결과를 버리고 조용히 멈춘다 (Heartbeat 회수·취소 뒤에 늦게 끝난 경우, 11.6).
+
+### 19.6 Job ID와 추적
+
+| ID | 생기는 곳 | 기록 위치 |
+|---|---|---|
+| `content_job_id` | Lovable (`create_content_job`) | `automation_jobs.content_job_id`, `assets.content_job_id` |
+| `automation_job_id` | n8n (`create_automation_job`) | 모든 `execution_logs`, `system_errors`, 콜백 `job_id` |
+| `comfy_prompt_id` | 브릿지 (UUID를 만들어 `/prompt`에 전달) | `execution_logs.execution_ref`, `automation_jobs.result`, `assets.generation_metadata` |
+| `asset_id` | 브릿지 (업로드 전에 생성, 12.5) | Storage 경로, `assets.id`, `automation_jobs.result.asset_ids` |
+
+"어떤 콘텐츠 요청이 어떤 GPU 작업을 거쳐 어떤 이미지가 됐는가"는 `content_jobs → automation_jobs → execution_logs(execution_ref) → assets`로 따라간다. Job Detail 화면(17.9)의 실행 기록이 이것이다.
+
+### 19.7 Idempotency와 중복 실행 방지 ⚙️
+
+원안은 브릿지가 `generation:{automation_job_id}` 키를 보고 `ALREADY_RUNNING`·`ALREADY_COMPLETED`를 돌려준다. 현재 설계는 이것을 **DB에서** 막는다.
+
+| 단계 | 방법 | 중복 호출 결과 |
+|---|---|---|
+| Job 생성 | `create_automation_job`의 `idempotency_key` (14.17) | 기존 행을 그대로 돌려줌 |
+| 실행 | `claim_automation_job`은 `pending`만 선점 (11.5) | 이미 `processing`·`done`이면 빈 결과 → **`409 JOB_NOT_CLAIMABLE`** |
+| 결과 기록 | `register_asset`·`complete`·`fail`이 `locked_at`을 확인 | 잠금을 잃은 실행의 결과는 버려짐 |
+| Asset | `register_asset`에 같은 `id`를 다시 보내면 기존 행 반환 | Asset 중복 없음 |
+
+n8n은 `409`를 **오류가 아니라 "이미 누가 처리 중"**으로 다룬다 (14.8). 브릿지 메모리에 별도 키를 두지 않으므로 브릿지를 재시작해도 규칙이 유지된다.
+
+### 19.8 ComfyUI Client
+
+| 메서드 | ComfyUI API | 비고 |
+|---|---|---|
+| `system_stats()` | `GET /system_stats` | 연결 확인, GPU 이름·VRAM (동적 조회, 하드코딩 없음) |
+| `object_info()` | `GET /object_info` | 설치된 노드·Model·LoRA 목록 (5분 캐시) |
+| `upload_image()` | `POST /upload/image` | 입력 이미지 |
+| `queue_prompt()` | `POST /prompt` | `prompt_id`를 직접 지정. `400 node_errors` → `WORKFLOW_INVALID` |
+| `wait()` | `GET /history/{id}` | 실행 오류 메시지를 `error_code`로 분류 (19.11) |
+| `cancel()` | `POST /queue {delete}`, `GET /queue`, `POST /interrupt` | **이 prompt가 실행 중일 때만** interrupt (다른 작업을 멈추지 않게) |
+| `view()` | `GET /view` | 출력 파일 내려받기 |
+
+ComfyUI 주소는 `127.0.0.1`·`localhost`만 허용한다. 다른 값이면 브릿지가 시작하지 않는다 (15.7).
+
+### 19.9 Workflow Registry와 Builder
+
+13.3·13.6이 정본이다.
+
+- `workflows/registry.json`에 있는 ID만 실행한다. 파일 이름은 Registry가 정하고, 요청 값으로 경로를 만들지 않는다 (`"../../malicious.json"` 같은 값은 Registry에 없으므로 `WORKFLOW_INVALID`).
+- 시작할 때 Registry와 템플릿을 검증하고(자리표시자가 params·models·inputs에 정의돼 있는지), ComfyUI에 없는 노드를 쓰는 Workflow는 끈 뒤 `comfy_workflows`에 동기화한다.
+- Workflow 결정 순서: `automation_jobs.payload.workflow` → `content_jobs.workflow` → `personas.visual_settings.default_workflow`.
+- 값 병합 순서 (뒤가 앞을 덮어씀): Registry 기본값 → `visual_settings.default_params` → `content_jobs.params` → OOM 축소.
+- Parameter는 Registry의 `type`·`min`·`max`·`multiple_of`·`enum`으로 검증한다. Registry에 없는 Parameter는 거부한다 (`WORKFLOW_PARAM_INVALID`).
+- `seed`가 없거나 `-1`이면 무작위로 정하고 실제 값을 `generation_metadata`에 남긴다.
+- LLM·n8n이 만든 ComfyUI 그래프는 실행하지 않는다. 템플릿의 `{{자리표시자}}`만 바꾼다.
+
+### 19.10 Prompt Builder
+
+13.7이 정본이다. LLM(WF-002)이 `prompt_parts`(`subject`, `appearance`, `outfit`, `location`, `action`, `camera`, `lighting`, `mood`, `style`)를 만들어 저장하면, 브릿지는 **정해진 순서로 이어 붙이기만** 한다. 같은 입력이면 항상 같은 문자열이 나온다.
+
+- `content_jobs.prompt`가 있으면 그대로 쓴다 (Operator가 직접 입력).
+- 둘 다 없으면 `PROMPT_MISSING` (재시도 없음).
+- Negative: Persona 기본값 → Content Job → LLM 추가 항목 순으로 합치고 중복을 뺀다.
+- Persona의 고정 외모(Visual Identity)는 WF-002가 `appearance`에 그대로 넣는다. 브릿지가 바꾸지 않는다.
+
+### 19.11 오류 분류와 재시도 ⚙️
+
+13.12 표가 정본이다. 브릿지는 오류를 `JobError(error_type, error_code, retryable)`로 만들어 `fail_automation_job`에 넘기고, **재시도할지와 언제 할지는 DB가 정한다** (`attempts < max_attempts`면 `pending` + `run_after`, 14.11).
+
+| 원안 코드 | 현재 코드 | 재시도 |
+|---|---|---|
+| `MODEL_NOT_FOUND`, `LORA_NOT_FOUND` | 같음 | ❌ |
+| `WORKFLOW_INVALID`, `INVALID_WORKFLOW` | `WORKFLOW_INVALID` | ❌ |
+| `INVALID_REQUEST` | API `422 INVALID_REQUEST` (Job을 선점하지 않음) | – |
+| `INVALID_JOB`, `INVALID_PERSONA` | `INPUT_NOT_FOUND` | ❌ |
+| `NODE_ERROR` | 같음 | ❌ |
+| `OUT_OF_MEMORY` | 같음 (19.12) | ✅ |
+| `CUDA_ERROR`, `TEMPORARY_GPU_ERROR` | `CUDA_ERROR` | ✅ |
+| `COMFYUI_UNAVAILABLE`, `CONNECTION_ERROR` | `COMFY_UNREACHABLE` (선점 전이면 API `503`, attempts 증가 없음) | ✅ |
+| `TIMEOUT` | 같음 (ComfyUI 작업 정리 후) | ✅ |
+| `FILE_NOT_FOUND`, `STORAGE_UPLOAD_FAILED` | `FILE_ERROR` | ✅ |
+| `FILE_CORRUPTED`, `INVALID_FORMAT`, `ASSET_VALIDATION_FAILED` | `OUTPUT_INVALID` | ✅ (1회) |
+| `RATE_LIMITED` | API `429` | – |
+| `IDEMPOTENCY_CONFLICT` | API `409 JOB_NOT_CLAIMABLE` (19.7) | – |
+| – | `INTERRUPTED`, `SHUTDOWN`, `PROMPT_MISSING`, `WORKFLOW_PARAM_INVALID`, `UNKNOWN` | 13.12 |
+
+`GPU_UNAVAILABLE`은 따로 두지 않는다. GPU가 없으면 ComfyUI가 뜨지 않거나(`COMFY_UNREACHABLE`) `CUDA_ERROR`가 난다.
+
+예상하지 못한 예외도 반드시 `UNKNOWN`(재시도)으로 실패 처리한다. 실패 보고 자체가 실패해도 Worker는 멈추지 않고, Heartbeat 회수(11.6)가 Job을 되살린다.
+
+### 19.12 OOM 처리
+
+```text
+1번째 OOM → 같은 값으로 재시도 (다른 작업이 VRAM을 쓰고 있었을 수 있음)
+2번째 OOM 뒤 (attempts ≥ 3) → Registry가 allow_downscale을 허용하면:
+    batch_size > 1  → batch_size 절반
+    batch_size = 1  → 가로·세로 × 0.75 (multiple_of 맞춤, min_pixels 아래로는 내리지 않음)
+→ generation_metadata.oom_downscaled = true
+```
+
+예: 1024×1536 → 768×1152. 한 번만 줄이고, 그래도 실패하면 `max_attempts`에서 `failed`가 된다. 계속 낮추지 않는다.
+
+### 19.13 GPU Worker와 Heartbeat
+
+- **Concurrency = 1** (13.13). `GpuWorker`가 대기열에서 한 번에 하나씩 꺼내 실행한다. 실행 루프가 하나뿐이라 별도 `asyncio.Lock`이 필요 없다 ⚙️.
+- GPU가 늘어나면 `WORKER_ID`가 다른 브릿지를 하나 더 띄운다. Atomic Claim(11.5)이 같은 Queue를 나눠 준다.
+- **Heartbeat** (30초): 실행 중인 Job과 **대기열의 Job 모두**에 `heartbeat_automation_job`을 보낸다. 대기열 Job도 DB에서는 이미 `processing`이기 때문이다. `false`를 받으면 실행 중이면 멈추고(ComfyUI 작업 정리), 대기 중이면 대기열에서 뺀다.
+- STALE 판단은 n8n이 아니라 **DB의 `recover_stale_jobs()`(pg_cron 1분)**가 한다 ⚙️ (11.6). n8n의 1분 Schedule은 회수된 `pending` Job을 다시 보내는 안전망이다 (14.4).
+- **Worker 상태 보고** (30초): `report_worker_status`로 `worker_status`에 GPU·ComfyUI·현재 Job·대기열을 기록한다 (17.4). 처음 ComfyUI에 연결되면 노드를 확인하고 Registry를 동기화한다.
+- **종료**: 실행 중·대기 중 Job을 `SHUTDOWN`(재시도)으로 돌려놓고 끝낸다. 회수를 기다리지 않아도 된다.
+- 어떤 오류도 Worker 루프를 죽이지 않는다. 루프가 멈추면 `/v1/jobs`가 `503 WORKER_UNAVAILABLE`을 돌려 선점하지 않는다.
+
+### 19.14 취소
+
+Content Job 취소는 DB가 먼저 처리한다 (`cancel_content_job` → 하위 Automation Job `cancelled`, 11.9 R5). 브릿지는 결과를 버리기만 하면 된다.
+
+```text
+POST /v1/jobs/{id}/cancel
+ → 대기열에 있으면 뺀다
+ → 실행 중이면 ComfyUI 대기열에서 지우고, 그 prompt가 실행 중이면 /interrupt
+ → 200 { cancelled: true } / 404 (이 브릿지에 없는 Job)
+```
+
+취소 API를 부르지 않아도 다음 Heartbeat(최대 30초)에서 잠금 불일치로 멈춘다. 이미 끝난 Job은 대기열에 없으므로 `404`다.
+
+### 19.15 실행 후 검증과 Storage
+
+**검증 (13.11)**: ComfyUI가 성공했어도 바로 등록하지 않는다.
+
+```text
+출력 파일 있음 → 크기 > 0 → Pillow로 열기·verify → 형식이 Registry output 허용 목록 → 가로·세로가 요청 값과 같음
+실패 → OUTPUT_INVALID
+```
+
+**Storage 경로** ⚙️ (14.10, 15.5):
+
+```text
+media/                                  공개 버킷 (15.13 결정)
+  persona/{persona_id}/assets/{asset_id}.png
+  persona/{persona_id}/assets/{asset_id}_thumb.webp     512px WebP
+persona-private/                        비공개 버킷 (참조 이미지·LoRA)
+  persona/{persona_id}/refs/{uuid}.{ext}
+```
+
+원안의 `assets/{user_id}/{persona_id}/{content_job_id}/original|thumbnail/` 대신 위 경로를 쓴다. Persona가 소유 단위이고(RLS가 `persona_id`로 판단, 15.4), Content Job은 `assets.content_job_id`로 연결된다. 파일 이름은 항상 `asset_id`(UUID)이고 사용자 입력이 들어가지 않는다. 모든 경로는 `safe_path()`로 `..`·절대 경로·제어 문자를 거부한다 (15.17).
+
+**Asset 등록**: 업로드가 전부 끝난 뒤 `register_asset`으로 `assets`에 `status = 'generated'` 행을 만든다 ⚙️ (원안 `READY` 값은 DB에 없다). Asset이 모두 등록되고 `complete_automation_job`이 성공해야 DB 트리거가 Content Job을 `generating → ready`로 바꾼다 ⚙️ (11.9 R1, 원안 `GENERATED`).
+
+**로컬 파일**: 출력·입력·Thumbnail을 **메모리에서만** 처리하고 디스크에 쓰지 않는다 ⚙️. 그래서 임시 폴더 정리가 필요 없다. ComfyUI의 `output/` 폴더는 ComfyUI가 관리하며, 주기적 정리는 M5 운영 체크리스트에 둔다.
+
+### 19.16 실행 기록 (Execution Logging)
+
+| step (19.5) | service | 남기는 값 |
+|---|---|---|
+| `BUILD` | python | Workflow·버전, 최종 Parameter, seed (`output`) |
+| `INPUT_UPLOAD` | python | – |
+| `COMFYUI_QUEUE` | comfyui | – |
+| `COMFYUI_WAIT` | comfyui | `execution_ref = prompt_id`, `duration_ms` |
+| `VALIDATE` | python | – |
+| `UPLOAD` | supabase | – |
+| `COMPLETE` | python | `asset_ids`, 전체 `duration_ms` |
+| (실패한 단계) | python | `status = failed`, 가린 오류 메시지 |
+
+각 단계는 `started`·`succeeded`·`failed`로 남는다. 원안의 `JOB_RECEIVED` … `JOB_COMPLETED` 열 개를 위 일곱 단계로 줄였다 ⚙️ (17.7 진행 단계와 맞춤). 기록 실패는 작업을 멈추지 않는다.
+
+**비밀값**: 로그 핸들러와 DB에 쓰는 오류 메시지 모두 `redact()`를 거친다. Supabase secret key, Bridge Token, Callback Token과 비밀값 형태의 문자열을 가린다 (15.21).
+
+### 19.17 인증과 로컬 보안
+
+15.8이 정본이다.
+
+| 항목 | 구현 |
+|---|---|
+| 인증 | `X-Bridge-Token` ⚙️ (원안 `Authorization: Bearer`). 상수 시간 비교, 토큰 32자 이상 |
+| 토큰 교체 | `BRIDGE_TOKENS=새토큰,이전토큰` 두 개를 잠시 함께 허용 |
+| 반복 실패 | 1분에 10회 실패한 IP를 10분 차단 (`429 BLOCKED`). IP별 첫 실패와 차단 시점만 `security_events`에 기록 |
+| Rate Limit | `/v1/jobs` 초당 5회 |
+| 노출 | 브릿지는 `127.0.0.1`에만 열고 Cloudflare Tunnel로만 들어온다. LAN·인터넷에 직접 열지 않는다 |
+| ComfyUI | `127.0.0.1`만. 브릿지 설정이 다른 주소를 거부 |
+| 입력 이미지 | URL을 받지 않고 ID로만 받는다 (SSRF 없음). 같은 Persona의 Asset·참조 이미지만 |
+| Supabase 키 | 브릿지 전용 secret key (n8n과 다른 키, 15.6) |
+
+mTLS·서명 요청은 Long-term에 검토한다.
+
+### 19.18 환경변수 ⚙️
+
+`.env.example`이 정본이다. 코드 안에 주소를 하드코딩하지 않는다.
+
+| 변수 | 기본값 | 설명 |
+|---|---|---|
+| `SUPABASE_URL` | – | https 필수 |
+| `SUPABASE_SECRET_KEY` | – | 브릿지 전용 (`SUPABASE_SERVICE_ROLE_KEY`도 읽음) |
+| `BRIDGE_TOKENS` | – | n8n → 브릿지 토큰, 쉼표로 2개까지 |
+| `N8N_CALLBACK_URL`, `N8N_CALLBACK_TOKEN` | – | WF-004 콜백 |
+| `COMFY_URL` | `http://127.0.0.1:8188` | localhost만 |
+| `WORKER_ID` | `python:rtx5080-1` | `claimed_by`, `worker_status` |
+| `JOB_TIMEOUT_SEC` | `900` | ComfyUI 대기 한도 (원안 `MAX_GENERATION_TIMEOUT=600`) |
+| `HEARTBEAT_SEC`, `STATUS_REPORT_SEC` | `30` | |
+| `BRIDGE_HOST`, `BRIDGE_PORT` | `127.0.0.1`, `8000` | |
+| `LOG_LEVEL` | `INFO` | |
+
+`MAX_RETRY_COUNT`는 없다. 최대 시도 횟수는 `automation_jobs.max_attempts`(14.11)다. `APP_ENV`(development·staging·production)도 두지 않는다 ⚙️. 개인 PC 한 대가 실행 환경이라 staging이 따로 없고, 환경 차이는 `.env` 값으로만 표현한다.
+
+### 19.19 테스트 전략
+
+| 종류 | 대상 | 위치 |
+|---|---|---|
+| 단위 | Registry 검증, Parameter 범위, 값 병합 순서, Prompt Builder, OOM 축소, 오류 분류, 출력 검증, 경로 검증, 토큰·차단·Rate Limit, 비밀값 가리기 | `tests/bridge/test_units.py` |
+| API | 인증 실패·차단, 본문 크기, ComfyUI 꺼짐(선점 안 함), 409, 422, 503 | `tests/bridge/test_api.py` |
+| Worker | 성공 경로(실제 DB), OOM 재시도·축소, 시간 초과, 실행 오류, Heartbeat 잠금 상실, 취소, 종료, 출력 손상, 업로드 실패 | `tests/bridge/test_worker.py` |
+| 통합 (M5) | 실제 ComfyUI·Supabase로 `image_generation_v1` 1장 | 수동 + 16.13 장애 테스트 |
+
+DB는 `pgserver`로 실제 PostgreSQL에 마이그레이션 0001~0007을 적용하고, ComfyUI는 가짜 서버로 바꾼다. 원안의 장애 테스트 9개(ComfyUI Down, OOM, Invalid Workflow, Missing LoRA, Timeout, Storage Failure, Duplicate Job, Invalid Token, Corrupted Image)는 단위·API·Worker 테스트와 16.13 장애 테스트로 다룬다.
+
+### 19.20 Python 실행 규칙과 Definition of Done
+
+**규칙**
+
+1. 인증된 요청만 처리한다.
+2. Registry에 있고 켜진 Workflow만 실행한다.
+3. 요청 값을 파일 경로로 쓰지 않는다. 모든 Storage 경로는 ID로 만든다.
+4. LLM이 만든 ComfyUI 그래프를 실행하지 않는다.
+5. 모든 GPU 작업은 선점된 `automation_job_id`가 있어야 한다.
+6. 같은 Automation Job은 한 번만 실행된다 (선점 + 잠금 확인).
+7. 모든 실패는 `execution_logs`·`system_errors`에 남는다.
+8. 재시도 횟수와 간격은 DB가 정한다.
+9. 실행 후 검증을 통과한 파일만 Asset이 된다.
+10. 비밀값은 로그에 남기지 않는다.
+
+**M2 완료 상태** (16.7)
+
+- [x] FastAPI `/v1` 4개 Endpoint, 토큰 인증, IP 차단, Rate Limit
+- [x] Worker RPC 연동 (선점·Heartbeat·완료·실패·Asset 등록·실행 기록·Worker 상태)
+- [x] Registry 로드·검증·동기화, Workflow·Prompt Builder, 실행 전 검증
+- [x] ComfyUI 실행·대기·취소, 오류 분류, OOM 축소
+- [x] 실행 후 검증, Thumbnail, Storage 업로드, Asset 등록, 완료 콜백
+- [x] pytest (실제 DB + 가짜 ComfyUI) 통과
+- [ ] 실제 ComfyUI에서 `image_generation_v1` 1장 생성 (M0 환경 준비 후)
+- [ ] n8n 연동 (M3), End-to-End (M5)
+
+### 19.21 원안에서 조정한 부분과 이유
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 프로젝트 구조 | `python-executor/app/{api,core,models,services,clients,repositories,builders,workers}` | `app/` 단일 패키지 + `comfyui/` (19.3) | 이미 M2로 구현됨. 규모에 비해 계층이 과함 |
+| Endpoint | `/health`, `/system/status`, `/jobs/generate`, `GET /jobs/{id}`, `/jobs/{id}/logs` | `/v1/health`, `/v1/status`, `POST /v1/jobs`, `/v1/jobs/{id}/cancel` | 12.6 확정. 상태·기록은 Supabase가 정본 (9.4) |
+| 요청 본문 | prompt, parameters, lora를 n8n이 보냄 | `job_id`만. 나머지는 DB에서 읽음 | n8n·터널 값을 믿지 않음, DB와 어긋남 방지 (13.6) |
+| 상태 값 | `RUNNING`, `COMPLETED`, `GENERATED`, `READY`, `CANCELLED` | `processing`/`done`/`failed`, Asset `generated`, Content Job `ready` | 11번 상태 값·마이그레이션 CHECK |
+| Idempotency | 브릿지의 `generation:{automation_job_id}` 키, `ALREADY_RUNNING` 응답 | DB 선점·잠금 확인, `409 JOB_NOT_CLAIMABLE` | 브릿지 재시작에도 유지, 규칙이 한 곳 (11.5, 14.17) |
+| Retry 판단 | Python이 판단 | Python은 `retryable`만, 시점은 DB | 14.11 |
+| 오류 코드 | 원안 21개 | 13.12 코드 (대응표 19.11) | 이미 구현·문서화된 코드와 일치 |
+| GPU Lock | `asyncio.Lock` | 단일 Worker 루프 | 같은 효과, 대기열 Heartbeat까지 처리 |
+| STALE 판단 | n8n | DB `recover_stale_jobs()` | 11.6 |
+| Storage 경로 | `assets/{user_id}/{persona_id}/{content_job_id}/…` | `media/persona/{persona_id}/assets/{asset_id}.png` | 15.5 RLS·버킷 규칙 |
+| 로컬 임시 파일 | `data/jobs/{id}/…` + 정리 | 메모리 처리, 디스크에 쓰지 않음 | 정리 실패·경로 공격 여지가 없음 |
+| 인증 헤더 | `Authorization: Bearer` | `X-Bridge-Token` | 12.6 |
+| 환경변수 | `PYTHON_API_TOKEN`, `MAX_RETRY_COUNT`, `APP_ENV`, `ASSET_BUCKET` | 19.18 | 이미 구현된 이름, 재시도는 DB, 버킷은 15.5 고정 |
+| 클라이언트 | Supabase Python Client, tenacity, structlog | httpx, DB 재시도, logging | 의존성 최소화, 재시도 규칙 한 곳 |
+| 실행 기록 단계 | 10단계 | 7단계 (19.16) | 17.7 진행 표시와 맞춤 |
+| 구현 순서 | Step 1~12 | M2 완료(19.20), n8n은 M3, E2E는 M5 | 16번 Milestone |
