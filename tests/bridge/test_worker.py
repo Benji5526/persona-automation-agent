@@ -278,11 +278,18 @@ def test_queued_jobs_get_heartbeats_and_lost_ones_are_dropped(env):
         worker.enqueue(job_b)            # B는 대기
         hb = asyncio.create_task(worker.heartbeat_loop())
         before = job_row(env, b["job_id"])["heartbeat_at"]
-        await asyncio.sleep(0.2)
-        after = job_row(env, b["job_id"])["heartbeat_at"]
+        after = before
+        for _ in range(250):  # 고정 대기 대신 조건이 될 때까지 (최대 5초, 부하가 있어도 안정적으로)
+            await asyncio.sleep(0.02)
+            after = await asyncio.to_thread(lambda: job_row(env, b["job_id"])["heartbeat_at"])
+            if after > before:
+                break
         await asyncio.to_thread(lambda: env.seed.as_operator(uid).one(
             "select status from cancel_content_job(%s)", (b["content_job_id"],)))
-        await asyncio.sleep(0.2)
+        for _ in range(250):
+            if not worker.pending:
+                break
+            await asyncio.sleep(0.02)
         hb.cancel()
         await asyncio.gather(hb, return_exceptions=True)
         return before, after, worker.queued_ids
