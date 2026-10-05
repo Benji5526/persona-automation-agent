@@ -4009,6 +4009,7 @@ Frontend가 아는 값은 `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY` �
 | `/ai-decisions`, `/ai-activity`, `/conversations`, `/conversations/:id`, `/strategy` | 19~24 | V2 |
 | `/safety` ⚙️ | 33.14 (admin) | V2 |
 | `/experiments`, `/experiments/:id` ⚙️ | 34.14 | V2b |
+| `/optimization` ⚙️ | 35.14 | V2b |
 
 필터·탭·보기 방식은 URL Query에 둔다. 새로고침하거나 링크를 공유해도 같은 화면이 열린다.
 
@@ -7425,7 +7426,7 @@ PRD 8.10에서 AI Decision(L3)은 **V2**다. V1은 "모든 게시물을 사람�
 | `latest_insight` | 가장 최근 `performance_analyses.result` (24시간 이내 것만) | 29.16 |
 | `recent_content` | 최근 Content Job 10개: `topic_category`, `visual_style`, `source`, 상태, 생성일 | `content_jobs` |
 | `queue` | 대기·생성 중 Job 수, 오늘 남은 Agent 예산, Worker 상태 (원안 30.36) | `content_jobs`, `worker_status`, 한도 |
-| `schedule` | 앞으로 7일 예약·승인 Post 수, 게시 계획 (V2b) | `posts`, `personas.posting_plan` |
+| `schedule` | 앞으로 7일 예약·승인 Post 수, 게시 계획·현재 Strategy (V2b) | `posts`, `strategy_versions` (35.2) |
 | `active_decisions` | 최근 14일 Decision: action, `target_ref`, 상태 | `ai_decisions` |
 | `decision_memory` | 평가가 끝난 최근 Decision 10개: action, `target_ref`, `outcome`, 결과 수치 (원안 30.27) | `ai_decisions` (30.11) |
 | `allowed` | 이 Persona가 지금 쓸 수 있는 Action 목록, 사용 가능한 Workflow, 플랫폼 | 30.9, `comfy_workflows` |
@@ -7610,14 +7611,14 @@ PRD 8.10에서 AI Decision(L3)은 **V2**다. V1은 "모든 게시물을 사람�
 | `run_experiment` | `experiments`·`experiment_variants` 생성 → 시작 검사 → 표본 Content Job은 `advance_experiments`가 짝 단위로 만든다 (34.5·34.6) |
 | `pause_content` | 대상 Agent Job `cancel` (아직 `queued`일 때만) |
 | `schedule_post` | Schedule Engine이 고른 시각을 그 Post의 게시 승인 요청에 둔다 (`approvals.proposed_scheduled_at`). Operator가 승인하면 그 시각으로 `scheduled` |
-| `propose_strategy` | 승인되면 Operator 권한으로 `personas.posting_plan` 또는 `content_rules.caption_rules` 갱신 |
+| `propose_strategy` | 승인되면 Strategy 후보(Challenger 버전)와 롤아웃을 만든다. 설정을 바로 바꾸지 않는다 (35.5~35.7) |
 
 - 자동 승인은 `record_ai_decisions` 안에서, 사람 승인은 `resolve_ai_decision` 안에서 같은 함수를 부른다. 원안 30.16의 `PENDING`은 이 시스템의 `queued`다.
 - 실행이 실패하면(예: 그 사이 한도 도달) `failed` + `result.error`.
 
-**Schedule Engine** (원안 30.18, V2b): `private.next_publish_slot(persona, platform, window)`는 결정적 함수다. 시간대 안에서 지금 + 예상 생성 시간 이후, 다른 게시물과 `posting_plan.min_gap_hours`(기본 3) 이상 떨어지고 하루 게시 한도(15.18) 안인 가장 이른 시각을 고른다. AI는 시간대(`time:` ref)만 고른다.
+**Schedule Engine** (원안 30.18, V2b): `private.next_publish_slot(persona, platform, window)`는 결정적 함수다. 시간대 안에서 지금 + 예상 생성 시간 이후, 다른 게시물과 Strategy의 `min_gap_hours`(기본 3, 35.2) 이상 떨어지고 하루 게시 한도(15.18) 안인 가장 이른 시각을 고른다. AI는 시간대(`time:` ref)만 고른다.
 
-**게시 계획** (원안 30.19, V2b): `personas.posting_plan = { "posts_per_week": 5, "windows": ["time:evening"], "min_gap_hours": 3 }`. 빈도 변경은 `propose_strategy`(항상 승인)이고, 승인 화면에 현재 큐·승인 안 된 Asset 수·최근 성과 추이를 함께 보여준다.
+**게시 계획** (원안 30.19, V2b): 게시 계획(`posts_per_week`, 시간대 가중치, `min_gap_hours`)은 35.2 Strategy 버전에 있다 ⚙️ (처음에는 `personas.posting_plan`으로 두었다). 빈도 변경은 `propose_strategy`(항상 승인)이고, 승인 화면에 현재 큐·승인 안 된 Asset 수·최근 성과 추이를 함께 보여준다.
 
 **결과와 평가** (원안 30.27~30.29): pg_cron `evaluate_ai_decisions()`가 매일 `executed` Decision을 평가한다.
 
@@ -7746,7 +7747,7 @@ Trigger (DB Webhook: decision Job / Schedule 09:00 / 안전망 Polling)
 
 | 영역 | V2a | V2b |
 |---|---|---|
-| DB | `ai_decisions`(30.7), `content_jobs.ai_decision_id` FK, `decision` job_type·부모 제약 예외, `approvals.ai_decision_id`·`decision` 유형, `personas.agent_permission_level`, `app_settings.agent`·`agent_enabled`·`limits.agent`, `request_decision_run`, `resolve_ai_decision`, `get_ai_decision_detail`, `get_decision_context`, `record_ai_decisions`, `private.execute_ai_decision`, `evaluate_ai_decisions` cron, 전환 규칙에 `ai_decisions` | `personas.posting_plan`, `next_publish_slot`, `approvals.proposed_scheduled_at`, `run_experiment`·`pause_content`·`schedule_post`·`propose_strategy` 실행, 이벤트 Trigger |
+| DB | `ai_decisions`(30.7), `content_jobs.ai_decision_id` FK, `decision` job_type·부모 제약 예외, `approvals.ai_decision_id`·`decision` 유형, `personas.agent_permission_level`, `app_settings.agent`·`agent_enabled`·`limits.agent`, `request_decision_run`, `resolve_ai_decision`, `get_ai_decision_detail`, `get_decision_context`, `record_ai_decisions`, `private.execute_ai_decision`, `evaluate_ai_decisions` cron, 전환 규칙에 `ai_decisions` | Strategy 버전(35.2), `next_publish_slot`, `approvals.proposed_scheduled_at`, `run_experiment`·`pause_content`·`schedule_post`·`propose_strategy` 실행, 이벤트 Trigger |
 | n8n | WF-012 AI Strategy Runner (Webhook·09:00·안전망), `ai_decision.v1` 검증기 | 이벤트 Trigger는 WF-015 (32.2) |
 | Lovable | `/ai-decisions`, Decision Detail, Approvals "AI 결정" 탭, AI 긴급 정지, Persona AI 권한 수준 | 게시 계획 편집, 실험 결과 비교, `/ai-activity` |
 
@@ -8416,7 +8417,7 @@ Schedule (30분)
 **콘텐츠 필요량** ⚙️ (원안 예의 "Queue + Daily Budget을 함께 확인"을 계산식으로 정한다, V2b)
 
 ```text
-content_need = 앞으로 7일 게시 계획 수 (posting_plan.posts_per_week)
+content_need = 앞으로 7일 게시 계획 수 (Champion Strategy의 posts_per_week, 35.2)
              − (예약·승인된 Post + 게시 전 draft·pending_approval Post + 생성 중·대기 Content Job의 예상 Asset)
 ```
 
@@ -8793,6 +8794,7 @@ content_need = 앞으로 7일 게시 계획 수 (posting_plan.posts_per_week)
 |---|---|---|---|
 | `publish` | `post_id` | 예약 시각 또는 72시간 (11.10) | Post 캡션 수정(`revise_post`) → 새 승인 |
 | `decision` | `ai_decision_id` | 72시간, 팬 응답은 응답 창 마감 (31.3) | 팬 응답만 [수정 후 보내기] (31.9). 그 밖의 Decision은 수정 없음 (30.12) |
+| `optimization` ⚙️ | `optimization_run_id` | 72시간 (롤아웃 시작, 승격 대기 모두) | 없음 (35.7) |
 
 - 10.18의 `content`·`strategy` 유형은 쓰지 않는다. 전략 승인은 `propose_strategy` Decision의 `decision` 승인이다.
 - 상태는 원안 33.25와 같다 (`pending`/`approved`/`rejected`/`expired`/`cancelled`, 11.10).
@@ -8812,7 +8814,7 @@ content_need = 앞으로 7일 게시 계획 수 (posting_plan.posts_per_week)
 | 5 | 이 Persona가 아직 한 번도 게시하지 않은 `topic_category` 또는 `visual_style` |
 | 6 | 실험 Content Job (`metadata.experiment`) |
 | 7 | 연결한 지 30일이 안 된 계정, 최근 60일 `POLICY_ERROR`가 있는 계정 |
-| 8 | 게시 계획 시간대(`posting_plan.windows`) 밖 |
+| 8 | Champion Strategy의 게시 시간대(`posting_windows`, 35.2) 밖 |
 | 9 | 캡션 검사(28.8 7번) 경고, 또는 Operator가 캡션을 고친 적이 없는 상태에서 AI 캡션 Confidence가 낮음 |
 | 10 | Agent 하루 게시 한도(3) 초과, `publishing_enabled = false` |
 
@@ -9203,7 +9205,7 @@ running 실험마다:
 
 원안 34.23~34.25의 "Experiment Result → AI Decision → Optimization Candidate → Permission → Strategy Update"를 따르되, 결과를 반영하는 경로를 두 개로 정한다.
 
-1. **Operator가 직접:** 실험 상세의 [결과 적용] → `propose_strategy`를 승인할 때와 같은 RPC로 Persona 설정을 바꾼다. 사람이 결과를 보고 내리는 결정이므로 별도 AI Decision이 필요 없다.
+1. **Operator가 직접:** 실험 상세의 [결과 적용] → 그 결과로 Strategy 후보를 만들어 롤아웃 승인 화면으로 간다 (35.5~35.7). 설정을 바로 바꾸지 않고 35장의 단계적 적용을 거친다.
 2. **AI가 다음 Run에서:** 완료된 실험이 Decision Context의 `experiments`(32.3)로 들어가고, Strategy Agent가 Action을 제안한다.
 
 원안 34.23의 AI 행동과 30.3 Action의 대응:
@@ -9351,3 +9353,332 @@ Strategy Agent는 29장의 차원 분석에서 차이가 보이는 그룹(표본
 | 중간 결과 | 카드에 표시 | 표시하되 "확정 아님", 중간 확정 버튼 없음 | 들여다보고 멈추는 편향 |
 | Bandit | V2 | Long-term | 현재 게시 규모 |
 | 32.9 실험 규칙 | – | 이 장으로 대체 | – |
+
+---
+
+## 35. Self-Optimization Engine (V2b·Long-term) ✅
+
+> 34장에서 검증된 결과를 실제 운영 전략에 **작은 범위에서 점진적으로** 적용하고, 나쁘면 되돌리는 시스템이다. 이미 정한 것(30.3 `propose_strategy`, 30.11 게시 계획, 32.5 냉각·되돌리기, 33.4 하한, 34.7 판정, 34.9 결과 반영)을 모으고, 원안에서 열려 있던 부분(전략 상태의 위치, 전략이 실제 콘텐츠에 쓰이는 방법, 하루 게시가 적은 계정에서의 단계적 적용, 승격·롤백의 권한, 33.4 하한과의 관계)을 정한다. **아직 구현되지 않았다.** ⚙️ 표시는 원안을 조정한 부분이다 (35.15).
+
+### 35.1 목적, 원칙, 그리고 "AI가 아니다"
+
+```text
+실험 결과 (34장, variant_wins)
+  → 후보 (규칙으로 계산: 가중치를 최대 20%p만 이동)
+  → 사람 승인 (롤아웃 계획 전체)
+  → Challenger 버전을 일부 콘텐츠에만 적용 (25% → 50%)
+  → 단계마다 안전장치 확인 → 나쁘면 자동 롤백
+  → 마지막에 사람이 Champion으로 승격 → 이전 버전은 보존
+```
+
+원안의 원칙 5개(실험 먼저, 최적화 ≠ 무제한 자유, 점진적 변경, 롤백, Champion 보존)를 그대로 따른다.
+
+**V2b의 Self-Optimization은 LLM이 아니라 결정적 규칙 엔진이다** ⚙️. 원안 35.25도 MVP를 규칙 기반으로 두었다. 후보 계산, 단계 진행, 롤백 판단에 LLM이 하나도 필요 없다. 그래서 원안 35.40의 AI 출력 스키마는 V2b에서 쓰지 않고, AI가 참여하는 경로는 Strategy Agent의 `propose_strategy`(30.3)뿐이다. LLM이 멈춰도 최적화는 그대로 돈다 (원안 35.44).
+
+### 35.2 Strategy State: 한 곳에 모은다 ⚙️
+
+지금까지 전략 값은 여러 곳에 흩어져 있었다: `personas.posting_plan`(30.11), `content_rules.caption_rules`(30.3), `default_visual_style`·`hashtag_count`(34.9). 이것을 **Persona × 플랫폼마다 버전이 있는 Strategy 하나**로 모은다 (원안 35.5). 위의 칸들은 만들지 않고, 그 값은 모두 Strategy 버전의 `configuration`에 있다.
+
+```json
+{
+  "posts_per_week": 7,
+  "min_gap_hours": 3,
+  "posting_windows": { "time:evening": 0.7, "time:afternoon": 0.3 },
+  "topic_mix":       { "fashion": 0.4, "travel": 0.4, "coffee": 0.2 },
+  "visual_style":    { "natural": 0.6, "cinematic": 0.4 },
+  "caption_style":   { "short": 0.5, "storytelling": 0.5 },
+  "cta_style":       { "none": 0.5, "question": 0.5 },
+  "hashtag_count":   { "1-5": 1.0 }
+}
+```
+
+- 값은 Persona 목록(`topic_categories`, `styles`, 29.9) 안에서만, 각 항목의 합은 1이다 (DB 검증).
+- 원안 35.4의 차원 중 **Content Mix·Content Format**은 V1이 이미지 1장 게시만 하므로(28.9) 형식이 생길 때 추가한다. **Fan Interaction Strategy**는 두지 않는다 (34.2와 같은 이유). **Exploration Rate**는 최적화 대상이 아니라 Operator 설정이다 (34.11).
+- `posts_per_week`·`min_gap_hours`는 Strategy에 있지만 **최적화 대상이 아니다.** 빈도 실험이 없으므로(34.2) 근거를 만들 수 없다. Operator만 바꾼다.
+
+### 35.3 전략이 콘텐츠에 쓰이는 방법 ⚙️
+
+원안은 "가중치를 바꾼다"까지만 말한다. 가중치가 실제 Content Job이 되는 지점을 정한다.
+
+| Content Job 출처 | 전략 적용 |
+|---|---|
+| Agent (`source = 'agent'`), 일정 (`schedule`) | 비어 있는 `topic_category`·`visual_style`·캡션 지시·게시 시간대를 **Strategy 가중치로 뽑아 채운다** (`private.apply_strategy`, Job ID를 시드로 한 결정적 추출) |
+| Operator (`operator`) | 바꾸지 않는다. Create Content에 [전략대로 채우기] 버튼만 둔다 |
+| 실험 표본 (34장) | 실험 설정이 우선, Strategy 적용 안 함 |
+
+- 모든 Content Job에 **`strategy_version_id`**(새 칸, FK)를 남긴다. 어느 전략으로 만든 콘텐츠인지 알아야 버전별 성과를 잴 수 있다.
+- Strategy Agent의 Decision Context(30.5)에는 현재 Champion 설정이 들어가고, AI가 고르지 않은 칸은 위 규칙으로 채워진다.
+- Schedule Engine(30.11)은 `posting_windows` 가중치로 시간대를 고른다.
+
+### 35.4 테이블 ⚙️
+
+원안 35.30의 테이블 4개 중 2개를 채택한다. `optimization_strategies`는 Persona × 플랫폼에 Strategy가 하나뿐이라 두지 않고, `strategy_metrics`는 SQL 계산으로 대신한다 (29.13과 같은 원칙).
+
+**strategy_versions** (insert만, 설정은 수정하지 않음)
+
+| Column | Type | Description |
+|---|---|---|
+| id | uuid PK | Version ID |
+| persona_id, platform | | 대상 |
+| version_number | integer | Persona × 플랫폼 안에서 증가 |
+| configuration | jsonb | 35.2 형식 |
+| role | text | `champion` / `challenger` / `retired` / `rolled_back` / `proposed` |
+| source_type | text | `experiment` / `ai_decision` / `manual` / `rollback` (원안과 같음) |
+| source_id | uuid, nullable | 실험·Decision ID |
+| parent_version_id | uuid FK | 바탕이 된 버전 |
+| changed_dimension | text | 바꾼 차원 하나 (35.6) |
+| reason | text, ≤ 300자 | 사유 (숫자는 근거에서 붙임) |
+| created_by | uuid, nullable | Operator |
+| created_at, activated_at, retired_at | timestamptz | 시각 |
+
+- Persona × 플랫폼마다 `champion`은 정확히 하나, `challenger`는 최대 하나 (부분 Unique 인덱스).
+- `role`만 바뀌고 설정은 바뀌지 않는다. 그래서 원안 35.19의 롤백은 "이전 버전의 `role`을 다시 `champion`으로"가 아니라, **이전 설정을 복사한 새 버전**(`source_type = 'rollback'`)을 만든다. 버전 번호가 거꾸로 가지 않고, 이력이 한 줄로 남는다.
+
+**optimization_runs** (원안 35.30, 롤아웃 하나 = 한 행)
+
+| Column | Type | Description |
+|---|---|---|
+| id | uuid PK | Run ID |
+| persona_id, platform | | 대상 |
+| champion_version_id, challenger_version_id | uuid FK | 비교 대상 |
+| dimension | text | 바꾼 차원 |
+| primary_metric | text | 근거 실험의 주 지표 |
+| stage_plan | smallint[] | 예: `{25, 50}` (35.7) |
+| current_stage | smallint | 현재 Challenger 비율 (%) |
+| status | text | 35.5 |
+| stage_history | jsonb | 단계별 시작 시각·표본·판정 (SQL 값) |
+| result | text, nullable | `promoted` / `rolled_back` / `inconclusive` |
+| status_reason | text | 롤백·보류 이유 코드 |
+| approval_id | uuid FK | 시작 승인 |
+| created_at, completed_at | timestamptz | 시각 |
+
+### 35.5 후보와 상태 ⚙️
+
+원안의 Candidate 상태 9개(`PROPOSED` ~ `CANCELLED`)를 `optimization_runs.status` 하나로 둔다.
+
+```text
+pending_approval ──(승인)──▶ rollout ──(마지막 단계 통과)──▶ awaiting_promotion ──(사람)──▶ promoted
+   │                          │  ▲                                  │
+   ├─▶ rejected               ▼  │                                  └─(72시간)─▶ expired (Challenger 종료)
+   └─▶ expired              held ─┘
+                              │
+               (안전장치) ────┴──▶ rolled_back
+```
+
+- 원안의 `VALIDATING`은 상태가 아니라 후보를 만들 때 한 번에 하는 검사다 (35.6). 원안 `ACTIVE` = `promoted`, `HELD` = `held`, `FAILED`는 두지 않는다 (진행이 막히면 `held`, 기간을 넘기면 `inconclusive`로 종료).
+- `held`: 계정 `inactive`, 긴급 정지, 비용 초과처럼 **전략 탓이 아닌** 이유로 멈춘 상태다. 원인이 풀리면 같은 단계에서 이어간다. 30일 넘게 `held`면 `inconclusive`로 끝내고 Challenger를 종료한다.
+
+**후보를 만드는 경로** (원안 35.7·35.10·35.25)
+
+| 경로 | 조건 | 후보 계산 |
+|---|---|---|
+| 실험 완료 (자동) | 34.7 `variant_wins`, `validity ≠ 'invalid'`, 완료 90일 이내 (34.12) | 그 차원에서 Variant 값 가중치를 **+20%p**, 나머지를 비례해서 줄인다 (원안 35.20 "최대 ±20%") |
+| `propose_strategy` (AI) | 근거 `experiment_ref`가 위 조건의 실험 (30.6·34.9) | 같음. AI가 더 큰 변화를 제안해도 20%p로 잘라 `ALLOW_WITH_LIMIT` (33.6) |
+| Operator 직접 | `/optimization`에서 값 지정 | 20%p 제한 없음, 단 롤아웃은 같은 방식으로 |
+
+- **관찰 데이터만으로는 후보를 만들지 않는다** (원안 원칙 1 "Experiment First"). 29장 차원 분석에서 차이가 보이면 할 수 있는 것은 실험 제안(34.15)까지다. 단일 게시물(원안 35.10 "Post A +150%")은 당연히 근거가 안 된다.
+- 원안 35.11의 "표본 ≥ 20, 개선 ≥ 10%, Confidence ≥ 0.80"은 34.7의 실험 판정(Variant당 10개 = 20개, 10%, 통계적 확신도 0.90)이 이미 걸러준다. 원안 35.12의 종합 "Optimization Confidence"는 두지 않는다 ⚙️. 근거의 질은 실험의 통계적 확신도와 타당성으로 말하고, 새 점수를 만들어 섞지 않는다.
+
+**후보를 만들 때의 검사** (원안 35.9, 하나라도 걸리면 후보를 만들지 않는다)
+
+| 검사 | 기준 |
+|---|---|
+| 차원 하나 | 원안 35.43 "1 Cycle = 1 Dimension". 후보는 언제나 차원 하나만 바꾼다 |
+| 동시 진행 | 같은 Persona × 플랫폼에 진행 중인 롤아웃·실험이 없음 ⚙️ (둘 다 콘텐츠를 나눠 쓰므로 섞인다, 34.5와 같은 이유) |
+| 냉각 기간 | 같은 차원이 최근 14일 안에 승격·롤백되지 않음 (32.5. 원안 35.21의 7일보다 김) |
+| 하한 | 35.13의 바꿀 수 없는 영역이 아님 |
+| 정책 | 33.5 정책 문서의 `propose_strategy`·플랫폼 정책 |
+| 예산 | 하루 전략 변경 1건 (원안 35.24 예의 2건보다 적게) |
+
+### 35.6 롤아웃과 안전장치 ⚙️
+
+**롤아웃의 목적을 다시 정한다.** 실험(34장)이 이미 "Variant가 더 좋다"를 증명했다. 롤아웃이 확인하는 것은 **"실제 운영에서 더 나쁘지 않은가"**다 (비열등성). 그래서 단계마다 우월성을 다시 증명할 필요는 없고, 나빠지는 신호만 잡는다.
+
+**단계** (원안 35.16의 10% → 25% → 50% → 100%)
+
+하루 1개 게시하는 계정에서 10% 단계에 Challenger 게시물 5개를 모으려면 50일이 걸린다. 그래서 기본 단계를 게시 빈도로 정한다.
+
+| `posts_per_week` | `stage_plan` | Challenger 표본 (단계별) | 예상 기간 |
+|---|---|---|---|
+| 14 이상 | 10 → 25 → 50 | 3 → 4 → 5 | 약 4주 |
+| 14 미만 (기본) | 25 → 50 | 4 → 6 | 하루 1개 기준 약 4주 |
+
+- 단계의 비율은 **Strategy가 적용되는 Content Job(35.3) 중 Challenger로 배정하는 비율**이다. 배정은 Job ID 시드의 결정적 무작위라 같은 기간의 Champion·Challenger가 비교 가능하다 (34.6과 같은 원리).
+- 마지막 단계를 통과하면 `awaiting_promotion`이다. **100%는 사람이 승격할 때 바로 적용된다** (35.8).
+
+**단계 통과 조건** (원안 35.17)
+
+| 조건 | 기준 |
+|---|---|
+| 표본 | 이 단계 Challenger 24h Snapshot ≥ 단계별 표본, 같은 기간 Champion ≥ 같은 수 |
+| 성과 | Challenger 24h 주 지표 중앙값 ≥ Champion 중앙값 × 0.95 (같은 기간) |
+| 안전 | 이 단계 Challenger 게시물에 `POLICY_ERROR`, 이미지 안전 경고(33.9), [문제 신고] 0건 |
+| 반려 | Challenger Post 게시 승인 반려율이 Champion보다 20%p 이상 높지 않음 (34.6) |
+
+**롤백과 보류** (원안 35.18. 원안 35.23의 히스테리시스 채택: 올리는 기준은 실험의 +10% + 확신도 0.90, 내리는 기준은 −15%)
+
+| 신호 | 처리 |
+|---|---|
+| Challenger 중앙값 < Champion × 0.85 (표본 4개 이상) | **자동 롤백** |
+| 안전 위반 (위 "안전" 조건 위반) | **자동 롤백** |
+| Challenger 반려율이 Champion보다 30%p 이상 높음 | **자동 롤백** |
+| 0.85 ~ 0.95 | 다음 단계로 가지 않고 이 단계에서 표본을 두 배까지 더 모은다. 그래도 0.95 미만이면 `inconclusive`로 종료, Challenger 종료 |
+| 계정 `inactive`, 긴급 정지, 생성 중지 (원안 Platform Issue·System Instability) | `held` |
+| 추정 비용(32.13)이 Champion의 1.5배 초과 (원안 Unexpected Cost) | `held` + Operator 확인 |
+| 외부 요인 의심 게시물 (기준선 5배, 34.8) (원안 Abnormal Engagement) | 롤백 사유가 아니라 **표본에서 제외** |
+| 부정적 팬 반응 (원안 Negative Fan Response) | 측정 수단이 아직 없다 (댓글 감성 분석 없음). [문제 신고]와 반려율로만 본다 |
+
+- **자동 롤백은 하한(33.4)과 충돌하지 않는다.** 롤백은 검증된 이전 설정으로 돌아가는 **위험을 줄이는 방향**의 변경이다. Operator도 언제든 [롤백]을 누를 수 있다.
+- 롤백하면 Challenger는 `rolled_back`, Champion은 그대로다. 롤아웃 중에는 Champion이 한 번도 바뀌지 않았으므로 "되돌릴 설정"은 Challenger 배정을 0%로 만드는 것뿐이다.
+- 롤백·종료는 WF-010으로 알리고, 다음 Decision Context의 `experiments`·`decision_memory`(30.5)에 들어간다.
+
+### 35.7 승인과 승격 (33.4 하한과의 관계) ⚙️
+
+| 단계 | 누가 | 이유 |
+|---|---|---|
+| 후보 → 롤아웃 시작 | **사람** (`approvals`, 새 유형 `optimization`, FK `optimization_run_id`) | 전략 변경은 HIGH (33.3). 승인 화면에 근거 실험, 바뀌는 가중치, 단계 계획, 롤백 기준을 함께 보여준다 |
+| 단계 진행 (25% → 50%) | 자동 (`advance_optimizations`) | 사람이 승인한 계획 안의 진행이다. 비율이 커질 뿐 설정은 이미 승인됐다 |
+| 롤백 | 자동 또는 사람 | 위험을 줄이는 방향 |
+| **Champion 승격 (100%)** | **사람** | 운영 전략 전체가 바뀌는 시점이다 |
+
+- 원안 35.49의 Level 4 "Automatic Promotion"은 **두지 않는다**(V2b). 자동 승격은 33.4 하한 #2("HIGH는 자동 승인하지 않는다")의 두 번째 예외가 되는데, 그 판단은 롤아웃 기록이 쌓인 뒤 Long-term에 33.4를 고치는 방식으로만 한다.
+- 원안 35.49의 단계(L0 관찰 ~ L5 연속 최적화)와의 대응: V2b에서는 Persona 권한 수준과 상관없이 위 표가 같다 (AI가 하는 일이 아니므로). 권한 수준 0인 Persona도 Operator가 승인하면 최적화를 할 수 있다.
+- `awaiting_promotion`이 72시간 동안 처리되지 않으면 `expired`이고 Challenger는 종료된다 (33.7 "시간이 지나도 자동 실행하지 않는다").
+
+### 35.8 승격과 버전
+
+승격 `promote_strategy(p_run_id)` (admin 또는 소유 Operator):
+
+1. Challenger 버전 → `champion`, `activated_at`
+2. 이전 Champion → `retired` (지우지 않음, 원안 35.32 "Previous Champion으로 보존")
+3. 이후 Strategy 적용(35.3)은 새 Champion 100%
+4. 같은 차원 냉각 기간 14일 시작
+5. `security_events`가 아니라 `state_transitions`에 기록 (운영 이벤트)
+
+이전 버전으로 돌아가고 싶으면 [이 버전으로 되돌리기] → 그 설정을 복사한 새 버전(`source_type = 'rollback'`)으로 다시 롤아웃한다. 단, Operator가 "즉시 적용"을 고르면 롤아웃 없이 바로 Champion으로 바꿀 수 있다 (이미 운영해 본 설정이므로).
+
+### 35.9 측정 (원안 35.33~35.38)
+
+SQL로 계산하고 `/optimization`에 보여준다. 테이블에 저장하지 않는다.
+
+| 지표 | 정의 |
+|---|---|
+| 버전별 성과 | `strategy_version_id`가 그 버전인 게시물의 24h 주 지표 중앙값, 기준선(29.6) 대비 비율 |
+| Uplift | 새 Champion 기간 중앙값 ÷ 직전 Champion 기간 중앙값 − 1. 원안 35.34의 공식에서 평균 대신 중앙값. **인과 효과가 아니다** (시기가 다르다). 인과 근거는 롤아웃 중 같은 기간 비교(35.6)와 실험이다 |
+| Stability | 승격 후 4주 동안 주별 기준선 대비 비율. 4주 모두 1.0 이상이면 "안정", 아니면 주별 값을 그대로 보여준다 (원안 35.35. 퍼센트 점수로 합치지 않음) |
+| Rollback Rate | `rolled_back` ÷ 끝난 롤아웃 |
+| Decision Efficiency | `promoted` ÷ 끝난 롤아웃 (원안 35.38) |
+| Experiment ROI | 이후 (32.13 비용 추정이 쌓인 뒤) |
+| Regret | Long-term Bandit에서 정의. V2b에서는 계산하지 않는다 (비교할 "최선의 전략"을 같은 시점에 관측하지 않으므로 값이 정의되지 않음) |
+
+### 35.10 실행 방식 ⚙️
+
+원안 35.26의 `[PA] 015 - Self Optimization Engine` Workflow 대신(015는 32.2의 Autonomous Operation Controller) **pg_cron `advance_optimizations()`**(1시간)로 한다. 34.6의 `advance_experiments`와 같은 이유로 외부 호출이 없다.
+
+```text
+매시간:
+  완료된 실험 중 아직 후보를 만들지 않은 variant_wins → 후보 검사(35.5) → optimization_runs (pending_approval) + 승인 요청
+  rollout 중인 Run → 단계 판정 (35.6) → 다음 단계 / 표본 더 / 자동 롤백 / held
+  awaiting_promotion 72시간 초과 → expired
+```
+
+**Trigger** (원안 35.27): 실험 완료(`EXPERIMENT_COMPLETED`)와 `propose_strategy` 승인, Operator 수동이 전부다. 원안의 `PERFORMANCE_THRESHOLD`, `UNDERPERFORMANCE`, `VIRAL_DETECTED` 등은 최적화의 직접 트리거가 아니다 ⚙️. 관찰 데이터로는 후보를 만들지 않으므로(35.5), 이런 이벤트는 32.2처럼 Decision Run으로 가서 실험 제안이 된다.
+
+**빈도** (원안 35.28): 실행은 매시간이지만, 변경은 하루 1건, 같은 차원 14일 냉각, 동시 롤아웃 하나로 제한된다. 원안의 말대로 실행 빈도보다 변경 빈도 제한이 중요하다.
+
+### 35.11 진동 방지
+
+원안 35.22의 방법을 모두 적용한다.
+
+| 방법 | 구현 |
+|---|---|
+| Minimum Sample | 실험 Variant당 10개 (34.7), 롤아웃 단계별 표본 (35.6) |
+| Cooldown | 같은 차원 14일 (32.5) |
+| Hysteresis | 올리기 +10% & 확신도 0.90, 내리기 −15% (35.6) |
+| Baseline | 같은 기간 Champion과 비교, 기준선 대비 표시 |
+| Minimum Improvement | 34.7의 10% |
+| Strategy Lock ⚙️ | Operator가 차원을 잠글 수 있다 (`strategy_locks`: Persona × 플랫폼 × 차원). 잠긴 차원은 후보를 만들지 않는다 (예: 브랜드상 바꾸면 안 되는 스타일) |
+| 최대 변화 | 한 번에 20%p, 차원 하나 (원안 35.20·35.43) |
+| 되돌리기 확인 | 14일 안에 롤백된 방향으로 다시 가는 후보는 만들지 않는다 (32.5) |
+
+### 35.12 긴급 정지와 장애
+
+| 상황 | 결과 |
+|---|---|
+| 전역 긴급 정지, Persona `agent_paused`, 플랫폼 정지 (33.10) | 진행 중 Run은 `held`, 새 후보 없음, 승격 버튼 비활성. Champion 설정은 그대로 쓰인다 (원안 35.45) |
+| 생성 중지 (`generation_enabled = false`) | Challenger 표본이 안 생기므로 `held` |
+| LLM 장애 | 영향 없음. 최적화는 LLM을 쓰지 않는다 (35.1) |
+| `advance_optimizations` 실패 | 다음 시간에 다시. Run 상태는 트랜잭션 단위로만 바뀐다 |
+| Strategy 설정을 못 읽음 | `apply_strategy`가 칸을 비워 두고 Job을 만든다 (Persona 기본값으로 생성). 전략 실패가 콘텐츠 생성을 막지 않는다 |
+
+자동 롤백은 긴급 정지 중에도 동작한다 (위험을 줄이는 방향).
+
+### 35.13 바꿀 수 없는 영역
+
+원안 35.42. 33.3·33.4와 같다: Persona 정체성(이름·배경·성격·말투), 안전 규칙, 법적 정책, 플랫폼 자격 증명, 계정 보안, 금전 행동, 개인정보 규칙. 이 값들은 Strategy `configuration`에 **칸이 없다.** 원안은 "별도 Human Approval"이라고 하지만, 여기서는 Self-Optimization 경로로는 아예 바꿀 수 없고 Operator가 Persona 설정에서만 바꾼다.
+
+### 35.14 화면
+
+경로: `/optimization` (18.3에 추가, V2b). 원안의 `/optimization/strategies/:id`는 Persona × 플랫폼 하나에 Strategy가 하나이므로 `/optimization?persona=…&platform=…`로 둔다.
+
+| 영역 | 내용 (원안 35.46~35.48) |
+|---|---|
+| 현재 전략 | Champion 버전 번호, 차원별 가중치 막대, 잠긴 차원, 기준선 대비 성과, Stability |
+| 진행 중 | Challenger 버전, 바뀐 차원(전 → 후), 현재 단계·표본·Champion 대비 비율, 롤백 기준선 표시, [롤백] |
+| 승인 대기 | 후보: 근거 실험(34.14 링크), 바뀌는 가중치, 단계 계획, 롤백 기준 → [롤아웃 시작] [반려] |
+| 승격 대기 | 단계별 결과 요약 → [승격] [종료] |
+| 타임라인 | 버전 변경을 시간순으로: 날짜, v11 → v12, 차원, 이유, 근거(실험·Decision 링크), 결과(승격·롤백·결론 없음). Chain-of-Thought 없음 |
+| 버전 비교 | 두 버전의 `configuration` 차이, [이 버전으로 되돌리기] |
+
+### 35.15 작업 목록, 테스트, 원안 조정
+
+| 영역 | V2b | Long-term |
+|---|---|---|
+| DB | `strategy_versions`, `optimization_runs`, `strategy_locks`, `content_jobs.strategy_version_id`, `private.apply_strategy`, `advance_optimizations`(pg_cron 1시간), `promote_strategy`, 롤백, `approvals`의 `optimization` 유형·FK, 기존 `personas.posting_plan` 등 대신 Strategy 사용 (30.11·32.4·33.8) | Weighted Scoring, Bandit, 자동 승격 검토 (33.4 개정 필요) |
+| Lovable | `/optimization`, 승인 화면의 최적화 카드, Create Content [전략대로 채우기] | – |
+
+| 경우 | 기대 |
+|---|---|
+| `variant_wins` 실험 완료 | 다음 실행에 후보 1개, 가중치 +20%p, 승인 대기 |
+| `inconclusive` 실험 | 후보 없음 |
+| AI가 cinematic 40% → 100% 제안 | 60%로 잘림 (`ALLOW_WITH_LIMIT`) |
+| 실험 진행 중 후보 | 만들지 않음 |
+| 잠긴 차원 | 후보 없음 |
+| 25% 단계, Challenger 0.97배 | 50% 단계로 |
+| Challenger 0.80배 (표본 4개) | 자동 롤백, 알림, Champion 유지 |
+| Challenger 게시물 `POLICY_ERROR` | 자동 롤백 |
+| 0.90배 | 표본 추가 → 여전히 0.90배면 `inconclusive` |
+| 계정 `inactive` | `held`, 재연결 후 같은 단계 재개 |
+| 마지막 단계 통과 | `awaiting_promotion`. 72시간 방치 → `expired` |
+| 승격 | 새 Champion, 이전 버전 `retired`, 14일 냉각 |
+| 롤백 후 14일 안 같은 방향 후보 | 만들지 않음 |
+| LLM 장애 중 | 단계 판정 정상 |
+| `apply_strategy` 오류 | Job은 Persona 기본값으로 생성 |
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 엔진의 성격 | AI 최적화 (LLM 출력 스키마) | V2b는 결정적 규칙 엔진, AI는 `propose_strategy`로만 참여 | 원안도 MVP는 규칙 기반, LLM 장애와 무관하게 |
+| 전략 저장 위치 | Strategy State (새 개념) | 흩어진 칸(`posting_plan` 등)을 없애고 `strategy_versions.configuration` 하나로 | 값이 두 곳에 있지 않게 |
+| 전략 적용 방법 | 언급 없음 | Agent·일정 Job의 빈 칸을 가중치로 결정적 추출, Operator Job은 그대로, `strategy_version_id` 기록 | 가중치가 실제 콘텐츠가 되는 지점 |
+| 최적화 차원 | Content Mix, Format, Fan 포함 | 시간대·주제·스타일·캡션·CTA·해시태그. 빈도와 탐색 비율은 Operator만 | 실험으로 근거를 만들 수 있는 것만 |
+| 테이블 | 4개 | `strategy_versions`·`optimization_runs` (+ `strategy_locks`), 집계는 SQL | Persona × 플랫폼에 Strategy 하나 |
+| 롤백 방식 | 이전 버전을 다시 Active | 이전 설정을 복사한 새 버전 | 이력이 한 줄, 번호가 거꾸로 가지 않음 |
+| 상태 | 9개 | 8개, `VALIDATING`은 검사, `FAILED` 없음 | 상태 최소화 |
+| 후보 근거 | 실험 + 여러 게시물 + 기준선 | 34.7 `variant_wins`(90일 이내)만, 관찰 데이터는 실험 제안까지 | Experiment First |
+| Optimization Confidence | 종합 점수 | 두지 않음, 실험의 통계적 확신도·타당성 | 새 점수를 섞지 않음 |
+| 동시 진행 | 언급 없음 | 롤아웃과 실험은 Persona × 플랫폼당 합쳐서 하나 | 둘 다 콘텐츠를 나눠 씀 |
+| 단계 | 10 → 25 → 50 → 100 | 게시 빈도별 `stage_plan`(기본 25 → 50), 100%는 승격 | 하루 1개 계정에서 10%는 50일 |
+| 롤아웃의 목적 | 단계별 성과 개선 확인 | 비열등성 확인 (Champion × 0.95 이상) | 우월성은 실험이 이미 증명 |
+| 롤백 조건 | 7개 신호 | 성과·안전·반려율은 자동 롤백, 계정·시스템·비용은 보류, 이상 반응은 표본 제외, 팬 반응은 측정 수단 없음 | 전략 탓인 것만 롤백 |
+| 자동 승격 | Level 4 | 두지 않음 (V2b), Long-term에 33.4 개정으로만 | HIGH 자동 금지 하한 |
+| 시작 승인 | – | 사람 (`approvals` 유형 `optimization`) | 전략 변경은 HIGH |
+| 냉각 기간 | 7일 | 14일 | 32.5와 같은 값 |
+| Strategy Lock | 언급 | `strategy_locks` 테이블 | Operator가 바꾸면 안 되는 차원을 지정 |
+| 하루 변경 수 | 2 | 1 | 원인 추적 |
+| Recency 가중치 | 30일 0.6 … | V2b는 근거 나이 90일 제한만, 가중치는 Weighted Scoring(Long-term) | 규칙 엔진에는 필요 없음 |
+| Uplift·Stability | 평균, 퍼센트 점수 | 중앙값, 주별 값 그대로, 인과 아님 표시 | 바이럴 영향, 시기 차이 |
+| Regret | 지표로 준비 | V2b에서 계산하지 않음 | 정의되지 않는 값 |
+| Workflow | `[PA] 015` | pg_cron `advance_optimizations()` | 015는 Controller, 외부 호출 없음 |
+| Trigger | 일정 + 이벤트 다수 | 실험 완료·`propose_strategy` 승인·수동 | 관찰 이벤트는 실험 제안으로 |
+| 바꿀 수 없는 영역 | 별도 승인 | 설정에 칸이 없음 | 경로 자체가 없게 |
+| 경로 | `/optimization/strategies/:id` | `/optimization?persona&platform` | Strategy가 하나 |
