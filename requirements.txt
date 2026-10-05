@@ -1,12 +1,6 @@
-# Web API (n8n → bridge)
+# Python 브릿지 (app/)
 fastapi>=0.115
 uvicorn[standard]>=0.30
-
-# HTTP client (bridge → ComfyUI, n8n callback)
-httpx>=0.27
-
-# Supabase DB + Storage
-supabase>=2.10
-
-# .env loading
+httpx>=0.27          # Supabase(PostgREST·Storage), ComfyUI, n8n 호출
 python-dotenv>=1.0
+Pillow>=10.0         # 실행 후 검증, Thumbnail

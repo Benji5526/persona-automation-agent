@@ -1,12 +1,14 @@
-"""DB 마이그레이션 테스트 환경 (TECH_DESIGN 16.12).
+"""공용 테스트 환경 (TECH_DESIGN 16.12).
 
 pip로 설치하는 내장 PostgreSQL(pgserver)에 Supabase 흉내 스키마(supabase/tests/stubs)와
-supabase/migrations/0001~0005를 적용한다. 0006(pg_cron)은 로컬에 확장이 없어 건너뛴다.
+supabase/migrations를 적용한 **템플릿 DB**를 세션마다 한 번 만든다. 0006(pg_cron)은 로컬에 확장이 없어 건너뛴다.
 
-각 테스트는 하나의 트랜잭션 안에서 실행되고 끝나면 롤백된다.
+* db (tests/db): 템플릿에서 만든 DB 하나를 공유하고, 테스트마다 트랜잭션을 롤백한다.
+* fresh_database_url (tests/bridge): 테스트마다 템플릿을 복사한 새 DB. 커밋이 필요한 흐름에 쓴다.
+
 역할 전환은 Supabase처럼 SET LOCAL ROLE + request.jwt.claims / request.headers로 흉내 낸다.
 
-실행:  .venv/Scripts/python -m pytest tests/db -q
+실행:  .venv/Scripts/python -m pytest tests -q
 """
 
 from __future__ import annotations
@@ -21,22 +23,22 @@ import psycopg
 import pytest
 from psycopg.rows import dict_row
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 STUB = ROOT / "supabase" / "tests" / "stubs" / "supabase_stub.sql"
 MIGRATIONS = sorted((ROOT / "supabase" / "migrations").glob("*.sql"))
 LOCAL_SKIP = {"0006_cron.sql"}  # pg_cron 필요
+TEMPLATE = "pa_template"
 
 
 @pytest.fixture(scope="session")
-def database_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+def pg_admin_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+    """마이그레이션을 적용한 템플릿 DB를 만들고 관리자 URL을 돌려준다."""
     server = pgserver.get_server(tmp_path_factory.mktemp("pgdata"), cleanup_mode="stop")
     admin_url = server.get_uri()
     with psycopg.connect(admin_url, autocommit=True) as admin:
-        admin.execute("drop database if exists pa_test")
-        admin.execute("create database pa_test")
-    url = admin_url.rsplit("/", 1)[0] + "/pa_test"
-
-    with psycopg.connect(url, autocommit=True) as conn:
+        admin.execute(f"drop database if exists {TEMPLATE}")
+        admin.execute(f"create database {TEMPLATE}")
+    with psycopg.connect(_db_url(admin_url, TEMPLATE), autocommit=True) as conn:
         conn.execute(STUB.read_text(encoding="utf-8"))
         for path in MIGRATIONS:
             if path.name in LOCAL_SKIP:
@@ -45,7 +47,32 @@ def database_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
                 conn.execute(path.read_text(encoding="utf-8"))
             except psycopg.Error as exc:  # 어느 파일에서 실패했는지 보이게
                 raise RuntimeError(f"migration {path.name} failed: {exc}") from exc
+    yield admin_url
+
+
+def _db_url(admin_url: str, name: str) -> str:
+    return admin_url.rsplit("/", 1)[0] + "/" + name
+
+
+def _create_from_template(admin_url: str, name: str) -> str:
+    with psycopg.connect(admin_url, autocommit=True) as admin:
+        admin.execute(f"drop database if exists {name}")
+        admin.execute(f"create database {name} template {TEMPLATE}")
+    return _db_url(admin_url, name)
+
+
+@pytest.fixture(scope="session")
+def database_url(pg_admin_url: str) -> str:
+    return _create_from_template(pg_admin_url, "pa_test")
+
+
+@pytest.fixture
+def fresh_database_url(pg_admin_url: str) -> Iterator[str]:
+    name = f"pa_{uuid.uuid4().hex[:12]}"
+    url = _create_from_template(pg_admin_url, name)
     yield url
+    with psycopg.connect(pg_admin_url, autocommit=True) as admin:
+        admin.execute(f"drop database if exists {name} with (force)")
 
 
 class Db:

@@ -1,0 +1,463 @@
+{
+  "$comment": "TECH_DESIGN 13.3. 템플릿의 {{name}}은 params, models, inputs 또는 filename_prefix여야 한다. 브릿지가 시작할 때 검증하고 comfy_workflows에 동기화한다.",
+  "image_generation_v1": {
+    "version": "1.0",
+    "type": "image",
+    "stage": "mvp",
+    "enabled": true,
+    "file": "image_generation_v1.json",
+    "params": {
+      "prompt": {
+        "type": "str",
+        "required": true
+      },
+      "negative_prompt": {
+        "type": "str",
+        "default": ""
+      },
+      "width": {
+        "type": "int",
+        "default": 1024,
+        "min": 512,
+        "max": 2048,
+        "multiple_of": 8
+      },
+      "height": {
+        "type": "int",
+        "default": 1024,
+        "min": 512,
+        "max": 2048,
+        "multiple_of": 8
+      },
+      "steps": {
+        "type": "int",
+        "default": 30,
+        "min": 1,
+        "max": 80
+      },
+      "cfg": {
+        "type": "float",
+        "default": 7.0,
+        "min": 1,
+        "max": 20
+      },
+      "sampler": {
+        "type": "str",
+        "default": "euler",
+        "enum": [
+          "euler",
+          "euler_ancestral",
+          "dpmpp_2m",
+          "dpmpp_2m_sde",
+          "dpmpp_sde"
+        ]
+      },
+      "scheduler": {
+        "type": "str",
+        "default": "normal",
+        "enum": [
+          "normal",
+          "karras",
+          "exponential",
+          "sgm_uniform"
+        ]
+      },
+      "seed": {
+        "type": "int",
+        "default": -1,
+        "min": -1,
+        "max": 4294967295
+      },
+      "batch_size": {
+        "type": "int",
+        "default": 1,
+        "min": 1,
+        "max": 4
+      }
+    },
+    "models": {
+      "checkpoint": {
+        "node": "CheckpointLoaderSimple",
+        "input": "ckpt_name"
+      }
+    },
+    "inputs": {},
+    "output": {
+      "asset_type": "image",
+      "mime": [
+        "image/png"
+      ],
+      "min_bytes": 10240,
+      "check_dimensions": true
+    },
+    "oom_fallback": {
+      "allow_downscale": true,
+      "min_pixels": 786432
+    }
+  },
+  "image_generation_lora_v1": {
+    "version": "1.0",
+    "type": "image",
+    "stage": "mvp",
+    "enabled": true,
+    "file": "image_generation_lora_v1.json",
+    "params": {
+      "prompt": {
+        "type": "str",
+        "required": true
+      },
+      "negative_prompt": {
+        "type": "str",
+        "default": ""
+      },
+      "width": {
+        "type": "int",
+        "default": 1024,
+        "min": 512,
+        "max": 2048,
+        "multiple_of": 8
+      },
+      "height": {
+        "type": "int",
+        "default": 1024,
+        "min": 512,
+        "max": 2048,
+        "multiple_of": 8
+      },
+      "steps": {
+        "type": "int",
+        "default": 30,
+        "min": 1,
+        "max": 80
+      },
+      "cfg": {
+        "type": "float",
+        "default": 7.0,
+        "min": 1,
+        "max": 20
+      },
+      "sampler": {
+        "type": "str",
+        "default": "euler",
+        "enum": [
+          "euler",
+          "euler_ancestral",
+          "dpmpp_2m",
+          "dpmpp_2m_sde",
+          "dpmpp_sde"
+        ]
+      },
+      "scheduler": {
+        "type": "str",
+        "default": "normal",
+        "enum": [
+          "normal",
+          "karras",
+          "exponential",
+          "sgm_uniform"
+        ]
+      },
+      "seed": {
+        "type": "int",
+        "default": -1,
+        "min": -1,
+        "max": 4294967295
+      },
+      "batch_size": {
+        "type": "int",
+        "default": 1,
+        "min": 1,
+        "max": 4
+      },
+      "lora_strength_model": {
+        "type": "float",
+        "default": 0.85,
+        "min": 0,
+        "max": 1.5
+      },
+      "lora_strength_clip": {
+        "type": "float",
+        "default": 0.85,
+        "min": 0,
+        "max": 1.5
+      }
+    },
+    "models": {
+      "checkpoint": {
+        "node": "CheckpointLoaderSimple",
+        "input": "ckpt_name"
+      },
+      "lora_name": {
+        "node": "LoraLoader",
+        "input": "lora_name"
+      }
+    },
+    "inputs": {},
+    "output": {
+      "asset_type": "image",
+      "mime": [
+        "image/png"
+      ],
+      "min_bytes": 10240,
+      "check_dimensions": true
+    },
+    "oom_fallback": {
+      "allow_downscale": true,
+      "min_pixels": 786432
+    }
+  },
+  "image_to_image_v1": {
+    "version": "1.0",
+    "type": "image",
+    "stage": "mvp",
+    "enabled": true,
+    "file": "image_to_image_v1.json",
+    "params": {
+      "prompt": {
+        "type": "str",
+        "required": true
+      },
+      "negative_prompt": {
+        "type": "str",
+        "default": ""
+      },
+      "width": {
+        "type": "int",
+        "default": 1024,
+        "min": 512,
+        "max": 2048,
+        "multiple_of": 8
+      },
+      "height": {
+        "type": "int",
+        "default": 1024,
+        "min": 512,
+        "max": 2048,
+        "multiple_of": 8
+      },
+      "steps": {
+        "type": "int",
+        "default": 30,
+        "min": 1,
+        "max": 80
+      },
+      "cfg": {
+        "type": "float",
+        "default": 7.0,
+        "min": 1,
+        "max": 20
+      },
+      "sampler": {
+        "type": "str",
+        "default": "euler",
+        "enum": [
+          "euler",
+          "euler_ancestral",
+          "dpmpp_2m",
+          "dpmpp_2m_sde",
+          "dpmpp_sde"
+        ]
+      },
+      "scheduler": {
+        "type": "str",
+        "default": "normal",
+        "enum": [
+          "normal",
+          "karras",
+          "exponential",
+          "sgm_uniform"
+        ]
+      },
+      "seed": {
+        "type": "int",
+        "default": -1,
+        "min": -1,
+        "max": 4294967295
+      },
+      "denoise": {
+        "type": "float",
+        "default": 0.55,
+        "min": 0.05,
+        "max": 1.0
+      }
+    },
+    "models": {
+      "checkpoint": {
+        "node": "CheckpointLoaderSimple",
+        "input": "ckpt_name"
+      }
+    },
+    "inputs": {
+      "init_image": {
+        "required": true,
+        "sources": [
+          "asset",
+          "persona_asset"
+        ]
+      }
+    },
+    "output": {
+      "asset_type": "image",
+      "mime": [
+        "image/png"
+      ],
+      "min_bytes": 10240,
+      "check_dimensions": true
+    },
+    "oom_fallback": {
+      "allow_downscale": true,
+      "min_pixels": 786432
+    }
+  },
+  "character_reference_v1": {
+    "version": "0.1",
+    "type": "image",
+    "stage": "mvp",
+    "enabled": false,
+    "notes": "ComfyUI_IPAdapter_plus 커스텀 노드 필요. 설치 후 ComfyUI에서 Export(API)한 JSON으로 교체해 확인하고 enabled를 true로 바꾼다.",
+    "file": "character_reference_v1.json",
+    "params": {
+      "prompt": {
+        "type": "str",
+        "required": true
+      },
+      "negative_prompt": {
+        "type": "str",
+        "default": ""
+      },
+      "width": {
+        "type": "int",
+        "default": 1024,
+        "min": 512,
+        "max": 2048,
+        "multiple_of": 8
+      },
+      "height": {
+        "type": "int",
+        "default": 1024,
+        "min": 512,
+        "max": 2048,
+        "multiple_of": 8
+      },
+      "steps": {
+        "type": "int",
+        "default": 30,
+        "min": 1,
+        "max": 80
+      },
+      "cfg": {
+        "type": "float",
+        "default": 7.0,
+        "min": 1,
+        "max": 20
+      },
+      "sampler": {
+        "type": "str",
+        "default": "euler",
+        "enum": [
+          "euler",
+          "euler_ancestral",
+          "dpmpp_2m",
+          "dpmpp_2m_sde",
+          "dpmpp_sde"
+        ]
+      },
+      "scheduler": {
+        "type": "str",
+        "default": "normal",
+        "enum": [
+          "normal",
+          "karras",
+          "exponential",
+          "sgm_uniform"
+        ]
+      },
+      "seed": {
+        "type": "int",
+        "default": -1,
+        "min": -1,
+        "max": 4294967295
+      },
+      "batch_size": {
+        "type": "int",
+        "default": 1,
+        "min": 1,
+        "max": 4
+      },
+      "reference_strength": {
+        "type": "float",
+        "default": 0.8,
+        "min": 0,
+        "max": 1.5
+      }
+    },
+    "models": {
+      "checkpoint": {
+        "node": "CheckpointLoaderSimple",
+        "input": "ckpt_name"
+      }
+    },
+    "inputs": {
+      "reference_image": {
+        "required": true,
+        "sources": [
+          "persona_asset"
+        ],
+        "asset_types": [
+          "face_ref",
+          "character_ref"
+        ]
+      }
+    },
+    "output": {
+      "asset_type": "image",
+      "mime": [
+        "image/png"
+      ],
+      "min_bytes": 10240,
+      "check_dimensions": true
+    },
+    "oom_fallback": {
+      "allow_downscale": true,
+      "min_pixels": 786432
+    }
+  },
+  "faceswap_v1": {
+    "version": "0.1",
+    "type": "image",
+    "stage": "mvp",
+    "enabled": false,
+    "notes": "ComfyUI-ReActor 커스텀 노드 필요. 설치 후 ComfyUI에서 Export(API)한 JSON으로 교체해 확인하고 enabled를 true로 바꾼다. 원본 얼굴은 Persona face_ref만 (15.11).",
+    "file": "faceswap_v1.json",
+    "params": {},
+    "models": {},
+    "inputs": {
+      "target_image": {
+        "required": true,
+        "sources": [
+          "asset"
+        ]
+      },
+      "source_face": {
+        "required": true,
+        "sources": [
+          "persona_asset"
+        ],
+        "asset_types": [
+          "face_ref"
+        ]
+      }
+    },
+    "output": {
+      "asset_type": "image",
+      "mime": [
+        "image/png"
+      ],
+      "min_bytes": 10240,
+      "check_dimensions": false
+    },
+    "oom_fallback": {
+      "allow_downscale": false
+    }
+  }
+}
