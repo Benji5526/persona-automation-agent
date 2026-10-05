@@ -28,6 +28,7 @@ supabase/tests/stubs/  로컬 테스트 전용 Supabase 흉내 스키마
 tests/db/              DB 테스트
 tests/bridge/          브릿지 테스트 (실제 DB + 가짜 ComfyUI)
 n8n/                   n8n Workflow JSON (M3: WF-001~006 + LLM 하위 Workflow)
+deploy/n8n/            n8n 원격 서버 배포 (Docker Compose + Caddy, TECH_DESIGN 26)
 docs/                  PRD, 기술 설계, 가이드
 ```
 
@@ -36,7 +37,7 @@ docs/                  PRD, 기술 설계, 가이드
 | Milestone | 상태 |
 |---|---|
 | PRD v1.0 (1~8) | ✅ |
-| 기술 설계 v1.0 (9~25) | ✅ (17 UI/UX, 18 Frontend, 19 Python 실행 계층, 20 n8n 구현, 21 Supabase 구현, 22 Lovable 빌드 명세, 23 Lovable 프롬프트, 24 Supabase 적용 절차, 25 로컬 PC 운영 포함) |
+| 기술 설계 v1.0 (9~26) | ✅ (17 UI/UX, 18 Frontend, 19 Python 실행 계층, 20 n8n 구현, 21 Supabase 구현, 22 Lovable 빌드 명세, 23 Lovable 프롬프트, 24 Supabase 적용 절차, 25 로컬 PC 운영, 26 n8n 서버 운영 포함) |
 | M0 Environment (Supabase, Cloudflare Tunnel, n8n 서버, Lovable) | 대기 (계정·결제가 필요한 직접 작업) |
 | M1 Database Foundation | ✅ 로컬 테스트 통과 · 실제 Supabase 적용 전 |
 | M2 Python Bridge v1 | ✅ 로컬 테스트 통과 · 실제 ComfyUI·Supabase 연결 전 (첫 실제 생성 절차: TECH_DESIGN 25.6) |

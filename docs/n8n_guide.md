@@ -42,7 +42,7 @@ content_jobs: queued ──WF-001──▶ generating
 - [ ] Cloudflare Tunnel이 브릿지(`127.0.0.1:8000`)에 연결돼 있고, Cloudflare Access에서 **Service Token**(Client ID·Secret)을 만들어 그 터널 앱에 허용 (TECH 15.7)
 - [ ] 브릿지 `.env`의 `BRIDGE_TOKENS` 값 확인
 - [ ] (실제 LLM을 쓸 때) Anthropic API Key, 월 사용량 알림 설정
-- [ ] n8n 서버 하드닝 (TECH 15.9): `NODES_EXCLUDE`, `N8N_BLOCK_ENV_ACCESS_IN_NODE=true`, Execution 데이터 14일 보관(`EXECUTIONS_DATA_MAX_AGE=336`)
+- [ ] n8n 서버를 `deploy/n8n/`(Docker Compose + Caddy)로 띄운다 (TECH 26.3). 하드닝 설정(15.9)은 그 파일에 들어 있다
 
 ## 3. Credential 만들기
 

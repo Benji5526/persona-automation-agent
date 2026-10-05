@@ -5,7 +5,7 @@
 | 기준 문서 | [PRD v1.0](PRD.md) |
 | 최종 수정 | 2026-10-05 |
 | 상태 | v1.0 기술 설계 1차 완성 |
-| 진행 | 9. System Architecture ✅ · 10. Database / ERD ✅ · 11. State Machine ✅ · 12. API Specification ✅ · 13. ComfyUI Workflow Spec ✅ · 14. n8n Workflow Spec ✅ · 15. Security ✅ · 16. Implementation Plan ✅ · 17. UI/UX Spec ✅ · 18. Frontend Spec ✅ · 19. Backend (Python) Spec ✅ · 20. n8n Implementation Spec ✅ · 21. Supabase Implementation Spec ✅ · 22. Lovable Master Build Spec ✅ · 23. Lovable Master Prompt ✅ · 24. Supabase Production ✅ · 25. 로컬 PC 운영 ✅ |
+| 진행 | 9. System Architecture ✅ · 10. Database / ERD ✅ · 11. State Machine ✅ · 12. API Specification ✅ · 13. ComfyUI Workflow Spec ✅ · 14. n8n Workflow Spec ✅ · 15. Security ✅ · 16. Implementation Plan ✅ · 17. UI/UX Spec ✅ · 18. Frontend Spec ✅ · 19. Backend (Python) Spec ✅ · 20. n8n Implementation Spec ✅ · 21. Supabase Implementation Spec ✅ · 22. Lovable Master Build Spec ✅ · 23. Lovable Master Prompt ✅ · 24. Supabase Production ✅ · 25. 로컬 PC 운영 ✅ · 26. n8n Production 운영 ✅ |
 
 ---
 
@@ -6261,4 +6261,150 @@ Windows PC (RTX 5080, 일반 사용자 계정으로 실행 — 관리자 권한 
 | 네트워크 | "Secure tunnel / authenticated endpoint" | Cloudflare Tunnel + Access Service Token, 8188은 터널에 연결하지 않음, 방화벽 차단 | 15.7 확정 |
 | 시작·종료 | 개념 흐름 | 작업 스케줄러·서비스 자동 시작, `Ctrl+C` 종료 처리 | 재부팅 후 자동 복구 (15.23) |
 | 첫 생성 | 전체 E2E 예시 | n8n·LLM 없이 SQL + 로컬 호출로 확인 | M2 완료 조건을 M3와 분리해 확인 |
+
+---
+
+## 26. n8n Production 운영 ✅
+
+> n8n Workflow 설계는 **20번이 정본**이고 M3로 구현되어 있다 (`n8n/pa_*.json`, import·연결은 [n8n_guide.md](n8n_guide.md)). 이 장은 20번을 반복하지 않고, 그 Workflow를 **원격 서버에서 운영하는 데 필요한 것**을 정한다: 서버 배포(`deploy/n8n/`), Workflow 변경 관리, 운영 지표 SQL, 원안 요구사항 대응. ⚙️ 표시는 원안을 조정한 부분이다 (26.7).
+
+### 26.1 원안과 20번의 관계 ⚙️
+
+원안 26번의 구조(001 Dispatcher → 002 Image Generation → 003 Generation Monitor → 004 Retry Handler → 005 Error Handler, 5~10초 Cron, Python 상태 Polling, `RETRY_WAIT`·`DEAD`)는 20.21에서 이미 검토하고 다른 방식으로 확정했다. 핵심 차이만 다시 적는다.
+
+| 원안 | 현재 (구현됨) | 이유 |
+|---|---|---|
+| 5~10초 Cron으로 `PENDING` 조회 | DB Webhook으로 즉시 + 1분 안전망 | 즉시 반응하면서 실행 횟수는 적게 (20.4) |
+| Dispatcher가 Automation Job 생성 → Claim → 002 호출 | WF-001이 `claim_content_job` → prompt Job 생성 → WF-002, generation Job은 DB Webhook → WF-003 | 단계별 Job, 실패한 단계만 다시 실행 (20.6) |
+| `claim_pending_content_job()` RPC 권장 (선점 + Job 생성을 한 트랜잭션) | `claim_content_job`과 `create_automation_job`을 따로 부르고, 사이에서 실패하면 WF-001 안전망이 같은 키로 복구 | 두 RPC 모두 멱등이라 결과가 같다. 새 RPC 없이 해결 (16.8) |
+| 1 cycle에 1 Job | 브릿지 대기열에 여러 개 넣고 GPU는 하나씩 | 대기열 Job도 Heartbeat를 받는다 (19.13). 처리량은 같고 지연은 짧다 |
+| Python `POST /jobs/generate` → `202` → 003 Monitor가 `GET /jobs/{id}` Polling | `POST /v1/jobs` → `202` → 브릿지가 DB에 직접 기록 + 콜백 (WF-004) | Monitor가 하던 일은 DB·콜백·Heartbeat가 맡는다 (20.9 표) |
+| 004 Retry Handler (`RETRY_WAIT` → `PENDING`, 초과하면 `DEAD`) | DB `fail_automation_job` (`pending` + `run_after`, 초과하면 `failed`) | 규칙이 한 곳, Python·n8n 공통 (20.11) |
+| 005 Error Handler | WF-006 (`CLAIM` 기록으로 Job을 찾음) | 20.12 |
+| n8n이 Python에 `automation_job_id`·`content_job_id`·`persona_id` 전달 | `job_id` 하나 | 나머지는 DB에서 읽는다 (원안 26.17과 같은 원칙, 19.4) |
+| Worker Heartbeat는 Future | `worker_status` + Job Heartbeat 이미 있음 (MVP) | 17.4, 19.13 |
+
+원안 26.25의 "한 상태의 최종 책임자를 하나로 정한다"는 그대로 지킨다: generation 결과는 브릿지가, Content Job 상태는 DB 트리거가, 오케스트레이션(다음 Job 생성)은 n8n이 쓴다.
+
+### 26.2 서버 구성
+
+```text
+인터넷 ──443──▶ Caddy (자동 HTTPS) ──▶ n8n:5678 (Docker 내부망)
+                                         └─ volume n8n_data (/home/node/.n8n: Credential, Workflow, 실행 기록)
+SSH 22: 관리자 IP만, 키 로그인만 (15.9)
+```
+
+| 파일 | 내용 |
+|---|---|
+| `deploy/n8n/docker-compose.yml` | n8n(버전 고정) + Caddy. 20.16·15.9의 환경 변수(`N8N_BLOCK_ENV_ACCESS_IN_NODE`, `NODES_EXCLUDE`, 공개 API 끄기, 실행 기록 14일, `N8N_PROXY_HOPS=1`, 서울 시간대) |
+| `deploy/n8n/Caddyfile` | `N8N_HOST` → `n8n:5678` |
+| `deploy/n8n/.env.example` | `N8N_HOST`, `N8N_VERSION`, `N8N_ENCRYPTION_KEY` |
+
+- n8n 데이터는 기본 SQLite(볼륨)를 쓴다. 1인 운영·Workflow 7개 규모라 별도 PostgreSQL을 두지 않는다. 실행 기록이 커지면 그때 옮긴다.
+- 이 파일들은 아직 실제 서버에서 띄워 보지 않았다. 처음 띄울 때 26.3의 확인 항목을 따른다.
+
+### 26.3 배포 절차 (M0)
+
+| # | 작업 | 확인 |
+|---|---|---|
+| 1 | 서버 준비 (2 vCPU·2GB RAM이면 충분), OS 업데이트, SSH 키 로그인만, 방화벽 22(관리자 IP)·80·443 | `ss -tlnp`에 5678이 외부로 안 보임 |
+| 2 | Docker Engine + Compose 플러그인 설치 | `docker compose version` |
+| 3 | 도메인 A 레코드 → 서버 IP | `nslookup <N8N_HOST>` |
+| 4 | 저장소의 `deploy/n8n/`을 서버에 복사 → `.env.example`을 `.env`로 복사해 채움 (`N8N_VERSION`은 최신 안정 버전으로 고정, `N8N_ENCRYPTION_KEY`는 오프라인 보관) | `.env` 권한 600 |
+| 5 | `docker compose up -d` | `docker compose ps` 두 서비스 running |
+| 6 | 브라우저로 `https://<N8N_HOST>` → Owner 계정 생성 → **2FA 켜기**. 다른 사용자는 초대하지 않는다 | 로그인 화면이 HTTPS |
+| 7 | Settings에서 Public API가 꺼져 있는지 확인 | – |
+| 8 | n8n_guide 3~6절: Credential 5개, Workflow import·연결, Supabase DB Webhook 2개, 브릿지 콜백 | `verify_production.sql` 15~17 |
+| 9 | 백업 설정 (26.4) | 첫 백업 파일 |
+
+### 26.4 백업과 업데이트
+
+| 대상 | 방법 | 보관 |
+|---|---|---|
+| n8n 볼륨 | 매일 `docker run --rm -v n8n_n8n_data:/data -v /backup:/backup alpine tar czf /backup/n8n-$(date +%F).tgz -C /data .` (볼륨 이름은 `docker volume ls`로 확인) | 7일 (15.9) |
+| Supabase DB | 매일 `pg_dump` (Supabase Session Pooler 연결 문자열) → 암호화해서 서버 밖으로 | 30일 (15.23) |
+| Workflow JSON | 바꿀 때마다 export → 이 저장소 `n8n/`에 커밋 (26.5) | git |
+| `N8N_ENCRYPTION_KEY` | 오프라인 (비밀번호 관리자 등) | 영구 |
+
+**업데이트** (월 1회, 보안 공지가 나오면 즉시): 백업 → `.env`의 `N8N_VERSION` 올리기 → `docker compose pull && docker compose up -d` → n8n_guide 8절 확인(Content Job 하나). 문제가 있으면 이전 버전으로 되돌리고 볼륨 백업을 복원한다.
+
+### 26.5 Workflow 변경 관리
+
+- **정본은 저장소의 `n8n/pa_*.json`이다.** 서버에서 Workflow를 고쳤다면 export해서 자리표시자(`YOUR-PROJECT-REF`, `YOUR-BRIDGE-DOMAIN`, 하위 Workflow ID)를 다시 넣고 커밋한다.
+- export 파일에 Credential 값은 들어가지 않는다 (이름·ID만). 그래도 커밋 전에 `sb_secret`, `sk-ant-`, `Bearer `를 검색한다.
+- 노드 이름은 하는 일을 한국어로 적는다 (예: `claim_content_job`, `실행 기록: CLAIM`, `브릿지: POST /v1/jobs`). RPC를 부르는 노드는 RPC 이름 그대로 둔다. 원안 26.54의 "HTTP Request", "Code", "Node 3" 같은 이름은 쓰지 않는다 (원안과 같음).
+- 바꾼 뒤에는 n8n_guide 8절의 E2E와 정적 검사(JSON 형식, 노드 연결, Code 노드 문법)를 한다.
+
+### 26.6 운영 지표 (원안 26.52)
+
+Lovable Overview·Automation 화면(22.8, 22.13)이 기본이고, 아래 SQL은 SQL Editor에서 운영자가 직접 볼 때 쓴다.
+
+```sql
+-- 지금 Queue (재시도 대기는 pending + 미래 run_after)
+select job_type,
+       count(*) filter (where status = 'pending' and run_after <= now())           as pending,
+       count(*) filter (where status = 'pending' and run_after > now())            as retry_waiting,
+       count(*) filter (where status = 'processing')                               as running,
+       count(*) filter (where status = 'failed' and completed_at > now() - interval '24 hours') as failed_24h
+  from public.automation_jobs group by job_type order by job_type;
+
+-- 최근 7일 generation 성공률과 재시도 수
+select count(*) filter (where status = 'done')                                    as done,
+       count(*) filter (where status = 'failed')                                  as failed,
+       round(100.0 * count(*) filter (where status = 'done')
+             / nullif(count(*) filter (where status in ('done', 'failed')), 0), 1) as success_pct,
+       sum(greatest(attempts - 1, 0))                                             as retries
+  from public.automation_jobs
+ where job_type = 'generation' and created_at > now() - interval '7 days';
+
+-- 최근 7일 평균 GPU 생성 시간 (ComfyUI 대기 구간)
+select round(avg(duration_ms) / 1000.0, 1) as avg_sec, max(duration_ms) / 1000 as max_sec, count(*) as runs
+  from public.execution_logs
+ where step = 'COMFYUI_WAIT' and status = 'succeeded' and created_at > now() - interval '7 days';
+
+-- 최근 7일 오류 코드별
+select error_code, error_type, count(*), bool_or(retryable) as retryable
+  from public.system_errors
+ where created_at > now() - interval '7 days'
+ group by error_code, error_type order by count(*) desc;
+
+-- 오늘 LLM 호출 수 / 한도 (0008)
+select (select count from private.usage_counters
+         where key = 'llm_calls' and day = (now() at time zone 'utc')::date) as llm_calls_today,
+       (select value ->> 'daily_llm_calls_limit' from public.app_settings where key = 'limits') as limit;
+```
+
+Worker 가용성은 `verify_production.sql` 17번 (`worker_status`). GPU 사용률·VRAM 추이, LLM 비용, SNS 게시 성공률은 원안처럼 이후(V1·V2)에 추가한다.
+
+### 26.7 원안 요구사항 대응과 조정
+
+**원안 26.56 완료 조건**
+
+| 원안 | 보장 | 확인 |
+|---|---|---|
+| 주기적으로 PENDING Job 확인 | DB Webhook + 1분 안전망 | 24.4 점검 15·16 |
+| 같은 Job 중복 처리 없음 | `claim_*` RPC, `idempotency_key`, 잠금 확인 | 24.5 Claim |
+| Automation Job 생성, Atomic Claim | WF-001·002·004, 브릿지 선점 | n8n_guide 8절 |
+| Python 호출, ComfyUI 실행 | WF-003 → `POST /v1/jobs` | 25.6, n8n_guide 8절 |
+| 생성 상태 확인 | DB 상태 + `execution_logs` + 콜백 (Monitor 없음) | 20.9 |
+| 성공 시 Asset, 실패 시 System Error | 브릿지 `register_asset`, `fail_automation_job` | 21.19 테스트 |
+| 재시도, 최대 횟수 초과 시 `failed`(원안 DEAD) | `fail_automation_job` + backoff | 20.11 |
+| n8n 재시작 후에도 상태 유지 | 상태는 Supabase에만 있음 | n8n 재시작 후 진행 중이던 Job이 안전망으로 이어지는지 |
+| Lovable에서 Realtime | publication | 24.4 점검 12 |
+| Secret이 Workflow에 없음 | Credential만, 26.5 검색 | 커밋 전 검색 |
+
+**조정**
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 내용 | Workflow 5개를 노드 단위로 다시 설계 | 20번 참조 + 서버 배포·변경 관리·지표 | 이미 구현됨 |
+| Workflow 구성 | Dispatcher·Generation·Monitor·Retry·Error | 001~006 + LLM 하위 Workflow | 20.21 |
+| Trigger | 5~10초 Cron | Webhook + 1분 안전망 | 20.4 |
+| 상태 값 | `RUNNING`·`SUCCEEDED`·`RETRY_WAIT`·`DEAD` | 11번 값 | 21.6 |
+| `claim_pending_content_job` RPC | 권장 | 만들지 않음, 안전망 복구로 같은 결과 | 26.1 |
+| `automation_executions` 테이블 | 장기 검토 | `attempts` + `execution_logs` + `system_errors`(시도마다 1행) | 원안도 MVP는 충분하다고 봄 |
+| 멱등 키 `generation:{automation_job_id}`, `asset:{automation_job_id}` | 키로 중복 방지 | `generation:{content_job_id}:{run_number}`, Asset은 브릿지가 만든 `asset_id`로 `register_asset` 멱등 | 20.6, 12.5 |
+| LLM | 선택 단계 (제안 → 사용자 승인) | WF-002·005가 자동 생성, 미리보기·승인 없음 | 17.25 |
+| 배포 | 언급 없음 | `deploy/n8n/` Docker Compose + Caddy | 14.21 원격 서버 결정 |
+| 지표 | 항목만 | SQL로 바로 조회 | 운영자가 Lovable 없이도 확인 |
 

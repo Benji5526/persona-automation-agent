@@ -1,0 +1,45 @@
+# n8n 원격 서버 (TECH_DESIGN 26.3, 15.9, 20.16)
+#   Caddy(443, 자동 HTTPS) → n8n(5678, 외부에 열지 않음)
+#   실행:  cp .env.example .env  (값 채우기) → docker compose up -d
+#   주의: 실제 서버에서 아직 띄워 보지 않은 파일이다. 처음 띄운 뒤 26.3의 확인 항목을 따른다.
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:${N8N_VERSION}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: https
+      WEBHOOK_URL: https://${N8N_HOST}/
+      N8N_PROXY_HOPS: "1"                       # Caddy 하나 뒤에 있음 (실제 클라이언트 IP)
+      GENERIC_TIMEZONE: Asia/Seoul
+      TZ: Asia/Seoul
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "true"      # 노드에서 환경 변수 읽기 금지 (15.9)
+      NODES_EXCLUDE: '["n8n-nodes-base.executeCommand"]'
+      N8N_PUBLIC_API_DISABLED: "true"           # 공개 API를 쓰지 않는다 (15.9)
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: "336"            # 실행 기록 14일 (15.21)
+    volumes:
+      - n8n_data:/home/node/.n8n                # Credential·Workflow·실행 기록 (SQLite). 매일 백업 (26.4)
+    expose:
+      - "5678"                                  # 호스트 포트로 열지 않는다
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      N8N_HOST: ${N8N_HOST}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - n8n
+
+volumes:
+  n8n_data:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,5 @@
+# n8n 앞단 리버스 프록시. 도메인의 A 레코드가 이 서버를 가리키면 Caddy가 인증서를 자동 발급한다.
+{$N8N_HOST} {
+	encode gzip
+	reverse_proxy n8n:5678
+}
