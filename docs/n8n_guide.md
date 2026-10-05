@@ -1,5 +1,7 @@
 # n8n 연동 가이드
 
+> ⚠️ **이 문서는 M1 이전 구조(`media_queue` 테이블, `POST /jobs`) 기준입니다.** M2에서 브릿지가 바뀌었습니다: 엔드포인트 `POST /v1/jobs`, 테이블 `automation_jobs`, 콜백 본문 `event`·`asset_ids`·`error` (TECH_DESIGN 12.6·12.7), 터널은 Cloudflare Tunnel + Access (15.13). n8n Workflow JSON(`n8n/`)과 이 문서는 **M3에서 새 구조로 개편**합니다. 그 전까지 아래 내용은 참고용으로만 보세요.
+
 이 문서는 아래 비전 파이프라인을 n8n으로 연결하는 방법을 다룹니다.
 
 ```

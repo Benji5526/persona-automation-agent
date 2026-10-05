@@ -1499,13 +1499,15 @@ Asset ID는 Python이 업로드 **전에** 만든다. Storage 경로에 ID가 �
 | `409 Conflict` | `{ "error": { "code": "JOB_NOT_CLAIMABLE", … } }` | 이미 선점됨, 재시도 대기 중, 없는 ID |
 | `422 Unprocessable Entity` | `{ "error": { "code": "INVALID_REQUEST", … } }` | 본문 형식 오류, job_type이 generation이 아님 |
 | `503 Service Unavailable` | `{ "error": { "code": "COMFY_UNAVAILABLE", … } }` | ComfyUI가 꺼져 있음. **선점하지 않으므로** `attempts`가 늘지 않고 Job은 `pending`으로 남아 안전망이 다시 시도 |
+| `503 Service Unavailable` | `{ "error": { "code": "WORKER_UNAVAILABLE", … } }` | GPU Worker 루프가 멈췄거나 브릿지가 종료 중. 선점하지 않음 |
+| `429 Too Many Requests` | `{ "error": { "code": "BLOCKED" \| "RATE_LIMITED", … } }` | 토큰 오류가 1분에 10회를 넘어 IP 차단(10분) 또는 초당 5회 초과 |
 
 #### `GET /v1/health`
 
 | 항목 | 내용 |
 |---|---|
 | 인증 | 없음 (터널로 공개되므로 최소 정보만 반환) |
-| 응답 | `200 { "ok": true, "comfyui": true, "queue_size": 0, "busy": false }` |
+| 응답 | `200 { "ok": true, "comfyui": true, "queue_size": 0, "busy": false }`. `ok`는 GPU Worker 루프가 살아 있는지 |
 
 #### `GET /v1/status`
 
@@ -1846,7 +1848,10 @@ workflows/
       "lora_strength_model": { "default": 0.85, "min": 0, "max": 1.5 },
       "lora_strength_clip":  { "default": 0.85, "min": 0, "max": 1.5 }
     },
-    "models": { "checkpoint": "CheckpointLoaderSimple", "lora_name": "LoraLoader" },
+    "models": {
+      "checkpoint": { "node": "CheckpointLoaderSimple", "input": "ckpt_name" },
+      "lora_name":  { "node": "LoraLoader", "input": "lora_name" }
+    },
     "inputs": {},
     "output": { "asset_type": "image", "mime": ["image/png"] },
     "oom_fallback": { "allow_downscale": true, "min_pixels": 786432 }
@@ -1858,7 +1863,7 @@ workflows/
 |---|---|
 | `type`, `version`, `enabled`, `stage` | 종류, 버전, 사용 여부, 도입 단계 |
 | `params` | 허용 Parameter와 기본값·범위. 여기 없는 키는 거부한다 |
-| `models` | 실행 전에 존재를 확인할 모델 칸과, 그 목록을 조회할 ComfyUI 노드 이름 (13.10) |
+| `models` | 실행 전에 존재를 확인할 모델 칸. 칸마다 선택지를 조회할 ComfyUI 노드(`node`)와 입력 이름(`input`) (13.10) |
 | `inputs` | 필요한 입력 이미지 자리와 출처 (13.6) |
 | `output` | 기대하는 결과 종류와 MIME |
 | `oom_fallback` | GPU 메모리 부족 시 해상도를 낮춰 재시도해도 되는지 (13.12) |
@@ -2070,6 +2075,10 @@ ComfyUI 관련 오류는 상세 코드(`error_code`) ⚙️로 구분하고, 6.9
 | `FILE_ERROR` | transient | ✅ | 다운로드·업로드 실패 |
 | `OUTPUT_INVALID` | generation | ✅ | 실행 후 검증 실패. 1회 재시도 |
 | `UNKNOWN` | unknown | ✅ | 재시도 후 `failed`, Operator 알림 |
+| `INTERRUPTED` | transient | ✅ | ComfyUI 화면 등 다른 곳에서 실행이 중단됨 |
+| `SHUTDOWN` | transient | ✅ | 브릿지가 작업 도중 종료됨. 종료할 때 실행·대기 중 Job을 재시도 대기로 돌려놓는다 |
+| `PROMPT_MISSING` | validation | ❌ | 프롬프트도 `prompt_parts`도 없음 |
+| `WORKFLOW_PARAM_INVALID` | validation | ❌ | Registry에 없는 Parameter, 범위·형식 오류, 허용되지 않은 입력 자리 |
 
 현재 브릿지는 시간 초과, 연결 오류, OOM 재시도까지 구현돼 있다. 해상도를 낮추는 OOM 2차 전략과 `error_code` 기록은 16번에서 추가한다.
 
@@ -3119,17 +3128,19 @@ persona-automation-agent/
 │   │   ├── 0003_rpc_operator.sql
 │   │   ├── 0004_rpc_worker.sql
 │   │   ├── 0005_security.sql           RLS, 권한 회수, 가입 허용 목록, Storage 정책
-│   │   └── 0006_cron.sql               recover_stale_jobs, (V1) expire_approvals
+│   │   │   ├── 0006_cron.sql               recover_stale_jobs, (V1) expire_approvals
+│   │   └── 0007_workers_settings.sql   worker_status, Settings RPC, resolve_system_error (17·18번)
 │   └── tests/stubs/           로컬 테스트 전용 Supabase 흉내 스키마 (auth, storage, 역할)
-├── app/                       ⚙️ src/comfy_bridge.py를 모듈로 나눔
-│   ├── main.py                FastAPI 시작점 (/v1 라우터 등록)
-│   ├── config.py              환경변수
-│   ├── api/                   /v1/jobs, /v1/health, /v1/status, cancel
-│   ├── workers/               GPU Worker (1개), Heartbeat
-│   ├── comfyui/               client, registry, workflow_builder, prompt_builder, validation
-│   ├── storage/               업로드, Thumbnail, 입력 이미지 내려받기 (ID → 경로)
-│   ├── database/              Worker RPC 호출 (claim, complete, fail, register_asset …)
-│   └── security/              토큰 확인, Rate Limit, 로그 비밀값 가리기
+├── app/                       ⚙️ src/comfy_bridge.py를 대체 (M2 구현)
+│   ├── main.py                FastAPI 시작점, 의존성 주입 (create_app)
+│   ├── config.py              환경변수 검증 (토큰 32자 이상, ComfyUI는 localhost만)
+│   ├── api.py                 /v1/jobs, /v1/health, /v1/status, /v1/jobs/{id}/cancel
+│   ├── worker.py              GPU Worker (1개), Heartbeat, 상태 보고, n8n 콜백
+│   ├── comfyui/               client, registry, builder, prompt_builder, validation
+│   ├── storage.py             Supabase Storage (업로드, 내려받기, 공개 URL, 경로 검증)
+│   ├── database.py            Repository 인터페이스 + PostgREST 구현 (Worker RPC)
+│   ├── security.py            토큰 비교, IP 차단, Rate Limit, 로그 비밀값 가리기
+│   └── errors.py              JobError (error_type, error_code, retryable)
 ├── workflows/
 │   ├── registry.json
 │   └── image_generation_v1.json, image_generation_lora_v1.json, image_to_image_v1.json,
@@ -3751,6 +3762,9 @@ GPU 메모리가 부족해서 생성하지 못했어요.
 | `WORKFLOW_INVALID` | 선택한 Workflow 설정에 문제가 있어요. | 다른 Workflow로 다시 만들기 |
 | `INPUT_NOT_FOUND` | 입력 이미지를 찾지 못했어요. | 입력 이미지 다시 선택 |
 | `HEARTBEAT_TIMEOUT` | 작업 중 생성 PC와 연결이 끊겼어요. 자동으로 다시 시도해요. | 기다리기 |
+| `SHUTDOWN`, `INTERRUPTED` | 생성 PC의 작업이 중간에 멈췄어요. 자동으로 다시 시도해요. | 기다리기 |
+| `PROMPT_MISSING` | 주제나 프롬프트가 없어서 만들 수 없어요. | 프롬프트 입력 |
+| `WORKFLOW_PARAM_INVALID` | 설정값이 이 Workflow에서 쓸 수 없는 값이에요. (…) | 설정 수정 후 다시 만들기 |
 | `LLM_OUTPUT_INVALID` | AI가 프롬프트를 제대로 만들지 못했어요. | 다시 실행 또는 프롬프트 직접 입력 |
 | `RATE_LIMITED` | 실행 한도에 도달했어요. (한도: …) | Settings의 실행 한도 |
 | `TOKEN_EXPIRED` (V1) | Instagram 연결이 만료됐어요. 다시 연결해 주세요. | Social 화면 |
