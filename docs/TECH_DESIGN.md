@@ -5,7 +5,7 @@
 | 기준 문서 | [PRD v1.0](PRD.md) |
 | 최종 수정 | 2026-10-05 |
 | 상태 | v1.0 기술 설계 1차 완성 |
-| 진행 | 9. System Architecture ✅ · 10. Database / ERD ✅ · 11. State Machine ✅ · 12. API Specification ✅ · 13. ComfyUI Workflow Spec ✅ · 14. n8n Workflow Spec ✅ · 15. Security ✅ · 16. Implementation Plan ✅ · 17. UI/UX Spec ✅ · 18. Frontend Spec ✅ · 19. Backend (Python) Spec ✅ · 20. n8n Implementation Spec ✅ · 21. Supabase Implementation Spec ✅ · 22. Lovable Master Build Spec ✅ |
+| 진행 | 9. System Architecture ✅ · 10. Database / ERD ✅ · 11. State Machine ✅ · 12. API Specification ✅ · 13. ComfyUI Workflow Spec ✅ · 14. n8n Workflow Spec ✅ · 15. Security ✅ · 16. Implementation Plan ✅ · 17. UI/UX Spec ✅ · 18. Frontend Spec ✅ · 19. Backend (Python) Spec ✅ · 20. n8n Implementation Spec ✅ · 21. Supabase Implementation Spec ✅ · 22. Lovable Master Build Spec ✅ · 23. Lovable Master Prompt ✅ |
 
 ---
 
@@ -3500,7 +3500,7 @@ V1·V2 메뉴는 해당 단계 전까지 **숨긴다** (비활성 메뉴를 보�
 
 | 상태 | 조건 | 표시 |
 |---|---|---|
-| 정상 | 모든 Worker Online, `failed` Job 없음 | `● 정상` (success) |
+| 정상 | 모든 Worker Online, 최근 24시간에 `failed`가 된 Automation Job 없음 | `● 정상` (success) |
 | 확인 필요 | 재시도 대기 Job 또는 최근 24시간 `failed` Job 있음 | `● 확인 필요 3건` (warning) |
 | 장애 | 브릿지 Offline, `comfyui_ok = false`, 또는 n8n Offline | `● 생성 Worker 꺼짐` (error) |
 
@@ -3662,7 +3662,7 @@ GPU 작업은 정확한 진행률을 알 수 없다. **가짜 %를 만들지 않
 - 성격은 슬라이더(0~1)와 태그를 함께 쓴다. 말투는 드롭다운과 표현 목록으로 입력한다.
 - `age_group`은 **성인 연령대만** 고를 수 있다 (`20s`, `30s`, `40s+`) (15.11).
 - Visual Identity 화면: Base Model·Default Workflow 드롭다운(`comfy_workflows`), LoRA 선택(`persona_assets` 중 `lora`), LoRA 강도, Face·Style Reference 업로드(`persona-private`, 15.5).
-- **테스트 이미지 생성:** `[테스트 이미지 생성]`은 별도 기능이 아니라 `create_content_job(…, metadata = {"purpose": "visual_test"})`를 부른다. 결과는 같은 화면 미리보기 칸에 표시하고, Asset Library 기본 필터에서는 숨긴다.
+- **테스트 이미지 생성:** `[테스트 이미지 생성]`은 별도 기능이 아니라 `metadata = {"purpose": "visual_test"}`인 `draft` Content Job을 INSERT한 뒤 `submit_content_job`을 부른다 (`create_content_job`에는 `metadata` 인자가 없다, 23.4). 결과는 같은 화면 미리보기 칸에 표시하고, Asset Library 기본 필터에서는 숨긴다.
 
 ### 17.9 Content Jobs · Create Content · Job Detail
 
@@ -4021,7 +4021,7 @@ Frontend가 아는 값은 `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY` �
 // 로그인
 await supabase.auth.signInWithOAuth({
   provider: "google",
-  options: { redirectTo: `${window.location.origin}/dashboard` },
+  options: { redirectTo: `${window.location.origin}/login` },   // 가입 거부 오류를 /login이 읽도록 (23.4)
 });
 ```
 
@@ -5561,7 +5561,7 @@ Header 배지는 원안의 4단계(HEALTHY·DEGRADED·ERROR·OFFLINE) 대신 3�
 4. 최근 Asset 6개 (클릭하면 Asset Detail)
 5. 최근 활동 20건
 
-- KPI는 `get_dashboard_summary(p_persona_id)` RPC **한 번**으로 그린다 ⚙️ (원안: 테이블별 조회).
+- 숫자는 `get_dashboard_summary(p_persona_id)`로 그린다 ⚙️ (원안: 테이블별 조회). 이 RPC에 없는 "오늘 완료"(`content_jobs.completed_at`이 오늘인 `ready`)와 "Asset 수"만 count 쿼리 두 개로 더한다 (23.4).
 - 실행 중 Job은 **단계로** 보여준다 (17.7). 원안의 `82%` 진행 막대는 쓰지 않는다. ComfyUI가 샘플링 단계를 알려줄 때만 막대를 함께 보여준다.
 - 최근 활동은 `state_transitions`(상태 변경)를 쓴다 ⚙️ (원안: `execution_logs`). Persona 수정처럼 Job이 아닌 활동은 MVP에서 표시하지 않는다.
 - 인사말은 한국어로 ("좋은 저녁이에요, {이름}님") (17.22).
@@ -5599,7 +5599,7 @@ Header 배지는 원안의 4단계(HEALTHY·DEGRADED·ERROR·OFFLINE) 대신 3�
 
 **목록 (`/content-jobs`):** 표(기본)와 칸반 전환. 열: 상태, 주제, Persona, 플랫폼, 우선순위, 만든 시각, 바뀐 시각. 필터: Persona, 상태, 종류, 플랫폼, 우선순위, 날짜. 검색: 주제.
 
-**상태 배지:** DB 값을 그대로 쓰고 화면 이름은 한국어로 바꾼다 (17.3). 칸반 열은 Content Job 상태 7개다.
+**상태 배지:** DB 값을 그대로 쓰고 화면 이름은 한국어로 바꾼다 (17.3). 칸반은 보기 전용이고 열은 17.9대로 대기(`draft`·`queued`)·생성 중·완료·실패 4개다 (게시됨은 V1, 취소됨은 표에서만).
 
 | 값 | 화면 이름 | 색 토큰 |
 |---|---|---|
@@ -5662,7 +5662,7 @@ Gina · image · Instagram · 우선순위 보통 · 3분 전
 17.10이 정본이다.
 
 - **Library:** 그리드 (Thumbnail `thumbnail_url`). 필터: Persona, 종류, 상태, Content Job, 날짜. 기본 필터에서 테스트 이미지(`metadata.purpose = 'visual_test'`)와 `archived`는 숨긴다.
-- **Detail:** 원본(`public_url`), 상태, Persona, Content Job 링크, 크기, 프롬프트, 만든 시각, 다운로드, [변형 만들기](`regenerate_content_job`), [보관](`archive_asset`, 확인 대화상자).
+- **Detail:** 원본(`public_url`), 상태, Persona, Content Job 링크, 크기, 프롬프트, 만든 시각, 다운로드, [변형 만들기](`create_content_job`, `image_to_image_v1` + `input_images = {init_image: {asset_id}}`, 17.10), [보관](`archive_asset`, 확인 대화상자). Content Job의 [다시 만들기]가 `regenerate_content_job`이다.
 - **생성 정보** (`generation_metadata`): Workflow·버전, Base Model, LoRA·강도, seed, steps, cfg, 해상도, OOM 축소 여부, ComfyUI prompt_id. 생성 시간은 Job의 `COMFYUI_WAIT` 기록(`duration_ms`)에서 가져온다.
 - 상태 값: `generated`(새 결과), `approved`·`rejected`(V1), `archived` ⚙️. 원안의 `READY`·`GENERATING`·`PROCESSING`·`FAILED`는 없다. 검증을 통과한 파일만 Asset이 된다.
 - **URL:** 생성 결과물은 공개 URL을 그대로 쓴다 ⚙️ (15.13). Signed URL은 Persona 참조 이미지(`persona-private`)에만 쓴다 (1시간).
@@ -5858,3 +5858,74 @@ Phase 4까지는 n8n·브릿지 없이 만들 수 있다. SQL Editor에서 상�
 | 문구 | 영어 | 한국어 | 17.25 |
 | 글꼴 | Inter | Pretendard / 시스템 sans-serif | 한국어 문구 |
 | Supabase 연결 | 기존 테이블 사용 | + Lovable이 제안하는 SQL 실행 금지, 타입은 생성 명령으로 | 스키마 정본은 저장소 |
+
+---
+
+## 23. Lovable Master Prompt ✅
+
+> Lovable에 실제로 붙여 넣는 프롬프트다. 본문은 **[lovable_master_prompt.md](lovable_master_prompt.md) 한 곳에만** 두고, 이 장은 구성과 사용법, 원안에서 바꾼 점을 적는다. 프롬프트는 22번(빌드 명세)을 Lovable이 따를 수 있는 지시로 옮긴 것이다. ⚙️ 표시는 원안을 조정한 부분이다 (23.5).
+
+### 23.1 목적
+
+한 번에 모든 기능을 만들라고 하면 Lovable이 구조를 임의로 바꾼다. 그래서 **① 전체 맥락과 규칙을 먼저 고정하고 → ② Phase별로 작게 구현**한다. 원안의 방식과 같다.
+
+이 프롬프트가 고정하는 것:
+
+- Lovable은 Supabase하고만 통신한다 (테이블, RPC, Storage, Realtime).
+- 스키마는 이미 있고 Lovable 밖(이 저장소의 마이그레이션)에서 관리한다. Lovable은 SQL을 실행하거나 제안하지 않는다.
+- 상태 값, 테이블·칼럼 이름, RPC 이름·인자는 **실제 DB와 글자까지 같다.**
+- 화면 문구는 한국어, 프롬프트는 영어 (Lovable이 지시를 더 정확히 따른다).
+
+### 23.2 구성
+
+| 부분 | 내용 | 보내는 시점 |
+|---|---|---|
+| §1 Master Prompt | 제품 설명, 규칙 10개, Stack, 디자인·언어, 데이터 모델(테이블·칼럼·상태 값), RPC 목록·오류 코드, Route·Layout, 화면별 명세, 데이터 접근·Realtime, 작업 방식 | 처음 한 번 (Project Knowledge). "코드를 만들지 말고 규칙 요약만 답하라" |
+| §2 Phase 프롬프트 1~6 | Shell·Auth → Persona → Content Jobs → Assets → Overview·Automation·Settings → 점검 | Phase마다 한 번. 각 끝에 확인 항목 |
+| §3 보내지 말아야 할 요청 | 전체 한 번에, 로컬 직접 연결, Mock Data, service role key, 테이블 추가, AI 프롬프트 버튼 | – |
+
+Phase는 22.22 빌드 순서를 따른다. Phase 1~3은 n8n·브릿지 없이 만들 수 있고, Supabase Dashboard에서 상태를 직접 바꿔 Realtime을 확인한다. Phase 6 뒤에 실제 파이프라인과 E2E를 한다 (M5).
+
+### 23.3 사용 절차
+
+1. Lovable 프로젝트를 만들고 Supabase 통합으로 **기존 프로젝트**(마이그레이션 0001~0007 적용, supabase/README)를 연결한다.
+2. §1을 Project Knowledge에 넣는다.
+3. §2 Phase를 하나씩 보낸다. Phase가 끝날 때마다 확인 항목을 직접 해 보고, GitHub로 동기화한 코드에서 금지 문자열(`sb_secret`, `service_role`, `localhost:8188`, `/v1/jobs`, `webhook`)을 검색한다.
+4. Lovable이 SQL이나 마이그레이션을 제안하면 거절한다. 정말 스키마가 필요하면 이 저장소에 마이그레이션을 추가하고(21.3), `supabase gen types typescript`로 타입을 다시 만든 뒤 프롬프트의 §1 데이터 모델을 고친다.
+
+### 23.4 프롬프트를 쓰면서 찾은 것
+
+프롬프트에 실제 RPC 인자를 적고, 리뷰어가 프롬프트를 마이그레이션과 한 줄씩 대조하면서 설계 문서와 DB가 다른 곳을 찾았다. 마이그레이션은 고치지 않고 문서·프롬프트를 DB에 맞췄다. 그 밖에 리뷰에서 고친 것: 칼럼 단위 쓰기 권한(보내면 안 되는 칼럼 → `42501`), 빈 문자열 대신 `null`, 한글 이름의 slug, Storage 경로에 버킷 이름을 넣지 않기, `worker_status`에는 Persona 필터를 걸지 않기, 버튼마다 전제 상태, 테스트 이미지 숨김 필터의 NULL 처리.
+
+| 위치 | 설계 문서 | 실제 DB | 처리 |
+|---|---|---|---|
+| 17.8 테스트 이미지 | `create_content_job(…, metadata)` | `create_content_job`에 `metadata` 인자 없음 | `draft` INSERT(`metadata` 칸은 Operator가 쓸 수 있음) → `submit_content_job`으로 바꿈 |
+| 17.6·22.8 KPI | "오늘 완료", "Asset 수"를 `get_dashboard_summary` 한 번으로 | RPC는 상태별 개수·Automation 개수만 돌려줌 | 두 값만 count 쿼리로 추가 |
+| 17.4·22.7 "실패" 표시 | 실패 Job이 있으면 "확인 필요" | `get_dashboard_summary.automation_jobs.failed`는 **전체 기간** 개수다. 처음부터 다시 실행하거나 취소해도 예전 회차의 `failed` 단계는 남는다 | Header·KPI·알림은 `completed_at`이 최근 24시간인 `failed`만 센다. 전체 개수는 Automation Queue에만 |
+| 18.4 로그인 | `redirectTo: /dashboard` | 가입 거부 오류가 `/dashboard`로 와서 보호된 경로가 `/login`으로 보낼 때 사라진다 (Query·Hash) | `redirectTo: /login`, Query와 Hash 둘 다 읽기 |
+| 18.10 오류 코드 | `PT404`·`PT409`·`PT422`·`PT429`·`42501` | `PT403`(admin 전용), 직접 쓰기의 `23505`·`23514`, 세션 만료 `PGRST301` 등이 더 있다. `PT422`의 `details`는 칸 이름이 아니라 영어 문장 | 프롬프트의 오류 표를 넓힘 |
+| 22.12 변형 만들기 | `regenerate_content_job` | 17.10은 `image_to_image_v1`로 새 Content Job. `regenerate`는 Job의 [다시 만들기] | 17.10에 맞춤 |
+| 22.10 칸반 | 상태 7개 열 | 17.9는 4개 묶음 열 | 17.9에 맞춤 |
+
+### 23.5 원안에서 조정한 부분과 이유
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 형태 | 설계 문서 안에 프롬프트 본문 | 별도 파일 `lovable_master_prompt.md`, 이 장은 설명만 | 복사해 쓰기 쉽고, 본문이 두 곳에 있어 어긋나는 일을 막음 |
+| 첫 메시지 | Master Prompt 후 바로 구현 시작 가능 | "코드를 만들지 말고 규칙만 요약하라" | 첫 메시지에서 전체를 만들어 버리는 것을 막음 |
+| 상태 값 | 대문자 (`PENDING`, `GENERATED`, `CLAIMED`, `RETRY_WAIT`, `DEAD`, `READY` …) | DB 소문자 값, `status.ts` 한 곳 | 원안 그대로면 DB와 하나도 맞지 않는다 (21.6) |
+| Content Job 칼럼 | `retry_count`, `max_retries`, `scheduled_at` | 실제 칼럼 (`run_number`, `variants`, `workflow`, `params` …) | 없는 칼럼을 Lovable이 만들려 함 |
+| 만들기 | `status = PENDING` INSERT, AI 프롬프트 제안·미리보기, 예약 시각 | `create_content_job` RPC, AI 버튼·예약 없음 | 11.12, 17.25, V1 |
+| 스키마 변경 | "필요하면 가장 작은 마이그레이션" | 금지. 필요하면 멈추고 알림 | 스키마 정본은 저장소 (21.3) |
+| 사용하지 않는 테이블 | `performance_metrics`, `conversations`, `ai_decisions` 등을 핵심 테이블로 나열 | "아직 없음, 조회·생성 금지"로 명시 | 없는 테이블을 만들려는 것을 막음 |
+| Asset | `READY` 등 8개 상태, 모든 Asset Signed URL | `generated` 등 4개, 생성 결과물은 공개 URL | 15.13. 원안 규칙 13·14가 실제 버킷과 충돌 |
+| Visual Identity | 모든 Persona Asset 업로드 (`base_model`, `lora` 포함) | 참조 이미지만 업로드, 모델·LoRA는 파일 이름 | 22.9 |
+| Persona 상태 | `ACTIVE`·`ARCHIVED` | `active`·`inactive` (UI가 직접 쓰는 유일한 status) | DB CHECK, 칼럼 권한 |
+| 성격 항목 | 자유 (예: intelligent, energetic) | `friendly`, `playful`, `confident`, `curious`, `calm` 고정 | 17.8 JSON 형식, 15.11 |
+| 메뉴 | 미래 메뉴 Disabled·"Coming Soon" | 숨김, 미래 Route도 만들지 않음 | 17.2 |
+| Automation Queue | `CLAIMED`·`RUNNING`·`RETRY_WAIT`·`DEAD` | 대기·실행 중·재시도 대기·실패 | 20.11 |
+| Realtime | `system_errors` 구독 | `worker_status` 구독, 오류·실행 기록은 다시 읽기 | 21.15 |
+| Retry | `retry_count`·`max_retries` 기준 하나 | 처음부터(`retry_content_job`) / 실패 단계만(`retry_automation_job`) | 18.11 |
+| 데이터 흐름 설명 | n8n이 `RUNNING`으로 바꾸고 Python이 Persona를 읽음 등 내부 동작 | 화면이 알아야 할 계약(RPC·상태·이벤트)만 | Lovable이 내부 동작을 흉내 내지 않게 |
+| 문구 | 영어 | 한국어 문구 + 영어 기술 용어 | 17.25 |
+| Phase | 6단계 (Realtime·Error handling을 별도 Phase) | 6단계 (Realtime·오류 처리는 각 기능 Phase 안에서) | 기능마다 처음부터 상태·오류를 갖춰야 함 (18.10) |
