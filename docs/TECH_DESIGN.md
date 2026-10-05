@@ -6751,6 +6751,7 @@ claim_automation_job(publish) → CLAIM 기록
 | 7 | 캡션 규칙: 2,200자, 해시태그 30개, Persona `forbidden_expressions`·`content_rules.forbidden_topics` 단어 포함 여부, `is_sponsored`면 광고 표기 | `POLICY_ERROR` (Post는 `failed`, 사람이 고침) |
 | 8 | 하루 게시 한도 `limits.daily_publish_limit` (Persona별, 15.18) | `RATE_LIMITED` (다음 날 재시도) |
 | 9 | 이미 `external_post_id`가 있음 | 게시하지 않고 완료 처리 (중복 방지) |
+| 10 ⚙️ | 같은 User의 다른 Persona가 최근 30일 안에 거의 같은 이미지·캡션을 게시함 (36.6, Persona 2개 이상일 때) | 게시는 막지 않고 승인 화면에 `DUPLICATE_RISK` 경고 |
 
 원안의 `POST_BLOCKED` 상태는 만들지 않는다 ⚙️. 검사 실패는 Job `failed` + Post `failed` + `system_errors`로 남고, 사람이 고친 뒤 다시 실행한다. 원안의 "Approval Required?" 단계는 V1에서는 항상 필요하므로 4번에 포함된다.
 
@@ -9682,3 +9683,248 @@ SQL로 계산하고 `/optimization`에 보여준다. 테이블에 저장하지 �
 | Trigger | 일정 + 이벤트 다수 | 실험 완료·`propose_strategy` 승인·수동 | 관찰 이벤트는 실험 제안으로 |
 | 바꿀 수 없는 영역 | 별도 승인 | 설정에 칸이 없음 | 경로 자체가 없게 |
 | 경로 | `/optimization/strategies/:id` | `/optimization?persona&platform` | Strategy가 하나 |
+
+---
+
+## 36. Multi-Persona Architecture ✅
+
+> 여러 Persona가 인프라(Supabase, n8n, Python, ComfyUI, GPU, LLM, Storage)를 공유하면서 Identity·Memory·Strategy·Permission·Performance는 독립적으로 운영되는 구조다. PRD 8장 Phase 7(Multi-Persona Operation)은 **Long-term이지만 "데이터 구조는 MVP부터"**다. 그래서 이 장은 먼저 **이미 있는 격리**를 정리하고(36.1), 남은 빈틈(GPU 공정성, Persona × 플랫폼 권한, Persona 간 중복 콘텐츠, Persona 단위 장애 차단, 교차 Persona 지식)을 단계별로 정한다. **아직 구현되지 않은 부분이 대부분이다.** ⚙️ 표시는 원안을 조정한 부분이다 (36.13).
+
+### 36.1 이미 있는 것: Persona가 Tenant다
+
+원안 36.4의 "Persona를 Tenant처럼"은 **0001부터 그렇게 되어 있다.** 원안의 원칙 5개(Persona 격리, 인프라 공유, Persona별 상태, 자원 공정성, 장애 격리) 중 앞의 셋은 이미 지켜지고 있다.
+
+| 원안 요구 | 현재 | 위치 |
+|---|---|---|
+| 주요 Entity에 `persona_id` | `content_jobs`, `assets`, `automation_jobs`, `posts`, `social_accounts`, `system_errors`, `persona_assets` (0001). V1·V2 테이블(`conversations`, `fan_memories`, `ai_decisions`, `experiments`, `strategy_versions`, `optimization_runs`)도 모두 `persona_id`를 가진다 | 10장, 29~35장 |
+| User → 여러 Persona | `personas.user_id`, `unique(user_id, slug)` | 0001 |
+| Persona 단위 RLS (원안 36.50) | `personas.user_id = auth.uid()`인 행만 보이고, 하위 테이블은 Persona 소유로 걸러진다. Operator RPC는 `require_owned_persona` | 0005, 0003 |
+| `persona_id`를 입력 그대로 믿지 않음 (원안 36.51) | Operator RPC가 소유권을 확인한다. 브릿지는 선점한 `automation_jobs` 행의 `persona_id`를 쓰고(요청 본문이 아님), Persona·Asset을 DB에서 다시 읽는다 | 15.8, `app/worker.py` |
+| Identity LoRA는 Persona 전용 (원안 36.9·36.38) | 브릿지는 그 Persona의 `persona_assets`만 읽고(`persona_id` 조건), `lora_persona_asset_id`가 그 목록에 없으면 실패한다. 다른 Persona의 LoRA를 쓸 경로가 없다 | 13.7, `app/comfyui/builder.py` |
+| 공유 Asset (Base Model, 공용 Workflow) | Workflow Registry(`comfy_workflows`)와 PC의 모델 파일. Persona가 소유하지 않는다 | 13장 |
+| Social Account는 Persona에 묶임 (원안 36.27) | `social_accounts.persona_id`, 게시 전 검사 3번 "같은 Persona 소유" | 28.8 |
+| 팬 대화·Memory 분리 (원안 36.28·36.29) | `conversations` Unique `(persona_id, platform, channel, external_user_id)`, `fan_memories.persona_id` | 31.4·31.11 |
+| LLM Context는 Persona 하나 기준 (원안 36.35·36.36) | 모든 Context RPC(`get_decision_context`, `get_reply_context`, Analytics Context)가 `persona_id` 하나를 받는다. 교차 Persona 데이터는 넣지 않는다 | 29.14, 30.5, 31.6, 33.2 |
+| Strategy는 Persona × 플랫폼별 (원안 36.10·36.71) | `strategy_versions`의 Champion. 원안의 `persona_strategy_states`는 이것이라 새로 만들지 않는다 ⚙️ | 35.2·35.4 |
+| Persona별 오류·비용 (원안 36.43·36.60) | `system_errors.persona_id`, 32.13 비용 추정은 Persona별로 계산 | 10.19, 32.13 |
+| 세 단계 정지 (원안 36.66) | Persona(`agent_paused`), 플랫폼(`platform_controls`), 전역(`emergency_stop_all`) | 33.10 |
+
+**확인할 빈틈 하나** ⚙️: 브릿지는 Job의 `persona_id`로 Persona를 읽고 Content Job은 `content_job_id`로 따로 읽는다. `create_automation_job`은 둘이 다르면 거부하지만(0004), 테이블 제약은 아니라서 `service_role`로 직접 넣은 행은 막지 못한다. 방어용으로 ① 브릿지에 "`content_job.persona_id == job.persona_id`가 아니면 `INPUT_NOT_FOUND`" 검사를 넣고, ② `automation_jobs`에 같은 Persona를 확인하는 트리거를 둔다. **MVP 수정 항목**이다 (작은 변경).
+
+### 36.2 Persona 상태와 준비도 ⚙️
+
+원안 36.20의 상태 9개(`DRAFT` ~ `ERROR`)는 32.6과 같은 이유로 **칸을 늘리지 않고** 기존 값의 조합으로 표시한다. 상태를 칸으로 저장하면 권한 수준·스위치와 어긋날 수 있다.
+
+| 원안 | 조건 |
+|---|---|
+| `DRAFT` | `active`이지만 준비도(아래) 미달. 생성은 되지만 AI·게시가 막힌다 |
+| `ACTIVE` | `personas.status = 'active'`, 준비도 충족 |
+| `AUTONOMOUS`, `HUMAN_REVIEW` | 권한 수준으로 계산 (32.6) |
+| `PAUSED` | `agent_paused = true` (32.6) |
+| `MAINTENANCE`, `ARCHIVED` | `personas.status = 'inactive'`. 지우지 않는다 (원안 36.21 "삭제 대신 ARCHIVED", 21.17과 같음) |
+| `EMERGENCY_STOP` | 전역·플랫폼 스위치 (33.10) |
+| `ERROR` | 계산값: 계정 `inactive`, 미해결 CRITICAL 오류, Persona 생성 차단(36.5) |
+
+**준비도** (원안 36.22·36.23): `get_persona_readiness(p_persona_id)`가 항목별로 통과·미달을 돌려준다.
+
+| 항목 | 통과 조건 | 미달이면 막히는 것 |
+|---|---|---|
+| Identity | 이름, 설명, 성격, 말투, `background.facts` | AI 기능 (Context가 비어 있음) |
+| Visual | 활성 Face Reference 또는 LoRA 하나 이상, `visual_settings` 기본 해상도 | 없음 (경고만. Operator는 참조 없이도 생성할 수 있다) |
+| Safety | `safety_rules`, `content_rules.forbidden_topics`·`sensitive_topics`, `interaction_rules.never_claim` | 권한 수준 1 이상, `fan_reply_level` 1 이상으로 올리기 |
+| Social | 그 플랫폼 `active` 계정 | 그 플랫폼 게시 (28.8 3번) |
+| Strategy | 그 플랫폼 Champion Strategy (35.2) | Agent·일정 Job의 전략 적용 (빈 칸은 Persona 기본값) |
+
+- 원안의 "Readiness 100%"처럼 **하나의 퍼센트로 합치지 않는다.** 무엇이 빠졌는지가 중요하고, 항목마다 막는 기능이 다르기 때문이다. 화면은 체크 목록으로 보여준다.
+- 권한 수준을 올리는 RPC가 준비도를 확인한다. 준비도가 나중에 떨어지면(예: 안전 규칙을 비움) 권한 수준을 자동으로 0으로 내리고 알린다.
+
+### 36.3 Persona × 플랫폼 권한 ⚙️
+
+원안 36.24~36.26의 Persona × 플랫폼 자율 수준 표를 **상한(cap)**으로 구현한다.
+
+```text
+실효 수준 = min( personas.agent_permission_level,       ← Persona 수준 (15.19)
+                 persona_platform_settings.agent_level_cap, ← 이 Persona의 이 플랫폼 상한
+                 정책 문서의 플랫폼 규칙 (33.5) )           ← 시스템 전체 플랫폼 규칙
+```
+
+**persona_platform_settings** (원안 36.69, 칸을 줄임)
+
+| Column | Type | Description |
+|---|---|---|
+| persona_id, platform | PK | 대상 |
+| enabled | boolean | 이 Persona가 이 플랫폼을 쓰는가 (끄면 그 플랫폼 게시·응답·AI Action 없음) |
+| agent_level_cap | smallint, 0~5 | 이 플랫폼의 `agent_permission_level` 상한 |
+| fan_reply_level_cap | smallint, 0~3 | 이 플랫폼의 `fan_reply_level` 상한 |
+| updated_at | timestamptz | 수정 |
+
+- 행이 없으면 상한 없음(Persona 수준 그대로)이다. Persona 수준을 둘로 쪼개지 않고 상한만 두는 이유: 30·31·33장의 판정 로직이 Persona 수준 하나를 기준으로 되어 있고, 상한은 그 위에 `min` 하나만 더하면 된다.
+- 원안 36.69의 `posting_limits`·`content_rules_override`는 두지 않는다. 게시 한도는 15.18, 게시 계획은 Persona × 플랫폼 Strategy(35.2)에 이미 있다. 플랫폼별 콘텐츠 규칙이 필요해지면 그때 더한다.
+- 원안 36.26 예처럼 Instagram L4를 주려면 32.10 승급 조건을 그 Persona가 그 플랫폼에서 만족해야 한다 (Long-term).
+- 원안 36.49의 Persona별 역할(OWNER·EDITOR·VIEWER…)은 **Long-term**이다. 지금은 Persona 소유자 한 명 + 시스템 역할(`admin`·`operator`, 15.4)이다. 여러 사람이 한 Persona를 관리하게 되면 `persona_members(persona_id, user_id, role)`를 추가하고 RLS 기준을 `user_id`에서 멤버십으로 바꾼다.
+
+### 36.4 자원 공정성 (GPU·LLM)
+
+**지금 상태:** GPU Job은 `priority desc, created_at` 순으로 선점된다 (0001 인덱스). Persona별 한도는 Content Job 생성 속도(시간당 30)와 게시(하루 10)뿐이고, 생성 이미지 한도(300)와 LLM 한도(1,000)는 **전체 합계**다. 한 Persona가 Job을 많이 넣으면 GPU를 오래 차지할 수 있다.
+
+**단계별 해결** (원안 36.15~36.19·36.59)
+
+| 단계 | 방법 |
+|---|---|
+| MVP·V1 | 지금 그대로 (원안 36.41도 MVP는 단순 FIFO·우선순위). Persona가 1~2개라 문제가 작다 |
+| V2 ⚙️ | **Persona별 한도 덮어쓰기:** `personas.limits_override jsonb` (예: `{"daily_generation_limit": 120, "daily_llm_calls": 300}`). 전체 한도보다 크게 줄 수 없고(DB 검증), 비어 있으면 전체 한도를 그대로 쓴다. 한도 확인 함수(15.18)가 Persona 값과 전체 값을 둘 다 본다 |
+| V2 ⚙️ | **공정 선점:** `claim_next_automation_job(generation)`이 같은 우선순위 안에서 **오늘 GPU를 가장 적게 쓴 Persona의 Job**을 먼저 고른다 (오늘 `generation` Job 실행 시간 합, `execution_logs`). 우선순위를 뒤집지는 않는다 |
+| Long-term | 대기 시간(aging) 가산, Persona별 GPU 분 단위 예산(원안 `daily_gpu_budget_minutes`), 같은 모델을 쓰는 Job 묶기(원안 36.41) |
+
+- 원안 36.16의 우선순위 방향(1 = Emergency, 10 = Low)은 이 시스템과 **반대**다. 여기서는 10이 가장 높다 (`priority desc`, 10.15). 원안 예 "Scheduled post 8 vs Experiment 5"는 이 시스템에서도 8이 먼저다.
+- 원안 36.19의 "전체 100 중 Persona별 30 + 예비 10" 같은 **예약 배분은 하지 않는다** ⚙️. 예약하면 쓰지 않는 Persona의 몫이 놀게 된다. 대신 Persona 상한(덮어쓰기)과 공정 선점으로 독점을 막는다.
+- 원안 36.59의 `THROTTLED` 상태는 칸으로 두지 않는다. 한도에 걸리면 기존대로 `RATE_LIMITED`이고, Persona 상세에 "오늘 한도 n% 사용"으로 보인다.
+
+### 36.5 장애 격리 ⚙️
+
+원안 36.42·36.65: Persona A의 문제가 B·C를 멈추면 안 된다.
+
+| 장애 | 지금 | 추가 |
+|---|---|---|
+| A의 생성 실패 (LoRA 손상, 잘못된 설정) | 그 Job만 `failed`, 브릿지는 다음 Job으로 (19장). B·C는 계속 | **Persona 생성 차단기:** A의 `generation` Job이 재시도 불가 오류(`LORA_NOT_FOUND`, `MODEL_NOT_FOUND`, `WORKFLOW_PARAM_INVALID`, `OUTPUT_INVALID` 반복)로 연속 3번 최종 실패하면, A의 새 `generation` Job 선점을 막고(`personas.generation_blocked_at`) WF-010으로 알린다. Operator가 원인을 고치고 [생성 재개]를 누른다 |
+| A의 재시도 폭주 | Job별 최대 3회 (14.11) | 차단기가 A의 새 Job을 막으므로 GPU를 계속 차지하지 않는다 |
+| A의 계정 토큰 만료 | A의 그 플랫폼 게시만 실패 (28.6) | – |
+| A의 팬 메시지 폭주 | A의 그 대화만 `spam`·`paused` (31.7), 팬 LLM 한도는 전체 (31.10) | V2: 팬 LLM 한도를 Persona별 덮어쓰기(36.4)로 나눌 수 있다 |
+| 브릿지 자체 장애 (CUDA 오류, 메모리 부족) | 모든 Persona의 생성이 멈춘다. GPU가 하나라 피할 수 없다 | 37장 Monitoring의 서비스 단위 차단기가 다룬다 |
+
+차단기는 "특정 Persona의 설정이 망가진 경우"를 위한 것이다. 일시적 오류(`COMFY_UNREACHABLE`, `TIMEOUT`, `CUDA_ERROR`)는 세지 않는다. 이것은 Persona가 아니라 시스템 문제다.
+
+### 36.6 Persona 간 중복 콘텐츠 ⚙️
+
+원안 36.31은 이 장에서 가장 실제적인 위험이다. 한 운영자가 여러 계정에 거의 같은 콘텐츠를 올리면 플랫폼이 **조직적 비진정 행위(coordinated inauthentic behavior)**나 스팸으로 볼 수 있다 (구현 시 플랫폼 정책 확인).
+
+| 단계 | 방법 |
+|---|---|
+| V1 (Persona가 2개 이상일 때) | 브릿지가 생성 직후 이미지 **지각 해시(pHash)**를 계산해 `assets.generation_metadata.phash`에 남긴다. 게시 전 검사(28.8)에 10번을 더한다: 같은 User의 **다른 Persona**가 최근 30일 안에 게시한 Asset과 해밍 거리 ≤ 6이면 `DUPLICATE_RISK` 경고. 승인 화면에 두 이미지를 나란히 보여주고, 사람이 판단한다 (자동 차단 아님) |
+| V1 | 캡션: 같은 조건에서 캡션이 거의 같으면(정규화 후 같은 문장이 80% 이상) 같은 경고 |
+| Long-term | 프롬프트·주제 유사도 |
+
+- 원안대로 같은 주제(예: 둘 다 "Paris")는 막지 않는다. 막는 것은 **거의 같은 결과물**이다.
+- Persona 간 콘텐츠 복제(같은 Asset을 두 Persona에 게시)는 할 수 없다: `posts.asset_id`의 Asset은 `posts.persona_id`와 같은 Persona 소유여야 한다 (DB 제약 추가, MVP 수정 항목).
+- **Campaign** (원안 36.32~36.34)은 Long-term이다. 생기더라도 Campaign은 주제·기간·예산을 공유할 뿐이고, Persona의 성격·안전 규칙을 바꾸지 않으며(원안 36.34), 중복 검사도 그대로 받는다.
+
+### 36.7 교차 Persona 지식과 실험 (Long-term) ⚙️
+
+원안 36.11~36.14·36.63·36.64. 방향은 원안과 같다: **Global Knowledge는 "써볼 만한 것"이지 Persona 전략이 아니다.**
+
+| 규칙 | 내용 |
+|---|---|
+| 우선순위 (원안 36.13 채택) | Persona 규칙 > Persona의 근거(그 Persona의 실험) > Global Knowledge > 기본값 |
+| 승격 조건 | 서로 다른 Persona **3개 이상**에서 같은 방향의 `variant_wins`(34.7)가 나오고, 반대 방향 결과가 없을 때 (원안 "최소 2개 권장"보다 엄격하게. Persona 두 개가 같은 Operator의 비슷한 계정이면 독립이 아니다) |
+| 쓰임 | **다른 Persona에서 실험을 제안하는 근거**로만 쓴다 (34.15). 그 Persona의 Strategy 후보는 그 Persona 자신의 실험 결과로만 만든다 (35.5). Global Knowledge가 바로 후보가 되는 경로는 없다 |
+| 교차 Persona 실험 | 같은 가설을 Persona마다 따로 실험하고 결과도 Persona별로 판정한다 (34.5 동시 실험 제한은 Persona별이라 충돌하지 않는다). 합친 결과는 보여주기만 한다 |
+| Context | Global Knowledge를 Decision Context에 넣을 때는 패턴 이름·Persona 수·방향만. 다른 Persona의 이름·수치·콘텐츠는 넣지 않는다 (원안 36.37 Identity Leakage 방지) |
+| 교차 Persona 최적화 (원안 36.62) | 자원 배분(GPU·LLM·실험 예산) 조정 제안까지. Persona 정체성·안전 정책은 대상이 아니다 (원안과 같음). 제안은 Operator가 36.4 덮어쓰기로 반영한다 |
+
+**팬의 교차 Persona 신원** (원안 36.30): **만들지 않는다** ⚙️ (원안: "별도 승인/정책이 필요"). 같은 사람이 두 Persona와 대화했다는 사실을 연결하면, 팬이 한 캐릭터에게 한 말을 다른 캐릭터가 알게 된다. 팬은 이를 예상하지 않으며, 개인정보를 수집 목적(그 Persona와의 대화) 밖에서 쓰는 것이다 (15.12). 집계 지표(예: "두 Persona 모두와 대화한 팬 수")도 만들지 않는다.
+
+### 36.8 Controller와 설정 우선순위
+
+**Controller** (원안 36.55~36.57): 원안의 `[PA] 020`은 이 시스템의 WF-015다 (32.2). WF-015는 이미 **Persona마다 따로** 이벤트를 감지하고 Persona별 `decision` Job을 만든다. 한 Persona의 Run 실패는 그 Job의 실패일 뿐이다 (원안 36.56 Cycle 격리). 원안의 "Global Controller"가 맡는 전체 예산·큐·안전은 별도 Workflow가 아니라 **DB 한도와 스위치**(15.18, 33.10)다.
+
+**설정 우선순위** (원안 36.54): 33.6의 평가 순서와 같다. 원안 목록과의 대응: Emergency/System Safety = 33.6의 1·2(긴급 정지, 하한), Platform Policy = 3, Global System Policy·Persona Safety·Persona Rules = 4~6, Persona Strategy = 35.2, Global Default = `app_settings`와 Workflow Registry 기본값. **안전 규칙은 Persona가 낮출 수 없다** (33.4).
+
+**덮어쓰기** (원안 36.52·36.53): Persona가 덮어쓸 수 있는 것은 정해져 있다.
+
+| 덮어쓰기 가능 (소유 Operator) | 덮어쓰기 불가 (admin만, 전체 적용) |
+|---|---|
+| `visual_settings`(기본 Workflow·해상도·LoRA 강도), 언어, 말투, 주제·스타일 목록, Strategy, 한도를 **낮추는** 덮어쓰기 | LLM 제공자·모델, Base Model 목록, Workflow Registry, n8n Workflow, 정책 문서(33.5), 전체 한도, 비용 한도 |
+
+한도를 **높이는** 덮어쓰기(전체 한도 안에서)는 admin만 한다.
+
+**Persona별 시간대** ⚙️ (원안 36.6 Timezone): 29.9의 시간대 구간은 `app_settings.analytics.timezone` 하나였다. Persona마다 주 시청자 지역이 다를 수 있으므로 `personas.timezone`(기본값은 전체 설정)을 더하고, 시간대·요일 분석(29.9)과 Schedule Engine(30.11)이 이 값을 쓴다 (V2).
+
+원안 36.6의 나머지 항목(Identity Rules, Brand Identity, Audience Profile, Default Platform)은 칸을 새로 만들지 않는다. Identity는 기존 `background`·`personality`·`interaction_rules.never_claim`, Brand는 `content_rules`, 플랫폼은 `persona_platform_settings`가 맡는다. Audience Profile은 분석(29장)으로 알게 되는 것이라 Operator 입력 칸으로 두지 않는다.
+
+### 36.9 화면
+
+경로는 18.3에 이미 있다: `/dashboard`(MVP), `/personas`(MVP), `/personas/:id`(MVP).
+
+**`/personas`** (원안 36.45)
+
+| 칸 | 내용 |
+|---|---|
+| Persona | 이름, 프로필 이미지, 표시 상태(36.2) |
+| 준비도 | 미달 항목 수 (클릭하면 목록) |
+| 권한 | `agent_permission_level`·`fan_reply_level`, 플랫폼 상한이 있으면 함께 |
+| 운영 | 대기·생성 중 Job 수, 오늘 한도 사용률, 오늘 오류 수, 생성 차단 여부 |
+| 성과 (V1~) | 최근 30일 게시 수, 24h 조회수 중앙값의 기준선 대비 |
+
+원안 예의 "Performance 8.4/10"과 원안 36.48의 하나의 Health Score는 쓰지 않는다 ⚙️. Persona마다 팔로워 규모·주제가 달라 점수를 나란히 놓으면 오해를 부르고, 원안 스스로 "하나의 숫자가 모든 문제를 숨기지 않도록"이라고 경고한다. 37장 Monitoring에서 항목별 상태로 다룬다.
+
+**`/personas/:id` 탭** (원안 36.46): 현재 `profile`·`personality`·`visual`·`rules`에 단계별로 더한다. V1 `platforms`(계정, `persona_platform_settings`), `posts`, `analytics`. V2 `fans`, `ai`(Decision·권한 수준), `limits`(덮어쓰기·사용량), `errors`. V2 이후 `experiments`, `optimization`. 원안의 Content·Automation 탭은 기존 `/content-jobs?persona=…`, `/automation?persona=…` 필터로 보낸다 (같은 화면을 두 번 만들지 않는다).
+
+**`/dashboard`** (원안 36.47): 기존 Overview(17장)에 Persona 수(표시 상태별)와 Persona별 한 줄 요약을 더한다. 전체 합계(총 조회수 등)는 V1부터. 원안의 "AI Decision Success", "Optimization Uplift"는 각각 `/strategy`(32.12), `/optimization`(35.14)에 있다.
+
+### 36.10 감사 기록
+
+원안 36.75의 항목(user, persona, platform, agent, action, resource, risk, decision, result, timestamp)은 이미 남는다: Operator 행동은 `state_transitions`(11.14, `actor_type`·`actor_id`·`persona_id`)와 `security_events`, AI 행동은 `ai_decisions`(`persona_id`, `agent`, `risk_level`, `permission`, `policy_version`, 30.7·33.11), 실행은 `automation_jobs`·`execution_logs`. 새 감사 테이블은 만들지 않는다.
+
+### 36.11 데이터 모델 정리
+
+원안 36.68의 추가 테이블 5개:
+
+| 원안 | 결정 |
+|---|---|
+| `persona_platform_settings` | **채택** (칸을 줄여서, 36.3), V2 |
+| `persona_resource_quotas` | `personas.limits_override jsonb`로 (36.4). 한도 종류가 늘어도 칸을 늘리지 않아도 된다, V2 |
+| `persona_permissions` | Long-term `persona_members` (36.3) |
+| `persona_strategy_states` | 만들지 않음. `strategy_versions`의 Champion이 그것이다 (35.4) |
+| `persona_health_snapshots` | 만들지 않음. 상태는 계산하고, 추이가 필요하면 37장 Monitoring에서 정한다 |
+
+그 밖에 더하는 칸: `personas.generation_blocked_at`(36.5, V1), `personas.timezone`(36.8, V2), `assets.generation_metadata.phash`(36.6, V1, jsonb라 칸 추가 없음). 제약: `posts`의 Asset과 Persona 일치, `automation_jobs`와 Content Job의 Persona 일치 (MVP 수정 항목, 36.1·36.6).
+
+### 36.12 작업 목록과 테스트
+
+| 단계 | 작업 |
+|---|---|
+| **MVP 수정** | 브릿지 `content_job.persona_id == job.persona_id` 검사, `automation_jobs`·`posts`의 Persona 일치 트리거, 격리 테스트(아래) |
+| V1 | Persona 생성 차단기(`generation_blocked_at`, [생성 재개]), pHash 기록과 게시 전 검사 10번(중복 경고), 준비도 RPC와 체크 목록, `/personas` 운영 칸 |
+| V2 | `persona_platform_settings`(상한), `limits_override`, 공정 선점, `personas.timezone`, Persona 상세 탭 추가 |
+| Long-term | `persona_members`(역할), Campaign, 교차 Persona 지식·실험, GPU 분 예산, 모델 묶음 처리, Persona ROI(원안 36.61, 수익 추적 필요) |
+
+**격리 테스트** (MVP부터 tests/db에 둔다)
+
+| 경우 | 기대 |
+|---|---|
+| Operator X가 Operator Y의 Persona로 RPC 호출 | `NOT_FOUND` |
+| Operator X가 Y의 `content_jobs`·`assets`·`posts`·`fan_memories` 조회 | 0행 (RLS) |
+| A의 Content Job에 B의 `persona_id`를 가진 Automation Job 생성 시도 | 트리거가 거부 |
+| A의 Asset으로 B의 Post 생성 시도 | 거부 |
+| A의 Content Job에 B의 LoRA(`lora_persona_asset_id`) 지정 | 브릿지가 `LORA_NOT_FOUND`로 실패 |
+| `get_decision_context(A)`, `get_reply_context(A의 대화)` 결과 | B의 이름·ID·콘텐츠·팬 정보가 하나도 없음 |
+| A의 생성이 `LORA_NOT_FOUND`로 3번 연속 실패 | A 생성 차단, B·C Job은 계속 선점됨 |
+| A와 B가 거의 같은 이미지 게시 시도 (V1) | B의 승인 화면에 `DUPLICATE_RISK` |
+| 같은 우선순위에서 A가 오늘 GPU를 더 많이 씀 (V2) | B의 Job이 먼저 선점됨 |
+| A의 플랫폼 상한 1, Persona 수준 3 (V2) | 그 플랫폼에서 실효 수준 1 |
+
+### 36.13 원안 조정
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 범위 | 새 아키텍처 | 격리는 0001부터 있음, 빈틈만 단계별로 | PRD Phase 7 "데이터 구조는 MVP부터" |
+| Persona 상태 | 9개 상태 | 기존 값 조합 + 준비도, 칸 추가 없음 | 32.6과 같음 |
+| 준비도 | 퍼센트 점수 | 항목별 체크, 항목마다 막는 기능이 다름 | 무엇이 빠졌는지가 중요 |
+| Persona × 플랫폼 자율 수준 | 칸마다 수준 | Persona 수준 + 플랫폼 상한(`min`) | 판정 로직을 그대로 쓰면서 플랫폼 차이 반영 |
+| `persona_platform_settings` | 8개 칸 | 상한·사용 여부만 | 게시 한도·계획은 이미 다른 곳에 |
+| 우선순위 방향 | 1 = Emergency | 이 시스템은 10이 최고 | 10.15 |
+| 자원 예약 배분 | Persona별 몫 + 예비 | 하지 않음. Persona 상한 + 공정 선점 | 노는 몫이 생김 |
+| `THROTTLED` | 상태 | `RATE_LIMITED` + 사용률 표시 | 상태 추가 없이 |
+| 장애 격리 | 원칙 | Persona 생성 차단기(재시도 불가 오류 3번 연속) | 망가진 설정이 GPU를 계속 차지하지 않게 |
+| 중복 콘텐츠 | 유사도 비교 | V1부터 pHash·캡션 비교, 경고만 (사람 판단) | 플랫폼의 조직적 행위 정책 |
+| Asset 복제 | 정책 | DB 제약으로 불가 | 경로 자체를 없앰 |
+| Global Knowledge 승격 | Persona 2개 이상 | 3개 이상, 다른 Persona에서는 실험 제안 근거로만 | 독립성, 35.5 원칙 |
+| 팬 교차 신원 | 별도 승인 시 가능 | 만들지 않음 (집계도 없음) | 수집 목적 밖 이용 (15.12) |
+| 역할 (OWNER 등) | 6개 | Long-term `persona_members` | 지금은 소유자 한 명 |
+| `persona_strategy_states`, `persona_health_snapshots` | 새 테이블 | `strategy_versions` Champion / 계산값 | 같은 것을 두 번 저장하지 않음 |
+| `persona_resource_quotas` | 새 테이블 | `personas.limits_override` jsonb | 한도 종류가 늘어도 그대로 |
+| Global Controller | 별도 Controller | DB 한도와 스위치 | 32.2 |
+| Health Score, Performance 점수 | 하나의 숫자 | 쓰지 않음, 항목별 상태 | Persona 간 비교 오해 |
+| Persona 상세 탭 | 12개 | 단계별로 추가, Content·Automation은 기존 화면 필터로 | 같은 화면을 두 번 만들지 않음 |
+| Timezone | Identity 항목 | `personas.timezone`으로 분석·예약에 사용 | 29.9의 전역 값 하나를 Persona별로 |
+| 빈틈 | – | 브릿지·DB의 Persona 일치 검사 (MVP 수정) | 지금 제약으로는 보장되지 않음 |
