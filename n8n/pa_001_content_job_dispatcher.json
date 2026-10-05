@@ -331,7 +331,35 @@
     },
     {
       "parameters": {
-        "content": "## [PA] 001 - Content Job Dispatcher (TECH 14.6)\n- 위: Supabase Database Webhook (`content_jobs` INSERT·UPDATE) → `queued`로 바뀐 Job만\n- 가운데: 1분마다 `queued` Content Job 10건 (놓친 Webhook)\n- 아래: 1분마다 5분 넘게 `generating`인 Content Job에 prompt Job이 있는지 확인 (선점 직후 실패 복구, 키가 같아 중복 없음). 새로 생긴 Job은 WF-002의 안전망이 가져간다\n\n`claim_content_job` → prompt Job 생성 (`prompt:{content_job_id}:{run_number}`) → WF-002 호출 (기다리지 않음)\n\n**import 후:** `YOUR-PROJECT-REF` 치환, `WF-002 실행` 노드에서 `[PA] 002 - Prompt Generator` 선택\nCredential: Webhook → `PA Webhook Secret`, Supabase 노드 → `PA Supabase`\nSettings → Error Workflow: `[PA] 006 - Error Handler`",
+        "method": "POST",
+        "url": "https://YOUR-PROJECT-REF.supabase.co/rest/v1/rpc/report_worker_status",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ p_worker_id: 'n8n', p_kind: 'n8n', p_info: { version: 'm3' } }) }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "pa001-report-status",
+      "name": "n8n 상태 보고",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        720
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "content": "## [PA] 001 - Content Job Dispatcher (TECH 14.6)\n- 위: Supabase Database Webhook (`content_jobs` INSERT·UPDATE) → `queued`로 바뀐 Job만\n- 가운데: 1분마다 `queued` Content Job 10건 (놓친 Webhook)\n- 아래: 1분마다 5분 넘게 `generating`인 Content Job에 prompt Job이 있는지 확인 (선점 직후 실패 복구, 키가 같아 중복 없음). 새로 생긴 Job은 WF-002의 안전망이 가져간다\n- 맨 아래: 1분마다 `report_worker_status('n8n')` → Header 시스템 상태의 n8n Online 표시 (17.4)\n\n`claim_content_job` → prompt Job 생성 (`prompt:{content_job_id}:{run_number}`) → WF-002 호출 (기다리지 않음)\n\n**import 후:** `YOUR-PROJECT-REF` 치환, `WF-002 실행` 노드에서 `[PA] 002 - Prompt Generator` 선택\nCredential: Webhook → `PA Webhook Secret`, Supabase 노드 → `PA Supabase`\nSettings → Error Workflow: `[PA] 006 - Error Handler`",
         "height": 420,
         "width": 680
       },
@@ -379,6 +407,11 @@
           },
           {
             "node": "멈춘 generating Content Job 조회",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "n8n 상태 보고",
             "type": "main",
             "index": 0
           }

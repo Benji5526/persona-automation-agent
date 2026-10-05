@@ -18,7 +18,7 @@ Lovable ─RPC─▶ Supabase ──DB Webhook──▶ n8n (원격 서버, Dock
 |---|---|---|---|
 | `pa_006_error_handler.json` | [PA] 006 - Error Handler | Error Trigger | 다른 Workflow의 예기치 못한 실패 → `fail_automation_job` 또는 `system_errors` |
 | `pa_003_generation_dispatcher.json` | [PA] 003 - Generation Dispatcher | DB Webhook + 1분 | `pending` generation Job → 브릿지 `POST /v1/jobs` |
-| `pa_001_content_job_dispatcher.json` | [PA] 001 - Content Job Dispatcher | DB Webhook + 1분 | `queued` Content Job 선점 → prompt Job → WF-002 |
+| `pa_001_content_job_dispatcher.json` | [PA] 001 - Content Job Dispatcher | DB Webhook + 1분 | `queued` Content Job 선점 → prompt Job → WF-002, n8n 상태 보고 |
 | `pa_llm_structured_call.json` | [PA] LLM - Structured Call | WF-002·005가 호출 | LLM 호출 (가짜 LLM / Claude API) |
 | `pa_002_prompt_generator.json` | [PA] 002 - Prompt Generator | WF-001 호출 + 1분 | LLM → `prompt_generation.v1` 검증 → `prompt_parts` 저장 → generation Job |
 | `pa_004_generation_result_handler.json` | [PA] 004 - Generation Result Handler | 브릿지 콜백 + 5분 | 완료된 Asset마다 caption Job → WF-005 |

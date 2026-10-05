@@ -4761,7 +4761,7 @@ Supabase ──Webhook·안전망──▶ n8n ──▶ LLM (prompt·caption)
 
 | Workflow | 즉시 (이벤트) | 안전망 (Schedule) |
 |---|---|---|
-| WF-001 | `content_jobs` INSERT·UPDATE → `queued`로 바뀐 것 | 1분: `queued` 10건 + 5분 넘게 `generating`인 Content Job 복구 |
+| WF-001 | `content_jobs` INSERT·UPDATE → `queued`로 바뀐 것 | 1분: `queued` 10건 + 5분 넘게 `generating`인 Content Job 복구 + n8n 상태 보고(`report_worker_status`, 17.4) |
 | WF-002 | WF-001이 호출 | 1분: `claim_next_automation_job('prompt')` |
 | WF-003 | `automation_jobs` INSERT (generation) | 1분: `run_after`가 지난 pending generation 5건 |
 | WF-004 | 브릿지 콜백 | 5분: Post 없는 최근 Asset에 caption Job |
