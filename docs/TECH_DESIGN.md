@@ -5,7 +5,7 @@
 | 기준 문서 | [PRD v1.0](PRD.md) |
 | 최종 수정 | 2026-10-05 |
 | 상태 | v1.0 기술 설계 1차 완성 |
-| 진행 | 9. System Architecture ✅ · 10. Database / ERD ✅ · 11. State Machine ✅ · 12. API Specification ✅ · 13. ComfyUI Workflow Spec ✅ · 14. n8n Workflow Spec ✅ · 15. Security ✅ · 16. Implementation Plan ✅ · 17. UI/UX Spec ✅ · 18. Frontend Spec ✅ · 19. Backend (Python) Spec ✅ · 20. n8n Implementation Spec ✅ · 21. Supabase Implementation Spec ✅ · 22. Lovable Master Build Spec ✅ · 23. Lovable Master Prompt ✅ · 24. Supabase Production ✅ |
+| 진행 | 9. System Architecture ✅ · 10. Database / ERD ✅ · 11. State Machine ✅ · 12. API Specification ✅ · 13. ComfyUI Workflow Spec ✅ · 14. n8n Workflow Spec ✅ · 15. Security ✅ · 16. Implementation Plan ✅ · 17. UI/UX Spec ✅ · 18. Frontend Spec ✅ · 19. Backend (Python) Spec ✅ · 20. n8n Implementation Spec ✅ · 21. Supabase Implementation Spec ✅ · 22. Lovable Master Build Spec ✅ · 23. Lovable Master Prompt ✅ · 24. Supabase Production ✅ · 25. 로컬 PC 운영 ✅ |
 
 ---
 
@@ -4680,7 +4680,7 @@ DB는 `pgserver`로 실제 PostgreSQL에 마이그레이션 0001~0007을 적용�
 - [x] ComfyUI 실행·대기·취소, 오류 분류, OOM 축소
 - [x] 실행 후 검증, Thumbnail, Storage 업로드, Asset 등록, 완료 콜백
 - [x] pytest (실제 DB + 가짜 ComfyUI) 통과
-- [ ] 실제 ComfyUI에서 `image_generation_v1` 1장 생성 (M0 환경 준비 후)
+- [ ] 실제 ComfyUI에서 `image_generation_v1` 1장 생성 (M0 환경 준비 후, 절차는 25.6)
 - [ ] n8n 연동 (M3), End-to-End (M5)
 
 ### 19.21 원안에서 조정한 부분과 이유
@@ -6077,4 +6077,183 @@ Supabase CLI 명령은 `supabase/README.md`에 있다. 1~12는 Lovable·n8n·브
 | 실패 흐름 | `system_errors.error_type = CUDA_ERROR` | `error_type = generation`, `error_code = CUDA_ERROR` | 6.9 분류와 13.12 상세 코드를 나눔 |
 | 추적 ID | `execution_log_id` 포함 | `execution_ref`(n8n 실행 ID·ComfyUI prompt_id)로 연결 | 20.13 |
 | 검증 | 체크리스트만 | `verify_production.sql` + 실제 프로젝트 확인 절차 | 적용된 상태를 증명 |
+
+---
+
+## 25. Python Local Execution Layer — 로컬 PC 운영 ✅
+
+> Python 브릿지의 API·실행 흐름·오류 분류·보안은 **19번이 정본**이고 M2로 구현되어 있다 (`app/`). 이 장은 19번을 반복하지 않고, 그 브릿지를 **RTX 5080이 있는 Windows PC에서 실제로 돌리는 방법**을 정한다: 설치, 폴더, ComfyUI·브릿지·터널 실행, 자동 시작, 첫 실제 생성(M2의 남은 완료 조건), 장애 대응. ⚙️ 표시는 원안을 조정한 부분이다 (25.9).
+
+### 25.1 원안과 19번의 관계
+
+원안 25번의 대부분은 19번에 같은 결정이 있다. 서로 다른 부분은 19.21에서 이유와 함께 정리했다.
+
+| 원안 25 | 현재 | 위치 |
+|---|---|---|
+| `POST /jobs/generate` (`automation_job_id`, `content_job_id`, `persona_id`) → 생성이 끝난 뒤 `asset_id` 응답 | `POST /v1/jobs` (`job_id`만) → 즉시 `202`, 결과는 DB + 콜백 ⚙️ | 19.4, 20.9 |
+| "요청은 작게, Python이 Supabase에서 정본 데이터를 읽는다" | 같음 (원안 25.11·25.12) | 19.4 |
+| `/health` + `/ready` | `/v1/health`(최소 정보, 인증 없음) + `/v1/status`(GPU·대기열, 인증) ⚙️. Supabase 연결은 Worker 상태 보고로 확인 | 19.4, 19.13 |
+| `Authorization: Bearer <PYTHON_API_TOKEN>` | `X-Bridge-Token` + Cloudflare Access ⚙️ | 19.17 |
+| 상태: Automation `CLAIMED → RUNNING → SUCCEEDED`, Content `GENERATED`, Asset `GENERATING → READY` | 선점 시 `processing`, 완료 시 `done`, Content Job `ready`(DB 트리거), Asset은 검증 후 `generated`로 처음 생성 ⚙️ | 19.5, 21.6 |
+| Python이 Content Job 상태를 직접 바꿈 | 바꾸지 않음. Automation Job만 보고하고 DB Rollup이 반영 ⚙️ | 19.1, 11.9 |
+| Workflow 선택: LoRA가 있으면 `_lora_v1` | `automation_jobs.payload.workflow` → `content_jobs.workflow` → `visual_settings.default_workflow` ⚙️ (명시된 값 우선, 추측하지 않음) | 19.9 |
+| 멱등 키 `generation:{automation_job_id}`, 이미 Asset이 있으면 기존 결과 반환 | DB 선점(`pending`만)과 잠금 확인. 같은 Job은 두 번 실행되지 않는다 | 19.7 |
+| 오류 코드 20여 개 | 13.12 코드 (대응표 19.11) | 19.11 |
+| OOM: 해상도 축소 1회 | 같음 (같은 값으로 한 번 더 실패한 뒤 batch → 해상도 순으로 한 번) | 19.12 |
+| Storage `generated-assets/{user_id}/…` | `media/persona/{persona_id}/assets/{asset_id}.png` ⚙️ | 19.15 |
+| 임시 폴더 `temp/{automation_job_id}`, 업로드 후 삭제 | 디스크에 쓰지 않음 (메모리 처리) ⚙️ | 19.15 |
+| Pydantic, Supabase Python Client, structlog | httpx, 직접 검증, logging + 비밀값 가리기 ⚙️ | 19.2 |
+| `execution/app/{api,services,models}` 구조 | `app/` + `app/comfyui/` | 19.3 |
+
+이 장에서 새로 정하는 것은 25.2~25.8이다.
+
+### 25.2 로컬 PC 구성
+
+```text
+Windows PC (RTX 5080, 일반 사용자 계정으로 실행 — 관리자 권한 X, 15.8)
+ ├─ NVIDIA 드라이버 (RTX 50 시리즈 지원 버전)
+ ├─ ComfyUI       127.0.0.1:8188   — 외부에 열지 않는다
+ ├─ Python 브릿지  127.0.0.1:8000   — 이 저장소의 app/
+ └─ cloudflared   Windows 서비스  — bridge 도메인 → 127.0.0.1:8000 (Access Service Token 필요)
+```
+
+| 폴더 | 내용 | git |
+|---|---|---|
+| `D:\Projects\persona-automation-agent\` | 이 저장소 (브릿지 코드, `workflows/`, `.env`, `.venv`) | `.env`·`.venv` 제외 |
+| `ComfyUI 설치 폴더\models\checkpoints\` | Base Model (`.safetensors`만, 15.8) | 저장소 밖 |
+| `ComfyUI 설치 폴더\models\loras\` | LoRA 파일. 파일 이름이 `persona_assets.name`과 같아야 한다 (22.9) | 저장소 밖 |
+| `ComfyUI 설치 폴더\output\` | ComfyUI가 저장하는 원본. 브릿지는 `/view`로 받아 가므로 지워도 된다 | 저장소 밖 |
+
+원안의 `C:\persona-automation\{execution,workflows,logs,temp}` 구조는 쓰지 않는다 ⚙️. 브릿지는 저장소에서 바로 실행하고(`workflows/`는 git으로 관리), 로그는 콘솔·작업 스케줄러 기록으로 보며, 임시 파일을 만들지 않는다.
+
+### 25.3 설치
+
+| # | 작업 | 확인 |
+|---|---|---|
+| 1 | NVIDIA 드라이버 최신 설치 | `nvidia-smi`에 RTX 5080 표시 |
+| 2 | ComfyUI 설치 (공식 Windows 포터블 최신판 권장 — RTX 50 시리즈는 CUDA 12.8 이상용 PyTorch가 필요) | ComfyUI 화면에서 기본 Workflow 1장 생성 |
+| 3 | 모델 파일 배치: `checkpoints`·`loras`. Custom Node는 13.4에서 쓰기로 한 것만, 신뢰할 수 있는 저장소에서 버전 고정 (15.8) | ComfyUI 목록에 표시 |
+| 4 | Python 3.12+ 설치 → 저장소에서 `python -m venv .venv` → `.venv\Scripts\python -m pip install -r requirements.txt` | 오류 없음 |
+| 5 | `.env.example`을 `.env`로 복사해 채운다 (19.18). `SUPABASE_SECRET_KEY`는 **bridge 전용** 키 (24.3-9), `BRIDGE_TOKENS`는 32자 이상, `N8N_CALLBACK_URL`·`TOKEN`은 n8n_guide 6절 | – |
+| 6 | `.env`는 Windows 사용자 계정만 읽을 수 있게 권한 설정 (15.6) | 파일 속성 → 보안 |
+| 7 | Windows 방화벽에서 8000·8188 인바운드 차단 (15.7). 공유기 포트포워딩 없음 | – |
+| 8 | 전원: 절전·최대 절전 끄기 (GPU 작업 중 잠들면 Heartbeat가 끊겨 회수된다) | 전원 옵션 |
+
+### 25.4 실행과 자동 시작
+
+**수동 실행 순서**
+
+```text
+1. ComfyUI:  (포터블) python_embeded\python.exe -s ComfyUI\main.py --windows-standalone-build --listen 127.0.0.1 --port 8188
+2. 브릿지:   저장소에서 .venv\Scripts\python -m app.main
+3. 터널:     cloudflared가 서비스로 설치돼 있으면 자동
+```
+
+- 브릿지는 ComfyUI가 나중에 켜져도 된다. 30초마다 상태를 보고하면서 ComfyUI에 처음 연결될 때 노드를 확인하고 Registry를 동기화한다 (19.13). ComfyUI가 꺼져 있는 동안 들어온 Job은 선점하지 않고 `503`으로 돌려보내므로 시도 횟수가 줄지 않는다.
+- 브릿지가 시작할 때 `COMFY_URL`이 localhost가 아니거나 토큰이 짧으면 실행을 거부한다 (19.18).
+
+**자동 시작** (PC가 재부팅되어도 사람 손 없이 복구, 15.23)
+
+| 대상 | 방법 |
+|---|---|
+| cloudflared | `cloudflared service install <터널 토큰>` → Windows 서비스 (자동 시작) |
+| ComfyUI | 작업 스케줄러: "로그온할 때", 일반 사용자 계정, 위 1번 명령, 시작 폴더 = ComfyUI 설치 폴더 |
+| 브릿지 | 작업 스케줄러: "로그온할 때" + 30초 지연, 위 2번 명령, 시작 폴더 = 저장소, "실패하면 1분 후 다시 시작" 3회 |
+
+- 자동 로그온을 쓰지 않으면 로그온 전까지 생성이 멈춘다. 그동안 Job은 `pending`으로 남고 로그온 후 안전망이 다시 보낸다 (손실 없음).
+- Windows Update 재시작도 같은 방식으로 복구된다: 실행 중이던 Job은 Heartbeat 회수(3분) → 재시도 대기 → 브릿지가 다시 켜진 뒤 처리.
+- 브릿지를 끌 때는 콘솔에서 `Ctrl+C`. 종료 처리에서 실행·대기 중 Job을 `SHUTDOWN`(재시도)으로 돌려놓는다 (19.13). 작업 관리자에서 강제 종료하면 Heartbeat 회수로 같은 결과가 된다 (최대 3분 늦음).
+
+### 25.5 Cloudflare Tunnel 설정
+
+| # | 작업 (Cloudflare Zero Trust) |
+|---|---|
+| 1 | Networks → Tunnels → 새 터널 → Windows 설치 명령의 토큰으로 `cloudflared service install` |
+| 2 | Public Hostname: `bridge.<도메인>` → Service `http://127.0.0.1:8000` (ComfyUI 8188은 **연결하지 않는다**) |
+| 3 | Access → Applications → Self-hosted, 도메인 `bridge.<도메인>` |
+| 4 | Access → Service Auth → Service Token 생성 (Client ID·Secret → n8n `PA Bridge` Credential, 20.16) |
+| 5 | 애플리케이션 정책: Action **Service Auth**, Include = 위 Service Token만 |
+| 6 | 확인: 토큰 없이 `https://bridge.<도메인>/v1/health` → Cloudflare가 차단(403 또는 로그인 페이지). 토큰 헤더를 넣으면 `{"ok": true, …}` |
+
+### 25.6 첫 실제 생성 (M2 완료 조건)
+
+19.20의 남은 항목 "실제 ComfyUI에서 `image_generation_v1` 1장 생성"을 **n8n과 LLM 없이** 확인하는 절차다. Supabase는 24.3 1~11까지 끝나 있어야 한다.
+
+1. 브릿지를 켜고 `http://127.0.0.1:8000/v1/health`가 `{"ok": true, "comfyui": true, …}`인지 확인한다. 콘솔에 Registry Workflow 목록이 나오고, 잠시 뒤 `comfy_workflows` 테이블에 동기화된다.
+2. SQL Editor에서 테스트 Persona를 만든다. `base_model`은 `models\checkpoints`에 실제로 있는 파일 이름이다.
+   ```sql
+   insert into public.personas (user_id, name, slug, description, visual_settings)
+   select id, 'Bridge Test', 'bridge-test', 'test persona',
+          '{"default_workflow": "image_generation_v1", "base_model": "<checkpoint>.safetensors"}'::jsonb
+     from public.users where email = 'you@example.com'
+   returning id;
+   ```
+3. 프롬프트를 직접 넣은 Content Job을 만들고, n8n이 할 일(선점 → generation Job 생성)을 SQL로 대신한다.
+   ```sql
+   insert into public.content_jobs (persona_id, content_type, prompt, status)
+   values ('<persona id>', 'image', 'a red apple on a wooden table, photorealistic', 'queued')
+   returning id;
+
+   select id, status from public.claim_content_job('<content job id>');   -- generating
+
+   select id from public.create_automation_job(
+     'generation', '<persona id>', '<content job id>', null, 'python', '{}'::jsonb, null, 3,
+     'generation:<content job id>:1');
+   ```
+4. 같은 PC의 PowerShell에서 브릿지를 직접 부른다 (터널을 거치지 않으므로 Access 헤더는 필요 없다).
+   ```powershell
+   Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/v1/jobs -Headers @{ "X-Bridge-Token" = "<BRIDGE_TOKENS 값>" } -ContentType "application/json" -Body '{"job_id": "<automation job id>"}'
+   ```
+   기대: `accepted: true`.
+5. 결과를 확인한다.
+   ```sql
+   select status, completed_at from public.content_jobs where id = '<content job id>';          -- ready
+   select status, attempts, result from public.automation_jobs where content_job_id = '<content job id>';  -- done
+   select step, status, duration_ms, error from public.execution_logs
+    where automation_job_id = '<automation job id>' order by created_at;                         -- BUILD … COMPLETE
+   select public_url, width, height, generation_metadata from public.assets where content_job_id = '<content job id>';
+   ```
+   `public_url`을 브라우저로 열어 이미지가 보이면 M2 완료다. `N8N_CALLBACK_URL`이 아직 없으면 콜백만 건너뛴다 (정상).
+6. 실패 경로도 한 번 본다: `base_model`을 없는 파일 이름으로 바꾼 Persona로 3~4를 반복 → `MODEL_NOT_FOUND`로 바로 `failed`, Content Job `failed`, `system_errors` 1행.
+7. 끝나면 테스트 Persona를 `inactive`로 바꾼다 (Content Job·Asset이 있으므로 지울 수 없다, 21.17).
+
+### 25.7 장애 대응
+
+| 증상 | 확인 | 조치 |
+|---|---|---|
+| `/v1/health`의 `comfyui: false` | ComfyUI 콘솔, `127.0.0.1:8188` 접속 | ComfyUI 재시작. Job은 `pending`으로 대기 |
+| `/v1/health`의 `ok: false` | 브릿지 콘솔의 예외 | 브릿지 재시작 (작업 스케줄러가 1분 후 자동) |
+| `WORKFLOW_INVALID` + "missing ComfyUI nodes" | `/v1/status`의 `disabled_reason` | 필요한 Custom Node 설치 후 브릿지 재시작 (노드 확인은 시작 후 첫 연결 때 한 번) |
+| `MODEL_NOT_FOUND` / `LORA_NOT_FOUND` | `visual_settings.base_model`, LoRA `persona_assets.name`과 `models\` 파일 이름 | 이름을 맞추고 `retry_automation_job` |
+| `OUT_OF_MEMORY` 반복 | 다른 GPU 프로그램(게임·브라우저 하드웨어 가속), `/v1/status`의 VRAM 여유 | 다른 프로그램 종료, Persona 기본 해상도 낮추기 |
+| `CUDA_ERROR` | ComfyUI 콘솔 | ComfyUI 재시작 (드라이버 오류면 PC 재부팅) |
+| `TIMEOUT` | 생성이 15분을 넘김 | Workflow·steps 확인. 정말 긴 작업이면 `JOB_TIMEOUT_SEC` 조정 (19.18) |
+| n8n에서 `bridge_unreachable` | 터널 상태(Zero Trust 화면), PC 전원·절전 | cloudflared 서비스 재시작 |
+| n8n에서 401·403 | `BRIDGE_TOKENS`와 n8n `PA Bridge` 값, Access Service Token 만료 | 토큰 교체 순서 15.14 |
+| `429 BLOCKED` | 토큰 오류가 반복되어 IP가 10분 차단됨 | 원인(토큰)을 고친 뒤 10분 기다리거나 브릿지 재시작 |
+
+### 25.8 Definition of Done (로컬 실행 계층)
+
+| 항목 | 상태 |
+|---|---|
+| 브릿지 기능 (19.20 M2 항목) | ✅ |
+| 로컬 PC 설치, 방화벽, 전원 설정 (25.3) | ❌ M0 |
+| Cloudflare Tunnel + Access Service Token, 토큰 없는 요청 차단 확인 (25.5) | ❌ M0 |
+| 실제 ComfyUI로 `image_generation_v1` 1장 (25.6) | ❌ |
+| 재부팅 후 사람 손 없이 복구 (25.4 자동 시작) | ❌ |
+| n8n 연결 후 E2E (16.10 M5) | ❌ |
+
+### 25.9 원안에서 조정한 부분과 이유
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 내용 | 브릿지 API·서비스·오류·멱등성 설계 | 19번 참조 + 로컬 운영 절차 | 이미 19번과 `app/`에 구현됨 |
+| API·상태·경로·인증 | 동기식 `/jobs/generate`, 대문자 상태, `generated-assets`, Bearer | 25.1 표 | 19.21 |
+| Workflow 선택 | LoRA 유무로 추측 | 명시된 Workflow 우선 순서 | 의도하지 않은 Workflow로 생성하지 않게 |
+| `/ready` | Supabase·ComfyUI·GPU 확인 엔드포인트 | `/v1/health` + `/v1/status` + Worker 상태 보고 | 공개 엔드포인트에는 최소 정보만 (15.8) |
+| 폴더 | `C:\persona-automation\{execution,workflows,logs,temp}` | 저장소에서 실행, 임시 폴더 없음 | `workflows/`를 git으로 관리, 메모리 처리 |
+| 실행 계정 | 언급 없음 | 일반 사용자 계정, 관리자 권한 X | 15.8 |
+| 네트워크 | "Secure tunnel / authenticated endpoint" | Cloudflare Tunnel + Access Service Token, 8188은 터널에 연결하지 않음, 방화벽 차단 | 15.7 확정 |
+| 시작·종료 | 개념 흐름 | 작업 스케줄러·서비스 자동 시작, `Ctrl+C` 종료 처리 | 재부팅 후 자동 복구 (15.23) |
+| 첫 생성 | 전체 E2E 예시 | n8n·LLM 없이 SQL + 로컬 호출로 확인 | M2 완료 조건을 M3와 분리해 확인 |
 
