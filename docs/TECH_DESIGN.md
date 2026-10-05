@@ -5,7 +5,7 @@
 | 기준 문서 | [PRD v1.0](PRD.md) |
 | 최종 수정 | 2026-10-05 |
 | 상태 | v1.0 기술 설계 1차 완성 |
-| 진행 | 9. System Architecture ✅ · 10. Database / ERD ✅ · 11. State Machine ✅ · 12. API Specification ✅ · 13. ComfyUI Workflow Spec ✅ · 14. n8n Workflow Spec ✅ · 15. Security ✅ · 16. Implementation Plan ✅ · 17. UI/UX Spec ✅ · 18. Frontend Spec ✅ · 19. Backend (Python) Spec ✅ |
+| 진행 | 9. System Architecture ✅ · 10. Database / ERD ✅ · 11. State Machine ✅ · 12. API Specification ✅ · 13. ComfyUI Workflow Spec ✅ · 14. n8n Workflow Spec ✅ · 15. Security ✅ · 16. Implementation Plan ✅ · 17. UI/UX Spec ✅ · 18. Frontend Spec ✅ · 19. Backend (Python) Spec ✅ · 20. n8n Implementation Spec ✅ |
 
 ---
 
@@ -2263,6 +2263,7 @@ n8n Workflow는 하나의 거대한 Workflow로 만들지 않고 **기능별로 
 | WF-013 | Fan Message Handler | V2 | SNS Webhook | 댓글·DM 수집·응답 |
 | WF-014 | Fan Memory | V2 | WF-013 | Memory 추출 |
 | WF-015 | Autonomous Operation Loop | Long-term | Schedule | Observe → … → Learn |
+| WF-016 | Token Refresh | V1 | Schedule (매일) | 만료가 가까운 SNS 장기 토큰 갱신 → Vault (20.3) |
 
 > ⚙️ 원안의 **Retry Handler**와 **Generation Monitor**는 별도 Workflow로 만들지 않는다. 재시도는 DB 함수가, 멈춘 Job 회수는 pg_cron이 맡는다 (14.11, 14.12). 원안의 **Asset Processing**은 Python이 생성 직후 처리한다 (14.10).
 
@@ -4702,3 +4703,401 @@ DB는 `pgserver`로 실제 PostgreSQL에 마이그레이션 0001~0007을 적용�
 | 클라이언트 | Supabase Python Client, tenacity, structlog | httpx, DB 재시도, logging | 의존성 최소화, 재시도 규칙 한 곳 |
 | 실행 기록 단계 | 10단계 | 7단계 (19.16) | 17.7 진행 표시와 맞춤 |
 | 구현 순서 | Step 1~12 | M2 완료(19.20), n8n은 M3, E2E는 M5 | 16번 Milestone |
+
+---
+
+## 20. n8n Implementation Specification ✅
+
+> 14번(n8n Workflow 명세)을 M3에서 만든 `n8n/pa_*.json` 기준으로 구현 수준까지 내린 규격이다. 설치·연결 절차는 [n8n_guide.md](n8n_guide.md), 구현 결정은 16.8 구현 메모에 있다. ⚙️ 표시는 확정 설계와 현재 Workflow에 맞춰 원안을 조정한 부분이다 (20.21).
+
+### 20.1 목적과 원칙
+
+n8n은 Orchestration Layer다. 이미지를 만들거나 AI 판단을 직접 하지 않고, Supabase·LLM·Python을 연결해 **Job 하나를 끝까지 진행시킨다.**
+
+```text
+Supabase ──Webhook·안전망──▶ n8n ──▶ LLM (prompt·caption)
+    ▲                         └──▶ Python 브릿지 ──▶ ComfyUI ──▶ RTX 5080
+    └──────── Worker RPC (상태·결과·Asset) ◀──────────┘
+```
+
+> **Supabase = 상태의 진실, n8n = 상태를 움직이는 Orchestrator.** n8n은 자기 안에 상태를 들고 있지 않는다. Workflow가 중간에 멈춰도 다음 실행이 DB만 보고 이어 갈 수 있어야 한다.
+
+"지금 어떤 Job이 어느 단계에 있고, 실패했다면 다시 실행할 수 있는가?"는 n8n이 아니라 **DB에서** 답한다 (`content_jobs`·`automation_jobs` 상태, `execution_logs`, `system_errors`). n8n Execution History는 Workflow 디버깅용이다 (20.13).
+
+### 20.2 책임 범위 ⚙️
+
+| n8n이 하는 일 | n8n이 하지 않는 일 (담당) |
+|---|---|
+| Job 감지 (DB Webhook + 1분 안전망) | 재시도 시점·횟수 결정 (DB `fail_automation_job`, 14.11) |
+| Atomic Claim 호출 (`claim_*` RPC) | 멈춘 Job 회수 (DB `recover_stale_jobs`, pg_cron 1분, 11.6) |
+| 단계별 Automation Job 생성 (`prompt` → `generation` → `caption`) | 생성 상태 감시 (브릿지가 DB에 직접 쓰고 콜백, 19.4) |
+| LLM 호출·Structured Output 검증 (WF-002·005) | GPU·ComfyUI 제어, Node Graph 조립, 이미지 파일 처리 (Python) |
+| 브릿지에 `job_id` 전달 (WF-003) | Content Job 상태 변경 (DB Rollup 트리거, 11.9) |
+| 실패 보고 (`fail_automation_job`), 예기치 못한 오류 기록 (WF-006) | Persona·사용자 데이터의 원본 보관 (Supabase) |
+| (V1) SNS 게시·성과 수집·알림, (V2) AI Decision 연결 | LLM 출력의 직접 실행 (n8n이 검증한 값만 실행) |
+
+### 20.3 Workflow 목록과 이름
+
+이름은 `[PA] {번호} - {기능}` (14.2). 번호는 14.3을 그대로 쓴다. 파일은 `n8n/pa_{번호}_{기능}.json`으로 git에 둔다.
+
+| 단계 | Workflow | 파일 |
+|---|---|---|
+| MVP | [PA] 001 - Content Job Dispatcher | `pa_001_content_job_dispatcher.json` |
+| | [PA] 002 - Prompt Generator | `pa_002_prompt_generator.json` |
+| | [PA] 003 - Generation Dispatcher | `pa_003_generation_dispatcher.json` |
+| | [PA] 004 - Generation Result Handler | `pa_004_generation_result_handler.json` |
+| | [PA] 005 - Caption Generator | `pa_005_caption_generator.json` |
+| | [PA] 006 - Error Handler | `pa_006_error_handler.json` |
+| | [PA] LLM - Structured Call (하위 Workflow) | `pa_llm_structured_call.json` |
+| V1 | 007 SNS Publisher, 008 Scheduled Publisher, 009 Performance Collector, 010 Notification, **016 Token Refresh** ⚙️ | – |
+| V2 | 011 AI Performance Analyzer, 012 AI Content Planner, 013 Fan Message Handler, 014 Fan Memory | – |
+| Long-term | 015 Autonomous Operation Loop | – |
+
+원안의 Token Refresh는 14.3에 없던 것이라 기존 번호를 바꾸지 않도록 016으로 추가한다. Instagram 장기 토큰은 만료 전에 갱신해야 하므로 V1에 필요하다 (만료되면 14.15의 `TOKEN_EXPIRED` 처리).
+
+### 20.4 Trigger: Webhook + 1분 안전망 ⚙️
+
+원안의 5초 Polling 대신 **DB Webhook으로 즉시 반응하고, 1분 Schedule을 안전망**으로 쓴다 (14.4). 5초 Polling은 일이 없어도 한 달에 약 52만 번 실행된다.
+
+| Workflow | 즉시 (이벤트) | 안전망 (Schedule) |
+|---|---|---|
+| WF-001 | `content_jobs` INSERT·UPDATE → `queued`로 바뀐 것 | 1분: `queued` 10건 + 5분 넘게 `generating`인 Content Job 복구 |
+| WF-002 | WF-001이 호출 | 1분: `claim_next_automation_job('prompt')` |
+| WF-003 | `automation_jobs` INSERT (generation) | 1분: `run_after`가 지난 pending generation 5건 |
+| WF-004 | 브릿지 콜백 | 5분: Post 없는 최근 Asset에 caption Job |
+| WF-005 | WF-004가 호출 | 1분: `claim_next_automation_job('caption')` |
+
+안전망이 줍는 것: 놓친 Webhook, 재시도 대기가 끝난 Job(`run_after` 경과), Heartbeat로 회수된 Job, 콜백이 빠진 결과. Webhook과 안전망이 같은 Job을 동시에 잡아도 Atomic Claim이 하나만 통과시킨다 (20.5).
+
+규모가 커지면 Message Queue를 검토할 수 있지만, Atomic Claim 구조가 같으므로 Trigger만 바꾸면 된다.
+
+### 20.5 Job 조회와 Atomic Claim
+
+조회 순서는 `priority DESC, created_at ASC` (14.5). **조회한 Job을 바로 실행하지 않고 반드시 Claim RPC를 거친다.** 실제 함수(0004)는 다음과 같다.
+
+```sql
+-- claim_next_automation_job(p_job_type, p_worker): pending → processing
+update public.automation_jobs j
+   set status = 'processing', attempts = j.attempts + 1, claimed_by = p_worker,
+       locked_at = now(), heartbeat_at = now(), started_at = coalesce(j.started_at, now())
+ where j.id = (select id from public.automation_jobs
+                where status = 'pending' and job_type = p_job_type and run_after <= now()
+                order by priority desc, created_at
+                limit 1
+                for update skip locked)
+returning j.*;
+```
+
+| RPC | 전환 | 호출 |
+|---|---|---|
+| `claim_content_job(p_content_job_id)` | Content Job `queued → generating` | WF-001 |
+| `claim_automation_job(p_job_id, p_worker)` | `pending → processing` (해당 Job, `run_after` 경과 시) | WF-002·005 (호출받은 Job), 브릿지 |
+| `claim_next_automation_job(p_job_type, p_worker)` | 위와 같음 (가장 앞 1건) | WF-002·005 안전망 |
+
+- 상태 값은 11번 그대로다 ⚙️. 원안의 `CLAIMED`·`RUNNING`은 `processing` 하나다. 선점과 실행 사이에 따로 기록할 상태가 없고, 실행 중인지는 `heartbeat_at`으로 안다.
+- 결과가 0행이면 다른 Worker가 이미 가져간 것이다. HTTP Request 노드는 빈 배열을 받으면 다음 노드로 아무것도 넘기지 않으므로 **조용히 끝난다.**
+- 선점한 Worker만 결과를 쓸 수 있다. 모든 보고 RPC는 `(p_job_id, p_locked_at)`을 확인하고, 맞지 않으면 `false`·빈 결과를 돌려준다. n8n은 이때 오류 없이 멈춘다 (잠금 상실, 11.6).
+
+### 20.6 Job 연결과 Idempotency Key
+
+Content Job 하나는 단계별 Automation Job으로 나뉜다 (10.15). 원안의 `IMAGE_GENERATION` 하나 대신 MVP job_type 세 개를 쓴다 ⚙️.
+
+```text
+content_jobs (queued → generating → ready)
+ ├─ prompt      (n8n)     키 prompt:{content_job_id}:{run_number}
+ ├─ generation  (python)  키 generation:{content_job_id}:{run_number}
+ └─ caption     (n8n)     키 caption:{asset_id}         Asset마다 1개
+```
+
+- `create_automation_job`은 같은 `idempotency_key`가 있으면 **새로 만들지 않고 기존 행을 돌려준다** (14.17). n8n이 같은 단계를 두 번 실행해도 Job이 두 개 생기지 않는다.
+- `run_number`는 `retry_content_job`(처음부터 다시)·`regenerate_content_job`(Variant 추가)이 올린다. 그래서 회차마다 새 Job이 생긴다.
+- 실패한 단계만 다시 실행할 때(`retry_automation_job`)는 **같은 Job**을 `pending`으로 되돌린다. 원안의 "같은 Automation Job을 다시 실행"과 같다.
+
+### 20.7 WF-001 Content Job Dispatcher
+
+```text
+Webhook (queued로 바뀐 Content Job) ┐
+안전망 (queued 10건)                ┴─▶ claim_content_job ─(0행이면 끝)─▶ prompt Job 생성 ─▶ DISPATCH 기록
+                                                                                       └─▶ (새 Job이면) WF-002 호출 (Job마다, 기다리지 않음)
+안전망 (5분 넘게 generating) ─▶ 같은 키로 prompt Job 생성 (있으면 그대로)
+```
+
+프롬프트가 이미 있어도 **항상 prompt Job부터** 만든다 ⚙️ (16.8). 선점 뒤의 모든 실패가 Automation Job 실패로 기록되어야 Rollup(11.9 R2)이 Content Job을 `failed`로 바꿀 수 있기 때문이다.
+
+### 20.8 WF-002 Prompt Generator (원안의 Image Generation 앞부분)
+
+원안 002 "Image Generation"은 n8n이 Persona를 읽어 프롬프트·Parameter·LoRA를 Python에 보낸다. 현재 설계는 이것을 둘로 나눈다 ⚙️.
+
+| 원안 002가 하던 일 | 현재 |
+|---|---|
+| Persona·Content Job 읽기, 프롬프트 만들기 | WF-002: LLM으로 `prompt_parts`를 만들어 DB에 저장 |
+| Workflow·Parameter·LoRA 정하기, Payload 조립 | 브릿지가 DB(`content_jobs`, `personas.visual_settings`, `persona_assets`)에서 직접 (19.4, 19.9) |
+| Python 호출 | WF-003: `job_id`만 전달 |
+
+**LLM에 보내는 Persona 정보** (14.7, 15.10): 이름, 설명, 연령대, 성격 태그, 관심사, 외모(`visual_settings.appearance`), 스타일, 선호·금지 주제. 모델·LoRA 파일명, 참조 이미지 경로 같은 실행 정보는 보내지 않는다.
+
+```text
+선점 → CLAIM 기록 → Content Job·Persona 조회
+ → 프롬프트 있음? ── 예 ──────────────────────────────────────────────┐
+                 └─ 아니오 → LLM → prompt_generation.v1 검증 → save_prompt_parts ┤
+ → generation Job 생성 → complete_automation_job → COMPLETE 기록 ◀──────────┘
+```
+
+- generation Job을 만든 **다음에** prompt Job을 완료한다. 단계 사이에 빈틈이 없다.
+- 하루 생성 한도(`PT429`)에 걸리면 prompt Job을 다음 UTC 자정 뒤로 재시도한다.
+- 이전 시도의 generation이 이미 끝나 Content Job이 `generating`이 아니면(`PT409`) prompt Job은 완료로 처리한다.
+
+### 20.9 WF-003 Generation Dispatcher와 비동기 처리
+
+```text
+POST https://{bridge}/v1/jobs   { "job_id": "<automation_job_id>" }
+헤더: X-Bridge-Token, CF-Access-Client-Id, CF-Access-Client-Secret   (Credential `PA Bridge`)
+Timeout 15초, 연결 실패 시 3회 재시도 (5초 간격)
+```
+
+| 브릿지 응답 | n8n 처리 | Job 상태 |
+|---|---|---|
+| `202` | 끝 | `processing` (브릿지가 선점) |
+| `409 JOB_NOT_CLAIMABLE` | 끝 (이미 선점됨·재시도 대기) | 그대로 |
+| `503 COMFY_UNAVAILABLE` / `WORKER_UNAVAILABLE` | 끝 | `pending` 유지, attempts 그대로. 안전망이 다시 보냄 |
+| `429 RATE_LIMITED` / 연결 실패 | 끝 | 위와 같음 |
+| `429 BLOCKED`, `401`, `403`, 그 밖 | 오류 → WF-006 (`system_errors`) | `pending` 유지 |
+
+**n8n을 GPU 작업에 붙잡아 두지 않는다.** 브릿지는 선점하자마자 `202`를 돌려주고, n8n Execution은 바로 끝난다. 여기까지는 원안과 같다.
+
+**Generation Monitor는 만들지 않는다** ⚙️ (14.9). 원안은 5~10초마다 `RUNNING` Job을 찾아 Python `GET /jobs/{id}`를 묻는다. 현재는 다음과 같다.
+
+| 원안 Monitor가 하던 일 | 현재 담당 |
+|---|---|
+| 완료 감지 → 상태 변경 | 브릿지가 `register_asset`·`complete_automation_job`을 직접 호출 → DB 트리거가 Content Job `ready` |
+| 실패 감지 → 재시도 결정 | 브릿지가 `fail_automation_job` → DB가 `pending`(재시도) 또는 `failed` |
+| 다음 단계 시작 | 브릿지 콜백 → WF-004 (DB를 쓴 **다음에** 보냄) |
+| 멈춘 작업 감지 | Heartbeat 30초 + `recover_stale_jobs`(pg_cron 1분) |
+| 진행률 표시 | Lovable이 `execution_logs` 단계로 표시 (17.7) |
+
+Monitor가 없으므로 브릿지의 상태 조회 API도 없고(19.4), 로컬 PC로 들어오는 요청이 `POST /v1/jobs` 하나로 줄어든다.
+
+### 20.10 WF-004 Result Handler · WF-005 Caption Generator
+
+```text
+브릿지 콜백 (X-Callback-Token)
+ ├─ generation.completed → Asset을 DB에서 다시 확인 → Asset마다 caption Job → WF-005 (Job마다)
+ └─ generation.failed    → MVP는 기록만 (system_errors·Dashboard), V1부터 WF-010 알림
+
+WF-005: 선점 → CLAIM 기록 → Asset 확인 → (초안이 이미 있으면 완료만)
+        → LLM → caption_generation.v1 검증 → create_post_draft (posts.draft) → complete_automation_job
+```
+
+- 콜백 본문의 값은 믿지 않고 DB에서 Asset을 다시 조회한다 (같은 Content Job, `generated`인 것만).
+- `metadata.purpose = 'visual_test'` Content Job의 Asset은 캡션을 만들지 않는다 (17.8).
+
+### 20.11 재시도 ⚙️
+
+원안의 Retry Handler Workflow 대신 **DB 함수 하나가 재시도를 정한다** (14.11). n8n·Python 모두 같은 방법으로 실패를 보고한다.
+
+```text
+fail_automation_job(job_id, locked_at, error_type, error_code, message, retryable, retry_after_seconds?, step?)
+ ├─ retryable 이고 attempts < max_attempts → status = pending, run_after = now() + backoff   (재시도 대기)
+ └─ 그 외                                   → status = failed                                (원안의 DEAD)
+ + 항상 system_errors 1행
+```
+
+| 원안 상태 | 현재 표현 | 이유 |
+|---|---|---|
+| `FAILED` (일시) | 별도 상태 없음. 바로 아래 둘 중 하나 | 상태가 적을수록 전환표가 단순 (11.4) |
+| `RETRY_WAIT` | `pending` + 미래의 `run_after` (`attempts > 0`) | Claim 조건이 `run_after <= now()`라서 시간이 되면 저절로 다시 잡힌다. Lovable은 `isRetryWaiting()`으로 표시 (18.6) |
+| `DEAD` | `failed` (`attempts = max_attempts` 또는 재시도 불가) | 11번 상태 값. Operator가 `retry_automation_job`으로 되살릴 수 있다 |
+
+**Backoff:** `app_settings.retry_backoff_seconds` = `[30, 120, 300, 900]` (n번째 실패 후 n번째 값). `max_attempts` 기본 3이므로 보통 30초, 2분 두 번 기다린다. 원안과 같다. `retry_after_seconds`를 주면 그 값을 쓴다 (SNS `Retry-After`, 생성 한도).
+
+**재시도 분류** (13.12 코드 기준, 원안 코드 대응)
+
+| 재시도 | 재시도 안 함 |
+|---|---|
+| `TIMEOUT`, `COMFY_UNREACHABLE`(원안 `COMFYUI_UNAVAILABLE`·`CONNECTION_ERROR`), `NETWORK_ERROR`, `FILE_ERROR`(원안 `STORAGE_UPLOAD_FAILED`), `CUDA_ERROR`(원안 `TEMPORARY_GPU_ERROR`), `OUT_OF_MEMORY`(19.12), `RATE_LIMIT`·`RATE_LIMITED`, `TEMPORARY_API_ERROR`, `LLM_OUTPUT_INVALID`, `OUTPUT_INVALID`, `INTERRUPTED`, `SHUTDOWN`, `HEARTBEAT_TIMEOUT`, `UNKNOWN`·`N8N_WORKFLOW_ERROR` | `MODEL_NOT_FOUND`, `LORA_NOT_FOUND`, `WORKFLOW_INVALID`, `WORKFLOW_PARAM_INVALID`, `INPUT_NOT_FOUND`(원안 `INVALID_PERSONA`), `PROMPT_MISSING`, `NODE_ERROR`, `INVALID_AUTH`(원안 `PERMISSION_DENIED`), `POLICY_ERROR`, `LLM_REQUEST_INVALID` |
+
+원안의 `INVALID_REQUEST`는 브릿지 API의 `422`로, Job을 선점하기 전에 거부되므로 재시도 대상이 아니다.
+
+### 20.12 WF-006 Error Handler와 심각도
+
+다른 모든 [PA] Workflow의 Settings → Error Workflow에 연결한다. 노드에서 처리하지 못한 예외(Supabase 오류, 예상 못 한 응답)만 여기로 온다. LLM 오류·검증 실패·잠금 상실처럼 예상한 실패는 각 Workflow가 직접 처리한다.
+
+```text
+Error Trigger → 메시지 비밀값 가리기·1,000자 제한 → error_type 분류
+ → execution_logs에서 이 실행의 CLAIM 기록 찾기 (execution_ref = n8n 실행 ID)
+    ├─ 찾음  → N8N_ERROR 실행 기록 → fail_automation_job (재시도 여부는 DB)
+    └─ 못 찾음 → system_errors 직접 기록 (Trigger 단계 오류, WF-001·003·004 오류)
+```
+
+원안의 입력 형식(`automation_job_id`, `service`, `error_type` …)은 Error Trigger가 주지 않는다. 그래서 Job을 선점하는 Workflow가 선점 직후 `CLAIM` 기록에 `locked_at`을 남기고, WF-006은 그 기록으로 Job을 찾는다 ⚙️ (16.8).
+
+**심각도** ⚙️: 별도 칸을 만들지 않고 이미 있는 값으로 표현한다.
+
+| 원안 | 현재 표현 | 화면 (17.3·17.12) |
+|---|---|---|
+| INFO | `execution_logs.status = succeeded`, `state_transitions` | 진행 단계·타임라인 |
+| WARNING | `system_errors.retryable = true` + Job `pending`(재시도 대기) | 재시도 대기 배지 |
+| ERROR | Job `failed` | Failed 표시, Error Center |
+| CRITICAL | Worker Offline·Degraded(`worker_status`), 브릿지 `/v1/health` 연속 실패, Supabase 접속 불가 | Header 시스템 상태 배지, (V1) WF-010 알림 |
+
+알림(Email·Telegram 등)은 V1의 WF-010이다. MVP는 Dashboard 표시까지다 (14.13).
+
+### 20.13 실행 기록과 추적
+
+| | n8n Execution History | Supabase `execution_logs` |
+|---|---|---|
+| 용도 | Workflow 디버깅 (노드별 입력·출력) | 제품의 실행 기록 (Job Detail 타임라인) |
+| 보관 | 14일 (`EXECUTIONS_DATA_MAX_AGE=336`, 15.21) | 영구 |
+| 비밀값 | Credential 값은 남지 않음 | DB 함수가 다시 가림 (`redact_jsonb`) |
+
+n8n이 남기는 단계 ⚙️ (원안의 `DISPATCHED … JOB_COMPLETED` 대신 실제로 쓰는 이름)
+
+| step | service | Workflow | 내용 |
+|---|---|---|---|
+| `DISPATCH` | n8n | WF-001 | prompt Job 생성 |
+| `CLAIM` | n8n | WF-002·005 | 선점. `input.locked_at` (WF-006이 사용) |
+| `LLM` | llm | WF-002·005 | 모델, 토큰 사용량, 검증 실패 내용 |
+| `COMPLETE` | n8n | WF-002·005 | 다음 Job ID 또는 `post_id`, 소요 시간 |
+| `N8N_ERROR` | n8n | WF-006 | 예기치 못한 오류 |
+
+GPU 단계(`BUILD` … `COMPLETE`)는 브릿지가 남긴다 (19.16). 모든 n8n 기록의 `execution_ref`는 n8n 실행 ID이므로 추적 고리는 다음과 같다.
+
+```text
+content_jobs.id
+ → automation_jobs (content_job_id, job_type, idempotency_key)
+   → execution_logs (execution_ref = n8n 실행 ID | ComfyUI prompt_id)
+     → assets (automation_job_id, generation_metadata.comfy_prompt_id)
+       → posts (asset_id)
+```
+
+### 20.14 Timeout
+
+| 대상 | Timeout | 이유 |
+|---|---|---|
+| Supabase (WF-002·005) | 10초 | Heartbeat 제한 120초 안에 끝나도록 |
+| Supabase (그 밖) | 30초 | 14.18 |
+| LLM | 90초 | Heartbeat 제한보다 짧게 |
+| 브릿지 `POST /v1/jobs` | 15초 + 연결 실패 3회 재시도 | `202` 즉시 응답 |
+| ComfyUI 생성 | 브릿지 `JOB_TIMEOUT_SEC` (900초) | n8n과 무관 |
+| SNS API (V1) | 60초 | 14.18 |
+
+원안의 "Generation Monitor 10분"은 Monitor가 없으므로 해당 없다. n8n Job(prompt·caption)은 Heartbeat를 보내지 않으므로, Workflow 전체가 `heartbeat_timeout_seconds`(prompt·caption 120초) 안에 끝나야 한다. LLM Timeout을 늘리면 이 값도 늘린다.
+
+### 20.15 Concurrency
+
+- GPU Worker는 1개다 (13.13, 19.13). WF-003이 Job을 여러 개 보내도 브릿지 대기열에서 하나씩 실행된다.
+- n8n 쪽 Workflow(prompt·caption)는 여러 Execution이 동시에 돌아도 된다. Claim이 Job마다 하나만 통과시킨다.
+- 하위 Workflow는 Job마다 따로 실행한다 (Execute Workflow `mode: each`). 한 Execution이 Job 하나만 다뤄야 오류가 났을 때 WF-006이 맞는 Job을 찾는다.
+- GPU가 늘면 `WORKER_ID`가 다른 브릿지를 추가하고, WF-003은 그대로 둔다 (같은 Queue를 나눠 가짐).
+
+### 20.16 Credential과 환경 변수 ⚙️
+
+비밀값은 **Credential로만** 쓴다. 노드 파라미터와 환경 변수에는 넣지 않는다. 노드에서 환경 변수를 읽는 것도 막는다 (`N8N_BLOCK_ENV_ACCESS_IN_NODE=true`, 15.9). 그래서 Supabase·브릿지 주소는 import 전에 파일에서 바꾼다 (n8n_guide 4-1).
+
+| Credential | 종류 | 내용 |
+|---|---|---|
+| `PA Supabase` | Custom Auth | `apikey` (n8n 전용 secret key), `x-actor: n8n` |
+| `PA Bridge` | Custom Auth | `X-Bridge-Token`, `CF-Access-Client-Id`, `CF-Access-Client-Secret` |
+| `PA Webhook Secret` | Header Auth | `X-Webhook-Secret` (Supabase DB Webhook) |
+| `PA Callback Token` | Header Auth | `X-Callback-Token` (브릿지 콜백) |
+| `PA Anthropic` | Header Auth | `x-api-key` (`claude` 모드) |
+| (V1) SNS, 알림 | 플랫폼별 | SNS 토큰은 Vault에 두고 `get_social_account_token`으로 읽는다 (10.9) |
+
+**n8n 서버 환경 변수** (Docker, 15.9)
+
+```env
+N8N_ENCRYPTION_KEY=          # Credential 암호화 키. 오프라인 백업, 바꾸지 않는다
+WEBHOOK_URL=https://<n8n 도메인>/
+N8N_BLOCK_ENV_ACCESS_IN_NODE=true
+NODES_EXCLUDE=["n8n-nodes-base.executeCommand"]
+EXECUTIONS_DATA_PRUNE=true
+EXECUTIONS_DATA_MAX_AGE=336
+```
+
+원안의 `SUPABASE_SERVICE_ROLE_KEY`, `PYTHON_API_TOKEN`, `LLM_API_KEY` 환경 변수는 쓰지 않는다. 위 Credential이 같은 역할을 한다.
+
+### 20.17 보안
+
+15.7·15.9가 정본이다.
+
+```text
+인터넷 ─HTTPS─▶ 리버스 프록시 (Caddy, 자동 인증서) ─▶ n8n (5678은 외부에 열지 않음, Owner 계정 + 2FA)
+n8n ─HTTPS─▶ Cloudflare Access (Service Token 확인) ─▶ Tunnel ─▶ 로컬 브릿지 127.0.0.1:8000
+브릿지 ─▶ n8n Webhook (X-Callback-Token)        Supabase ─▶ n8n Webhook (X-Webhook-Secret)
+```
+
+원안의 "Python ↔ n8n Private Network"는 Cloudflare Tunnel + Access로 대신한다 ⚙️. n8n은 원격 서버, 브릿지는 집의 PC라 같은 사설망에 둘 수 없다. 공유기 포트는 열지 않는다.
+
+### 20.18 V1: 게시·성과 수집
+
+14.15가 정본이다. 요약만 둔다.
+
+- **WF-008 → WF-007:** 1분마다 `scheduled_at`이 된 `scheduled` Post → Social Account 확인 → `publish` Job (`publish:{post_id}`) → `mark_post_publishing` → `[PA] SNS - {platform} - Publish` → `complete_publish`.
+- **SNS Adapter:** 플랫폼별 하위 Workflow로 나누고 같은 인터페이스(`publish`, `get_post`, `get_metrics`)를 둔다 (12.8). 원안의 `schedule()`은 n8n(WF-008)이 맡고, `delete_post()`는 AI에게 주지 않는 Action이라 Operator가 직접 한다 (15.19).
+- **게시 중복 방지:** 게시 전에 단계별 결과(Instagram media container ID)를 `automation_jobs.result`에 먼저 저장하고, 재시도 때 이미 게시됐는지 확인한 뒤 진행한다. "게시는 성공했는데 응답을 잃은" 경우를 막는다.
+- **WF-009:** `snapshot_hours` = 1, 6, 24, 48, 168 시점에 `analytics` Job (`analytics:{post_id}:{snapshot_hours}`) → `record_metrics`. 원안의 7개 지표를 `performance_metrics` 공통 스키마(10.11)로 저장한다.
+- **WF-016 Token Refresh:** 만료 7일 전 장기 토큰 갱신 → Vault 갱신. 실패하면 Social Account `inactive` + 재인증 알림.
+
+### 20.19 V2: AI 연결과 권한
+
+14.16, 15.19, 15.20이 정본이다.
+
+```text
+WF-011: 성과 집계 → LLM → performance_insight.v1 검증 → 저장
+WF-012: Insight + Persona + 목표 + 콘텐츠 이력 → LLM → ai_decision.v1 검증 → ai_decisions
+        → 권한 수준 확인 → (자동 또는 승인 후) create_content_job(source = 'agent') → WF-001
+```
+
+AI가 만든 Content Job도 Operator가 만든 것과 **같은 경로(WF-001 이후)**로 실행된다.
+
+**LLM이 정할 수 있는 값** ⚙️
+
+| 단계 | LLM이 정함 | n8n 검증 |
+|---|---|---|
+| MVP (WF-002·005) | `prompt_parts`, caption·hashtags | 12.9 스키마 (`additionalProperties: false`, 길이, 형식) |
+| V2 (WF-012) | `action`, `content_type`, `topic`, `priority`, (선택) `workflow`, Parameter | `action` 허용 목록(15.19), `workflow`는 `comfy_workflows`에 있고 `enabled`, Parameter는 그 Workflow의 `params` 범위 안. 실패하면 `AI_DECISION_INVALID` |
+| 절대 안 됨 | shell 명령, 파일 경로, 임의 URL, SQL, ComfyUI 그래프 | 스키마에 칸이 없다 |
+
+원안은 MVP부터 LLM이 `workflow_id`·Parameter를 고르게 한다. 현재 MVP는 Content Job·Persona 기본값을 쓰고, LLM의 Workflow 선택은 V2 이후로 미룬다 (14.7, 13.4). 브릿지가 Registry로 다시 검증하므로(19.9) n8n 검증을 통과한 값도 한 번 더 확인된다.
+
+**권한 수준:** 15.19의 Level 0~5를 따른다. MVP에는 AI Decision 기능이 없고(Level 0~1에 해당), V2에서 Persona별로 Level 2~3부터 시작해 운영 안정성에 따라 올린다. 원안의 "V1에서 Level 2~3"은 V1에 AI Decision이 없으므로 V2로 옮긴다 ⚙️.
+
+### 20.20 Definition of Done (M3)
+
+| 항목 | 상태 |
+|---|---|
+| WF-001~006 + LLM 하위 Workflow 작성 (`n8n/pa_*.json`) | ✅ |
+| Atomic Claim 연결, 단계별 Automation Job 생성, 멱등 키 | ✅ |
+| 브릿지 호출 (`job_id`만), 응답 분류, 비동기 처리 (콜백) | ✅ |
+| LLM Structured Output + n8n 스키마 검증 (가짜 LLM 기본) | ✅ |
+| 실패 보고 (`fail_automation_job`), 재시도·`failed`는 DB, 잠금 상실 처리 | ✅ |
+| WF-006: `CLAIM` 기록으로 Job 찾기, `system_errors` 기록 | ✅ |
+| `execution_logs`에 n8n 실행 ID 기록, 노드별 Timeout, 비밀값은 Credential만 | ✅ |
+| 정적 검증 (JSON, 노드 참조, Code 노드 문법) + 코드 리뷰 반영 | ✅ |
+| `daily_llm_calls_limit`(15.18): LLM 호출 전 하루 호출 수 확인 | ❌ `claude` 모드로 바꾸기 전에 추가 (Worker RPC 필요) |
+| 원격 n8n 설치, Credential, import, DB Webhook 2개 연결 | ❌ M0 환경 준비 후 (n8n_guide) |
+| 가짜 LLM + 실제 브릿지로 `queued → ready` E2E (16.8 완료 조건) | ❌ 위 연결 후 |
+| 실패 경로: ComfyUI 꺼짐, 없는 모델, Content Job 취소 (16.13) | ❌ E2E와 함께 |
+
+### 20.21 원안에서 조정한 부분과 이유
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| MVP Workflow | 001 Dispatcher, 002 Image Generation, 003 Generation Monitor, 004 Retry Handler, 005 Error Handler | 001 Dispatcher, 002 Prompt, 003 Generation Dispatcher, 004 Result Handler, 005 Caption, 006 Error + LLM 하위 Workflow | 14.3 확정, M3로 구현됨. Monitor·Retry는 DB와 브릿지가 맡음 |
+| V1·V2 번호 | 006~014 | 14.3 번호 유지, Token Refresh는 016 | 이미 문서·파일에서 쓰는 번호 |
+| Trigger | 5초 Polling | DB Webhook + 1분 안전망 | 14.4. 즉시 반응하면서 실행 횟수는 적게 |
+| 상태 값 | `PENDING`, `CLAIMED`, `RUNNING`, `SUCCEEDED`, `RETRY_WAIT`, `DEAD`, `GENERATED` | `pending`, `processing`, `done`, `failed`, Content Job `ready` | 11번 상태 값, 마이그레이션 CHECK |
+| Content Job 조회 | `status = PENDING` | `queued` (Content Job), `pending` (Automation Job) | 두 객체의 상태를 섞지 않음 (18.6) |
+| job_type | `IMAGE_GENERATION` | `prompt`, `generation`, `caption` | 단계별 Job이라 실패한 단계만 다시 실행 가능 (10.15) |
+| Python Payload | n8n이 prompt·parameters·lora 전달 | `job_id`만 | 19.4, 13.6. n8n·터널 값을 믿지 않음 |
+| Python 경로·인증 | `POST /jobs/generate`, `Authorization: Bearer` | `POST /v1/jobs`, `X-Bridge-Token` + Cloudflare Access | 12.6, 15.7 |
+| Generation Monitor | 5~10초마다 Python 상태 조회 | 없음 (DB 직접 기록 + 콜백 + Heartbeat 회수) | 14.9, 20.9 |
+| Retry Handler | n8n Workflow | DB `fail_automation_job` | Python과 n8n이 같은 규칙 (14.11) |
+| Error Handler 입력 | Job ID·서비스·오류가 들어온다고 가정 | `CLAIM` 기록으로 Job을 찾음 | Error Trigger는 실행 데이터를 주지 않음 |
+| 심각도 | INFO·WARNING·ERROR·CRITICAL 칸 | 기존 상태·`retryable`·Worker 상태로 표현 | 새 칸 없이 화면(17.3)에서 구분 가능 |
+| 실행 기록 단계 | `DISPATCHED` … `JOB_COMPLETED` | `DISPATCH`, `CLAIM`, `LLM`, `COMPLETE`, `N8N_ERROR` + 브릿지 단계 | 실제 구현 이름 |
+| 환경 변수 | Supabase·Python·LLM 키를 환경 변수로 | Credential만, 노드의 환경 변수 접근 차단 | 15.6, 15.9 |
+| 네트워크 | Python ↔ n8n Private Network | Cloudflare Tunnel + Access | n8n은 원격 서버, 브릿지는 집 PC (14.21, 15.13) |
+| LLM이 정하는 값 | MVP부터 `workflow_id`·Parameter | MVP는 `prompt_parts`만, Workflow 선택은 V2 이후 | 14.7, 13.4 |
+| 권한 수준 | V1에서 Level 2~3 | V2부터 (V1에는 AI Decision 없음) | PRD 단계, 15.19 |
+| Timeout | Python 30초, Monitor 10분 | 브릿지 15초, LLM 90초, Supabase 10~30초 | 202 즉시 응답, Heartbeat 제한 |
