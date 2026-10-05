@@ -820,6 +820,8 @@ Human-in-the-loop 작업을 관리한다.
 | created_at | timestamptz | 생성 |
 | resolved_at | timestamptz | 처리 |
 
+> ⚙️ 승인 유형과 대상 FK는 33.7이 정본이다 (`publish`·`decision`, 대상은 하나만 CHECK).
+>
 > ⚙️ V1의 게시 승인은 Post 단위다. 승인되면 `approvals.status = approved`와 `posts.status = approved`가 함께 바뀐다 (11. State Machine에서 정의).
 
 ### 10.19 system_errors
@@ -2948,6 +2950,8 @@ AI나 자동화가 오류로 무한 반복하면 GPU와 LLM 비용이 폭주한�
 
 ### 15.19 AI Action 권한 (V2 보강)
 
+> ⚙️ 권한·위험도·정책의 정본은 33장이다 (Agent 역할 33.2, Action과 위험도 33.3, 하한 33.4, 정책 버전 33.5, 평가 순서 33.6). 아래는 처음 정한 기준이다.
+
 AI Decision이 실행할 수 있는 Action을 **허용 목록**으로 관리한다 (12.9 `ai_decision.v1`).
 
 | 구분 | Action | 처리 |
@@ -3014,6 +3018,7 @@ System Rules → Safety Rules → Persona Rules → Task → 외부 입력 (팬 
 | `PUBLISHING_DISABLED` / `PUBLISHING_ENABLED` (긴급 정지) | Operator RPC | V1 |
 | `SNS_CONNECTED` / `SNS_DISCONNECTED` / `TOKEN_EXPIRED` | n8n | V1 |
 | `AGENT_ACTION_BLOCKED` (허용 목록 밖 Action) | n8n | V2 |
+| `POLICY_PUBLISHED`, `PLATFORM_DISABLED` / `PLATFORM_ENABLED`, `EMERGENCY_STOP` (33.5, 33.10, 32.6) | admin RPC | V2 |
 
 > **트랜잭션 제약:** DB가 요청을 거부하면(예외 발생) 그 트랜잭션 안에서 쓴 기록도 함께 롤백된다. 그래서 가입 거부·한도 초과·잘못된 전환처럼 **DB가 거부한 이벤트는 DB 안에서 기록할 수 없다.** 가입 거부는 Supabase Auth 로그에 남고, 나머지는 거부 응답을 받은 쪽(n8n, 브릿지)이 `log_security_event`로 기록한다. 가입 거부를 DB에도 남기려면 이후 Supabase Auth의 Before User Created Hook으로 바꾼다 (Hook은 오류를 예외가 아닌 응답으로 돌려주므로 기록이 남는다).
 
@@ -4002,6 +4007,7 @@ Frontend가 아는 값은 `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY` �
 | `/settings` | 12 Settings | MVP |
 | `/social`, `/posts`, `/posts/:id`, `/approvals`, `/analytics` | 13~17 | V1 |
 | `/ai-decisions`, `/ai-activity`, `/conversations`, `/conversations/:id`, `/strategy` | 19~24 | V2 |
+| `/safety` ⚙️ | 33.14 (admin) | V2 |
 
 필터·탭·보기 방식은 URL Query에 둔다. 새로고침하거나 링크를 공유해도 같은 화면이 열린다.
 
@@ -7368,7 +7374,7 @@ PRD 8.10에서 AI Decision(L3)은 **V2**다. V1은 "모든 게시물을 사람�
 | `no_action` | 바꿀 것 없음 | `NO_ACTION` | `none` | – | V2a |
 | `create_content` | Content Job 1개 생성 (주제 분류·스타일·자유 주제) | `CREATE_CONTENT`, `CHANGE_TOPIC`, `CHANGE_STYLE` | `content` | LOW | V2a |
 | `vary_content` | 성과가 좋았던 게시물의 Content Job을 바탕으로 변형 생성 | `REPEAT_PATTERN` | `content` | LOW | V2a |
-| `run_experiment` | 변수 하나만 다른 Content Job 2~3개 (A/B) | `RUN_EXPERIMENT` | `experiment` | LOW | V2b |
+| `run_experiment` | 변수 하나만 다른 Content Job 2~3개 (A/B) | `RUN_EXPERIMENT` | `experiment` | MEDIUM (33.3) | V2b |
 | `pause_content` | 아직 시작하지 않은 Agent Content Job 취소 | (15.19) | `content` | LOW | V2b |
 | `schedule_post` | 승인 대기 Post에 예약 시각 **제안** (시간대만 고르고 정확한 시각은 Schedule Engine) | `SCHEDULE_CONTENT` | `schedule` | MEDIUM | V2b |
 | `propose_strategy` | 게시 계획(시간대·주당 게시 수)·캡션 규칙 변경 **제안** | `CHANGE_POSTING_TIME`, `CHANGE_FREQUENCY`, `CHANGE_CAPTION` | `strategy` | HIGH | V2b |
@@ -7546,7 +7552,7 @@ PRD 8.10에서 AI Decision(L3)은 **V2**다. V1은 "모든 게시물을 사람�
 |---|---|---|---|---|---|
 | `no_action` | (실행 안 함) | 기록 | 기록 | 기록 | 기록 |
 | `create_content`, `vary_content` (LOW) | – | 승인 | **자동*** | 자동* | 자동* |
-| `run_experiment` (LOW) | – | 승인 | 승인 | 자동* | 자동* |
+| `run_experiment` (MEDIUM) | – | 승인 | 승인 | 자동* | 자동* |
 | `pause_content` (LOW) | – | 승인 | 자동 | 자동 | 자동 |
 | `schedule_post` (MEDIUM) | – | 승인 | 승인 | 자동* (게시 승인은 별도) | 자동* |
 | `propose_strategy` (HIGH) | – | 승인 | 승인 | 승인 | 승인 |
@@ -7841,7 +7847,7 @@ PRD 5.6은 V1에 "기본(수집)"을 두지만, 28.2에서 `get_messages`·`repl
 |---|---|---|
 | **V2a** (M10) | Instagram DM·댓글 수집, Conversations 화면, AI 초안 + 사람 승인·수정 후 전송, Operator 직접 답장, Memory 추출·관리, 보관 기한·삭제 요청 | 0~1 |
 | **V2b** | 저위험 자동 응답, 팬 상호작용 지표·세그먼트, 팬 신호를 Decision Context에 연결 (31.18) | 0~3 |
-| Long-term | 관계 관리 자율 운영, 댓글에서 DM으로 이어지는 비공개 답장, 이미지 답장 | 4~5 |
+| Long-term | 댓글에서 DM으로 이어지는 비공개 답장, 이미지 답장 | 3이 상한 (33.15) |
 
 ### 31.3 플랫폼 제약 (Instagram)
 
@@ -8018,7 +8024,7 @@ V2의 첫 플랫폼은 28장처럼 Instagram이다. 구현 전에 확인할 제�
 | 1 | 초안 + 승인 | L1 Recommend, L2 Draft | AI 초안 → Operator [보내기] / [수정 후 보내기] / [반려] |
 | 2 | 저위험 자동 | L3 Low-Risk Auto Reply | DM의 LOW 자동 |
 | 3 | 일반 대화 자동 | L4 Broad Auto Interaction | LOW·MEDIUM 자동 (댓글 포함) |
-| – | Long-term | L5 Relationship Management | 32장 이후 |
+| – | 두지 않음 | L5 Relationship Management | 3이 상한이다 (33.15) |
 
 원안의 L1(제안)과 L2(초안 작성 후 승인)는 이 시스템에서 같은 동작이라 1로 합친다.
 
@@ -8492,7 +8498,7 @@ content_need = 앞으로 7일 게시 계획 수 (posting_plan.posts_per_week)
 | V1 | L2 (게시 전 사람 승인) | 없음 | 없음 | L1~L2 |
 | V2a | L3 시작 | 0~2 | 0~1 | – |
 | V2b | L3 | 0~3 | 0~3 | L2~L3 |
-| Long-term | L4~L5 | 4~5 (32.10 승급 조건) | 4~5 | L4~L5 |
+| Long-term | L4~L5 | 4~5 (32.10 승급 조건) | 3이 상한 (33.15) | L4~L5 |
 
 원안의 "MVP L0~L1, V1 L1~L2"는 30.2에서 정한 대로 V2로 옮긴다 (MVP·V1에는 AI Decision이 없다).
 
@@ -8529,7 +8535,7 @@ content_need = 앞으로 7일 게시 계획 수 (posting_plan.posts_per_week)
 
 - Level 4의 자동 게시 대상도 좁다: 광고·협찬이 아니고, 캡션 검사(28.8 7번)를 통과하고, `content_rules`의 민감 주제가 아니고, Agent 하루 게시 한도(3) 안인 Post만. `publishing_enabled`는 그대로 우선한다.
 - **자동 강등:** Level 4에서 위 사고가 1건이라도 생기거나 7일 반려율이 20%를 넘으면 DB가 Level 3으로 내리고 WF-010으로 알린다. 다시 올리는 것은 사람이 한다.
-- `fan_reply_level` 4~5도 같은 형식(기간, 응답 수, 사람 수정·반려율, CRITICAL 사고 0건)으로 33장에서 정한다.
+- `fan_reply_level`은 3이 상한이고, 2 → 3 승급 조건과 자동 강등은 33.15다.
 
 ### 32.11 실행 주기와 하루 흐름
 
@@ -8632,3 +8638,360 @@ content_need = 앞으로 7일 게시 계획 수 (posting_plan.posts_per_week)
 | Level 4 진입 | 언급 없음 | 기간·경험·반려율·사고·결정 품질 조건 + 자동 강등 | 28.13에서 미룬 것 |
 | 비용 | Cycle Cost | 토큰·GPU 시간·파일 크기·호출 수 × 단가 추정, 저장하지 않고 계산 | 단가 변경에 대응 |
 | Trace ID | 새 ID | 기존 FK 연결 | 31.15 |
+
+---
+
+## 33. AI Agent Permission / Safety System (V2·Long-term) ✅
+
+> 자율 루프가 돌기 시작했을 때 AI가 무엇을 할 수 있고, 무엇을 할 수 없고, 무엇에 사람 승인이 필요한지를 **한 곳에** 정한다. 지금까지 권한 규칙은 15.18·15.19, 30.8~30.10, 31.7~31.10, 32.5·32.6·32.10에 나뉘어 있었다. 이 장이 그 정본이 되고, 원안에서 열려 있던 부분(Agent 역할의 실체, 정책 데이터와 버전, 정책 우선순위, 플랫폼 단위 정지, 권한 판정 기록, Level 4 자동 게시 차단 범주, 팬 응답 승급 조건, 이미지 안전)을 정한다. **아직 구현되지 않았다.** ⚙️ 표시는 원안을 조정한 부분이다 (33.17).
+
+### 33.1 원칙과 이 시스템에서의 의미
+
+원안의 원칙 5개를 그대로 따른다. **"AI에게 자율성을 주되, 권한은 주지 않는다"**가 이 시스템에서 구체적으로 뜻하는 것:
+
+| 원칙 | 이 시스템에서 |
+|---|---|
+| Least Privilege | AI는 **자격 증명이 하나도 없다.** LLM은 DB·API·파일에 접근하지 못하고, 받은 Context만 보고 JSON을 돌려준다. AI 종류(33.2)마다 볼 수 있는 Context와 제안할 수 있는 Action이 다르다 |
+| Decision ≠ Permission | AI가 낸 Decision은 `ai_decisions`의 한 행일 뿐이다. 실행 여부는 DB 함수가 정책(33.5)으로 판정한다 (30.8) |
+| Human Override | 세 단계 정지(33.10). 사람의 명시적 승인은 자동 판정보다 우선하지만, 정책의 하한(33.4)은 사람도 넘지 못한다 |
+| Fail Closed | 판정을 못 하면 실행하지 않는다 (33.12, 15.16) |
+| Audit Everything | 모든 판정 결과가 `ai_decisions`에 정책 버전과 함께 남는다 (33.11) |
+
+### 33.2 Agent 역할 ⚙️
+
+원안의 Logical Agent 7개를 실제 구성 요소에 대응시킨다. 이 시스템에서 **Agent = LLM 호출 종류 하나**다: 하나의 Workflow, 하나의 Context RPC, 하나의 출력 스키마를 가진다.
+
+| Agent | Workflow | 받는 Context | 출력 스키마 | 제안할 수 있는 것 | 원안 |
+|---|---|---|---|---|---|
+| Prompt | WF-002 | Persona 시각 설정, Content Job | `prompt_generation.v1` | 그 Job의 `prompt_parts` | Content |
+| Caption | WF-005 | Persona 말투·규칙, Asset 정보 | `caption_generation.v1` | 그 Post의 캡션 초안 | Content |
+| Analytics | WF-011 | Analytics Context (29.14) | `performance_insight.v1` | 없음 (분석만) | Analytics |
+| Strategy | WF-012 | Decision Context (30.5) | `ai_decision.v1` | 30.3의 콘텐츠·예약·전략 Action | Strategy |
+| Fan | WF-013 | Reply Context (31.6) | `fan_reply.v1` | 그 대화의 `reply_fan` 하나 | Fan Interaction |
+| Memory | WF-014 | 그 팬의 메시지·Memory (31.12) | `fan_memory.v1` | 그 팬의 Memory 변경 | Memory |
+| Publishing | **없음** | – | – | – | Publishing |
+| System | **없음** | – | – | – | System |
+
+- **Publishing Agent를 두지 않는다.** 게시는 판단이 아니라 실행이다. WF-007이 승인된 Post만 결정적 코드로 게시한다 (28.8). Long-term의 자동 게시도 Strategy Agent의 `publish_post` Decision → 정책 판정 → WF-007 경로다 (33.8).
+- **System Agent를 두지 않는다.** 재시도, 멈춘 Job 회수, 토큰 갱신, 장애 복구는 DB 함수·pg_cron·전용 Workflow가 한다. 시스템 설정을 건드리는 AI는 없다.
+- 원안의 권한 표(Read·Create·Modify·Execute·Publish)에서 **Read**는 이 시스템에서 "DB를 읽을 수 있음"이 아니라 "**Context RPC가 골라 준 것만 봄**"이다. Strategy Agent는 팬 개인 정보를 못 보고(31.18 집계만), Fan Agent는 다른 팬과 성과 데이터를 못 본다.
+- 한 Agent가 다른 Agent의 Action을 제안하면 그 Decision은 `invalid`다 (예: Fan Agent 출력에는 `create_content` 칸 자체가 없다).
+
+**Tool 호출** (원안 33.14~33.17) ⚙️: AI에게 **Tool(function calling)을 주지 않는다.** LLM은 Structured Output 하나를 돌려주고 끝난다. 원안의 "Tool Request → Tool Validator → Executor"는 이 시스템에서 "Action JSON → 검증기 → DB 함수"이고, 원안 33.16의 파라미터 허용 목록은 Action별 `params` 허용 키(30.6)다. 범용 실행 도구(shell, PowerShell, cmd, 임의 Python·SQL, 파일 쓰기)는 어떤 Agent에게도 없다. 스키마에 그런 칸이 없으므로 낼 수도 없다 (20.19). 이후 Tool 호출을 도입하더라도 같은 Action 목록·정책을 지나는 Tool만 만든다.
+
+### 33.3 Action 목록과 기본 위험도
+
+원안 33.6의 Action을 30.3·31장의 Action에 대응시키고 기본 위험도를 정한다 (원안 33.7).
+
+| 원안 Action | 이 시스템 | Agent | 기본 위험도 | 단계 |
+|---|---|---|---|---|
+| `ANALYZE_DATA`, `COLLECT_METRICS` | AI Action 아님 (WF-011, WF-009 일정) | – | – | – |
+| `CREATE_DRAFT` | `prompt_parts`, 캡션 초안, `reply_fan` 초안 | Prompt·Caption·Fan | LOW | MVP~ |
+| `CREATE_CONTENT` | `create_content`, `vary_content` | Strategy | LOW | V2a |
+| `GENERATE_ASSET` | AI Action 아님 (Content Job 이후 파이프라인) | – | – | – |
+| `MODIFY_CONTENT` | 없음. AI는 기존 Job·Post를 고치지 않는다. 아직 시작하지 않은 Agent Job의 취소(`pause_content`)만 | Strategy | LOW | V2b |
+| `RUN_EXPERIMENT` | `run_experiment` | Strategy | **MEDIUM** ⚙️ (30.3의 LOW에서 원안대로 올림. 30.9에서도 L3부터 자동이었다) | V2b |
+| `SCHEDULE_POST` | `schedule_post` (예약 시각 제안) | Strategy | MEDIUM | V2b |
+| `CHANGE_POSTING_TIME`, `CHANGE_POSTING_FREQUENCY`, `CHANGE_CONTENT_STYLE` | `propose_strategy` | Strategy | **HIGH** ⚙️ (원안 MEDIUM) | V2b |
+| `CREATE_MEMORY`, `UPDATE_MEMORY` | `fan_memory.v1`의 `create`·`replace`·`expire` | Memory | LOW | V2a |
+| `RESPOND_TO_FAN` | `reply_fan` | Fan | 31.7 (LOW~CRITICAL) | V2a |
+| `PUBLISH_POST` | `publish_post` | Strategy | HIGH | Long-term |
+| `BROADCAST_MESSAGE` | 없음 (같은 내용을 여러 팬에게) | – | HIGH, 만들지 않음 | – |
+| `DELETE_POST` | 없음 | – | – | AI에게 주지 않음 |
+| `CHANGE_PERSONA` | 없음 ⚙️ | – | – | AI에게 주지 않음 |
+| `CHANGE_AUTOMATION` | 없음 (권한 수준, 스위치, 한도, 정책) | – | – | AI에게 주지 않음 |
+| `ACCOUNT_SECURITY`, `CREDENTIAL_ACCESS`, `FINANCIAL_ACTION`, `SYSTEM_PERMISSION_CHANGE` | 없음. 그런 Tool·Action이 존재하지 않는다 | – | CRITICAL | AI에게 주지 않음 |
+| `LEGAL_RESPONSE`, `SENSITIVE_PERSONAL_DATA`, `HIGH_RISK_FAN_INTERACTION` | `reply_fan`의 위험 범주 (31.7) | Fan | HIGH·CRITICAL | V2a |
+
+- `propose_strategy`를 원안보다 높게 두는 이유: 한 번 적용되면 이후 모든 콘텐츠에 계속 영향을 주고, 효과가 나타나기까지 오래 걸린다 (32.5 냉각 기간 14일). 그래서 항상 사람 승인이다.
+- **Persona 변경은 제안조차 받지 않는다** ⚙️ (원안 33.19는 "AI 제안 → 사람 승인"). 이름·배경·성격·말투·안전 규칙은 Operator가 정하는 제품 결정이다. 성과에 맞춰 AI가 Persona를 계속 고치자고 제안하면 캐릭터가 조금씩 흔들린다. 성과 데이터는 `/analytics`·`/strategy`에서 사람이 보고 판단한다.
+- 위험도가 CRITICAL인 Action 종류는 아예 존재하지 않는다. CRITICAL은 Action이 아니라 **팬 대화의 위험 등급**으로만 나타나고, 그때도 자동 실행은 없다.
+
+**위험도 상향** (원안 33.8): 위험도는 Action 이름만으로 정하지 않는다. `private.evaluate_risk(action, params, context)`가 기본 위험도와 아래 상향 요인 중 **가장 높은 것**을 고른다.
+
+| 요인 | 조건 | 결과 |
+|---|---|---|
+| 콘텐츠 | `topic`·`topic_category`가 Persona `content_rules.sensitive_topics` 또는 전역 민감 주제(정치, 종교, 재난·사고, 건강 효능, 미성년, 실존 인물·브랜드 언급)에 해당 | HIGH |
+| 광고 | `is_sponsored` | HIGH |
+| 공개 범위 | 댓글 답글 (31.7) | +1단계 |
+| 팬 | 31.7 위험 범주 | 그 등급 |
+| 플랫폼 | 그 계정이 최근 60일 안에 `POLICY_ERROR`를 받음 | +1단계 |
+| 되돌릴 수 없음 | 게시, 전송 | 최소 MEDIUM |
+
+### 33.4 정책의 하한 (코드에 고정) ⚙️
+
+정책(33.5)은 Operator가 바꿀 수 있지만 **조일 수만 있고, 아래 하한보다 풀 수는 없다.** 이 하한은 DB 함수 코드에 있고, 정책 문서에 다른 값이 있어도 무시된다.
+
+| # | 하한 |
+|---|---|
+| 1 | 33.3에서 "AI에게 주지 않음"인 Action은 어떤 정책·수준에서도 실행하지 않는다 |
+| 2 | 위험 등급 HIGH·CRITICAL은 자동 승인하지 않는다 (원안 33.10 "L5에서도 Critical 자동 금지"를 HIGH까지 넓힘). 예외는 33.8의 Level 4 자동 게시 하나이며, 그 조건도 하한으로 고정한다 |
+| 3 | 사람이 반려·만료한 Decision은 다시 실행하지 않는다 |
+| 4 | 비밀값(토큰, 키, 비밀번호)은 어떤 Context에도 넣지 않는다 (33.9) |
+| 5 | AI는 정책·권한 수준·스위치·한도를 바꾸지 못한다. 이것들은 admin RPC만 바꾼다 |
+| 6 | 긴급 정지 중에는 어떤 자동 승인도 없다 |
+
+### 33.5 정책 데이터와 버전 ⚙️
+
+원안 33.11·33.35. 정책을 **버전이 있는 문서 하나**로 관리한다.
+
+| 테이블 | 내용 |
+|---|---|
+| `agent_policy_versions` | `version`(정수, 증가), `document` jsonb, `created_by`, `created_at`, `note`. **수정·삭제 불가** (insert만) |
+| `app_settings.agent_policy_version` | 현재 쓰는 버전 번호 |
+
+```json
+{
+  "actions": {
+    "create_content":  { "min_level": 2, "auto": "conditional", "daily_limit": 10, "cooldown_hours": 24, "enabled": true },
+    "vary_content":    { "min_level": 2, "auto": "conditional", "daily_limit": 10, "cooldown_hours": 24, "enabled": true },
+    "run_experiment":  { "min_level": 3, "auto": "conditional", "daily_limit": 1,  "enabled": true },
+    "pause_content":   { "min_level": 2, "auto": "always",      "enabled": true },
+    "schedule_post":   { "min_level": 3, "auto": "conditional", "enabled": true },
+    "propose_strategy":{ "min_level": 1, "auto": "never",       "cooldown_hours": 336, "enabled": true },
+    "reply_fan":       { "min_fan_level": 1, "auto": "conditional", "enabled": true },
+    "publish_post":    { "min_level": 4, "auto": "conditional", "daily_limit": 3, "enabled": false }
+  },
+  "auto_conditions": { "min_confidence": 0.8, "min_sample_level": "medium", "min_delta_pct": 20 },
+  "platforms": {
+    "instagram": { "publish_post": "conditional", "reply_fan": "conditional", "schedule_post": "conditional" },
+    "x":         { "publish_post": "never",       "reply_fan": "never",       "schedule_post": "never" }
+  }
+}
+```
+
+- 30.9 표, 30.10·31.10 한도, 32.5 냉각 기간이 이 문서의 기본값이다. 한도 값은 `app_settings.limits`(15.18)에 두고, 정책은 "어떤 Action을 어떤 수준에서 자동으로 허용하나"를 담는다.
+- `auto`: `always`(조건 없이 자동), `conditional`(30.9·32.5 자동 조건을 모두 만족할 때만 자동), `never`(항상 승인).
+- 바꾸는 방법: admin RPC `publish_agent_policy(p_document, p_note)` → JSON Schema 검증 + 하한 검사(33.4. 하한보다 풀면 거부) → 새 버전 insert → 현재 버전 변경 → `security_events`(`POLICY_PUBLISHED`). 이전 버전으로 되돌리기도 "그 문서로 새 버전을 만드는 것"이다.
+- 모든 Decision에 판정 때 쓴 `policy_version`을 남긴다 (원안 33.35 "과거 실행 결과 재현").
+
+### 33.6 정책 평가 순서와 판정 결과
+
+**평가 순서** (원안 33.32): 위에서부터 확인하고 **가장 제한적인 결과가 이긴다.**
+
+```text
+1. 긴급 정지 (전역 → 플랫폼 → Persona, 33.10)      → EMERGENCY_BLOCK
+2. 하한 (33.4)                                     → DENY
+3. 플랫폼 정책 (policy.platforms)                  → DENY / REQUIRE_APPROVAL
+4. Persona 정책 (권한 수준, agent_disabled_actions) → DENY / REQUIRE_APPROVAL
+5. Agent 역할 (33.2: 이 Agent가 낼 수 있는 Action인가) → DENY
+6. Action 정책 (min_level, auto, enabled)          → DENY / REQUIRE_APPROVAL
+7. 위험도 (33.3 상향 포함)                          → REQUIRE_APPROVAL
+8. 예산·한도·냉각 기간 (15.18, 30.10, 31.10, 32.5)  → DENY / REQUIRE_APPROVAL
+9. 자동 조건 (Confidence, 표본, 충돌, content_need) → REQUIRE_APPROVAL
+10. 모두 통과                                       → ALLOW / ALLOW_WITH_LIMIT
+```
+
+**판정 결과** (원안 33.9)와 Decision 상태(30.8)의 대응:
+
+| 판정 | Decision 상태 | 예 |
+|---|---|---|
+| `ALLOW` | `approved` (`approval_mode = 'auto'`) → 실행 | Level 2, LOW, 조건 충족 |
+| `ALLOW_WITH_LIMIT` | `approved` + `params`를 줄여 실행, 줄인 내용은 `result.limits_applied` | 우선순위 8 → 6 (30.6), 변형 4개 → 남은 예산 2개 |
+| `REQUIRE_APPROVAL` | `pending_approval` + `approvals` 행 | Confidence 0.7, MEDIUM인데 Level 2 |
+| `DENY` | `blocked` 또는 `invalid` (+ 이유 코드) | 하한, 예산 초과, Agent 역할 밖 |
+| `EMERGENCY_BLOCK` | `blocked` (`EMERGENCY_STOP`) | 긴급 정지 중 |
+
+- Persona별 Action 끄기: `personas.agent_disabled_actions text[]` (예: 이 Persona는 실험 안 함). 4번에서 `DENY`.
+- 원안 33.12의 Persona별 수준, 33.13의 플랫폼별 범위는 각각 4번·3번이다.
+
+### 33.7 승인 (approvals 정리) ⚙️
+
+원안 33.24는 `approval_target_type`·`approval_target_id`(다형 참조)를 제안한다. 여기서는 **대상마다 nullable FK를 두고 CHECK로 정확히 하나만** 채우게 한다. 다형 참조는 FK 무결성(지워진 대상을 가리키는 승인)을 잃는다.
+
+| approval_type | 대상 FK | 만료 | 수정 |
+|---|---|---|---|
+| `publish` | `post_id` | 예약 시각 또는 72시간 (11.10) | Post 캡션 수정(`revise_post`) → 새 승인 |
+| `decision` | `ai_decision_id` | 72시간, 팬 응답은 응답 창 마감 (31.3) | 팬 응답만 [수정 후 보내기] (31.9). 그 밖의 Decision은 수정 없음 (30.12) |
+
+- 10.18의 `content`·`strategy` 유형은 쓰지 않는다. 전략 승인은 `propose_strategy` Decision의 `decision` 승인이다.
+- 상태는 원안 33.25와 같다 (`pending`/`approved`/`rejected`/`expired`/`cancelled`, 11.10).
+- **시간이 지나도 자동 실행하지 않는다** (원안 33.26): 만료는 언제나 `expired`이고, "응답이 없으면 진행"하는 경로는 없다.
+- 승인자는 그 Persona의 소유 Operator다. admin만 할 수 있는 승인: `propose_strategy`, CRITICAL 팬 응답.
+
+### 33.8 Level 4 자동 게시 (Long-term) ⚙️
+
+32.10의 승급 조건을 갖춘 Persona에서 `publish_post`가 자동 승인되려면, 아래 **차단 범주에 하나도 걸리지 않아야 한다.** 이 목록은 하한(33.4 #2의 유일한 예외 조건)이라 정책으로 풀 수 없다.
+
+| # | 차단 범주 (하나라도 해당하면 사람 승인) |
+|---|---|
+| 1 | 광고·협찬 (`is_sponsored`) |
+| 2 | 33.3 위험도 상향의 민감 주제 |
+| 3 | 캡션에 다른 계정 `@`언급, URL, 실존 인물·브랜드명 |
+| 4 | 이미지 안전 점수(33.9)가 없거나 기준을 넘음 |
+| 5 | 이 Persona가 아직 한 번도 게시하지 않은 `topic_category` 또는 `visual_style` |
+| 6 | 실험 Content Job (`metadata.experiment`) |
+| 7 | 연결한 지 30일이 안 된 계정, 최근 60일 `POLICY_ERROR`가 있는 계정 |
+| 8 | 게시 계획 시간대(`posting_plan.windows`) 밖 |
+| 9 | 캡션 검사(28.8 7번) 경고, 또는 Operator가 캡션을 고친 적이 없는 상태에서 AI 캡션 Confidence가 낮음 |
+| 10 | Agent 하루 게시 한도(3) 초과, `publishing_enabled = false` |
+
+- 자동 게시도 Post 행·`approvals` 행을 남긴다 (`approval_mode = 'auto'`). 사람이 나중에 보고 [문제 신고]하면 32.10의 사고로 센다.
+- 게시 후 1시간 안에 Operator가 [게시 취소 요청]을 누르면 플랫폼 앱에서 지우라는 안내와 함께 사고로 기록한다 (AI는 삭제하지 않는다, 33.3).
+
+### 33.9 콘텐츠·데이터 안전
+
+**콘텐츠 검사** (원안 33.18): 대상별로 이미 정한 검사를 모은다.
+
+| 대상 | 검사 | 위치 |
+|---|---|---|
+| 프롬프트 | 스키마, 길이, 금지 표현 | 12.9, WF-002 |
+| 이미지 | 실행 후 검증(형식·크기), **이미지 안전 점수** ⚙️ | 13.11, 아래 |
+| 캡션·해시태그 | 길이, 개수, 금지어·금지 주제, 광고 표기 | 28.8 7번 |
+| 팬 응답 | 유출, Persona 일관성, AI 정체성, 금전·링크 요청 | 31.8 |
+| Memory | 저장 금지 목록, 수치 하한 | 31.11 |
+
+**이미지 안전 점수** (새 항목, V2b부터 기록, Long-term 자동 게시 조건): 브릿지가 생성 직후 로컬 분류 모델로 노출·폭력 점수를 계산해 `assets.generation_metadata.safety = {model, nsfw, violence}`에 남긴다. V1·V2에서는 승인 화면의 경고 표시에만 쓰고(사람이 이미지를 직접 본다), Level 4 자동 게시는 이 값이 없으면 하지 않는다. 모델은 `.safetensors` 규칙(15.8)을 따른다.
+
+**금전 보호** (원안 33.22): 금전 관련 Tool·Action은 존재하지 않는다. 팬이 돈을 요청하면 `FINANCIAL`(HIGH) 승인 대기다. 반대로 **AI 응답이 팬에게 돈·선물·결제·외부 링크·연락처를 요구하면** 응답 검증(31.8)이 거부한다 ⚙️. AI가 사기 도구로 쓰이는 것을 막는다.
+
+**비밀값 보호** (원안 33.23): 모든 Context RPC는 칸을 명시해서 고르고(`select *` 금지) Vault를 읽지 않는다. LLM에 보내기 직전에 모든 Context에 `private.redact_jsonb`(15.21)를 한 번 더 적용한다. 토큰은 SNS 하위 Workflow 안에서만 쓰인다 (28.6).
+
+### 33.10 세 단계 정지
+
+원안 33.27·33.28.
+
+| 범위 | 방법 | 막는 것 | 계속되는 것 |
+|---|---|---|---|
+| Persona | `agent_paused = true` (32.6) | 그 Persona의 새 Decision Run, 자동 승인, 팬 자동 응답 | 수동 작업, 수집, 사람 승인 |
+| 플랫폼 ⚙️ | `app_settings.platform_controls.{platform} = { "publishing": false, "replies": false }` | 그 플랫폼의 게시·팬 전송, 그 플랫폼 대상 Decision 자동 승인 | 다른 플랫폼 전부, 그 플랫폼의 수집 |
+| 전역 | `emergency_stop_all()` (32.6) | 새 Decision·생성 시작·게시·팬 자동 응답·실험 | 진행 중 작업의 마무리, 수집, 오류 기록, Health Check, 복구 Workflow (원안 33.28) |
+
+- 플랫폼 정지는 새로 더한다: 특정 플랫폼에서 문제가 생겨도 전체를 멈출 필요가 없다 (원안 33.13). 끄고 켤 때 `security_events`(`PLATFORM_DISABLED`/`PLATFORM_ENABLED`).
+- 원안의 Instagram "DISABLED"를 `social_accounts.status = 'inactive'`로 하지 않는 이유: 계정 비활성화는 토큰 문제 같은 "못 하는 상태"이고, 플랫폼 정지는 "하지 않기로 한 상태"다. 섞으면 재연결할 때 정지가 풀린다.
+
+### 33.11 판정 기록 (Audit) ⚙️
+
+원안 33.34의 `permission_audit_logs` 테이블은 만들지 않는다. **모든 AI 제안이 이미 `ai_decisions` 한 행**이므로, 판정 결과를 그 행에 둔다.
+
+| 원안 칸 | `ai_decisions` 칸 |
+|---|---|
+| `agent` | `agent` ⚙️ (새 칸: `strategy` / `fan`) |
+| `action`, `resource_type`, `resource_id` | `action`, `target_ref`, 실행 결과의 FK (`result`) |
+| `risk_level` | `risk_level` (상향 후 값) + `risk_factors` (새 칸, 걸린 요인) |
+| `decision` | `permission` ⚙️ (새 칸: 33.6 판정) + `status` |
+| `reason` | `status_reason` (이유 코드) |
+| `policy_version` | `policy_version` ⚙️ (새 칸) |
+
+- AI Decision이 아닌 거부(예: n8n이 권한 밖 RPC를 부름, 정책 밖 값을 직접 넣으려 함)는 `security_events`(`AGENT_ACTION_BLOCKED`, 15.22)에 남긴다.
+- Memory 변경은 Decision이 아니다. 저장된 변경은 `fan_memories`(출처 메시지, `superseded_by`)가, 거부된 변경은 `memory` Job의 `result`(거부 수와 이유 코드, 본문 없음)가 기록이다.
+- 원안 33.43의 Trace ID는 31.15·32.14처럼 기존 FK 연결로 따라간다.
+
+### 33.12 Fail Closed
+
+원안 33.37. 판정은 DB 함수 하나 안에서 한 트랜잭션으로 하므로, 대부분의 "서비스 장애"는 "아무것도 기록·실행되지 않음"이 된다.
+
+| 장애 | 결과 |
+|---|---|
+| DB 함수 오류 (판정 중 예외) | 트랜잭션 전체 취소 → Run `failed` → 재시도. 아무것도 실행되지 않음 |
+| 현재 정책 버전을 못 읽음, 정책 문서가 스키마에 안 맞음 | 모든 Decision `blocked` (`POLICY_UNAVAILABLE`) |
+| `app_settings`(스위치, 한도)를 못 읽음 | 게시·자율 실행 중지 (15.16) |
+| 승인 행 생성 실패 | 트랜잭션 취소 → 승인 없이 실행되는 경로 없음 |
+| n8n 검증기 오류 | Run `failed`. DB까지 가지 않음 |
+| LLM 장애 | 새 AI Action 없음. 기존 큐·예약 게시·수집은 계속 (32.7) |
+| 예산 카운터 오류 | 같은 트랜잭션이라 판정 자체가 실패 → 위와 같음 |
+
+### 33.13 보안 경계
+
+원안 33.38·33.39는 15.7·15.8·15.16과 같다. 차이만 적는다.
+
+| 원안 | 현재 |
+|---|---|
+| Permission / Policy 계층이 n8n과 Python 사이 | **Supabase DB 함수**에 있다. Python에 도착하는 Job은 이미 판정을 통과해 만들어진 것이다. Python은 Registry에 있는 Workflow만 Job ID로 실행한다 |
+| `PYTHON_API_TOKEN` | `BRIDGE_TOKEN` + Cloudflare Access Service Token (15.13) |
+| Bind `127.0.0.1`, 공개 포트 없음, 임의 명령·파일 접근 없음 | 같음 (15.7·15.8) |
+| n8n이 ID 중심 데이터 전달 | 같음: `POST /v1/jobs`는 `job_id`(uuid)만 받는다 (15.8) |
+
+**n8n의 `service_role` 키** ⚙️: AI는 키를 갖지 않지만, n8n 서버가 침해되면 공격자는 `service_role`로 모든 RPC를 부를 수 있다. 이것은 AI 권한 문제가 아니라 서버 보안 문제이며 15.9·15.14가 다룬다. 정책 판정을 DB 함수 안에 둔 덕분에, 침해된 n8n이 `record_ai_decisions`를 직접 불러도 하한·정책은 우회할 수 없다. 다만 Operator RPC가 아닌 Worker RPC(예: `complete_publish`)를 직접 부르는 것은 막지 못한다. Workflow 그룹별로 다른 DB 역할(예: 팬 Workflow는 팬 RPC만)을 두는 방법을 Long-term에 검토한다.
+
+### 33.14 화면
+
+**`/safety`** (새 경로, V2, admin) (원안 33.40)
+
+| 영역 | 내용 |
+|---|---|
+| 스위치 | 전역 3개(32.6), 플랫폼별, 정지된 Persona 목록. 켜고 끈 기록 |
+| 자율 수준 | Persona별 `agent_permission_level`·`fan_reply_level`, 승급 조건 충족 여부(32.10·33.15) |
+| 정책 | 현재 버전, 버전 목록과 차이(diff), [새 버전 만들기] (하한 위반이면 저장 불가) |
+| 막힌 Action | 최근 7일 `blocked`·`invalid`·`EMERGENCY_BLOCK`을 이유 코드별로 |
+| 승인 대기 | 위험 등급별 개수 (CRITICAL 먼저) |
+| 예산·한도 | 오늘 사용량 / 한도 (콘텐츠, 생성, LLM 공용·AI·팬, 게시, 팬 응답) |
+| 보안 이벤트 | 최근 `security_events` |
+
+**`/approvals`** (원안 33.41): 게시 승인과 AI 결정 승인을 한 목록에 둔다. 위험 등급 배지, CRITICAL·HIGH가 먼저, 만료까지 남은 시간. 상세는 원안 순서(무엇을, 왜, 근거, 위험(걸린 요인), 정책 버전, 기대 결과)이고, 버튼은 유형별로 다르다 (33.7). 팬 응답은 `/conversations`에서도 처리할 수 있다 (31.17).
+
+**AI가 보여주는 것** (원안 33.42): Decision, `reasoning_summary`, 근거(Context 수치, 29.15), Confidence(표본 수준과 낮은 쪽), 위험, 기대 결과. Chain-of-Thought는 저장하지도 보여주지도 않는다 (10.17).
+
+### 33.15 팬 응답 권한 승급 ⚙️
+
+32.10에서 이 장으로 미룬 `fan_reply_level`의 상한과 승급 조건을 정한다.
+
+**`fan_reply_level`은 3이 상한이다.** 원안 31.20의 L4(대부분 자동)·L5(관계 자율 운영)는 두지 않는다. 이유: HIGH·CRITICAL 대화는 어떤 수준에서도 자동이 아니고(33.4 #2), 먼저 말 걸기·여러 팬에게 같은 메시지는 원안 33.7에서도 HIGH(`BROADCAST_MESSAGE`)다. 남는 것은 LOW·MEDIUM 자동 응답이고, 그것은 이미 Level 3이다.
+
+**Level 2 → 3으로 올리는 조건** (모두 만족, admin이 Persona별로 켬)
+
+| 조건 | 기준 |
+|---|---|
+| 운영 기간 | Level 2에서 30일 이상 |
+| 경험 | 자동으로 보낸 응답 200개 이상 |
+| 사람 판정 | 최근 30일 AI 초안 중 수정·반려 비율 < 10% |
+| 사고 | 최근 30일 [문제 신고]된 AI 응답 0건, 플랫폼 경고 0건, CRITICAL을 LOW로 분류한 것으로 확인된 사례 0건 |
+
+- **[문제 신고]** ⚙️: Conversation 화면에서 이미 보낸 AI 응답에 붙이는 버튼 (`messages.metadata.flagged`, 이유). 승급·강등 판단에 쓴다.
+- **자동 강등:** Level 3에서 [문제 신고] 1건, 또는 7일 수정·반려 비율 20% 초과 → DB가 Level 2로 내리고 WF-010 알림. Level 2에서 같은 일이 생기면 Level 1.
+
+### 33.16 작업 목록과 테스트
+
+| 영역 | V2a | V2b | Long-term |
+|---|---|---|---|
+| DB | `agent_policy_versions`, `publish_agent_policy`, 판정 함수(33.6 순서)와 하한(33.4), `evaluate_risk`, `ai_decisions`의 `agent`·`permission`·`policy_version`·`risk_factors`, `approvals` CHECK(대상 하나), `platform_controls`, `agent_disabled_actions`, 이벤트 종류(`POLICY_PUBLISHED`, `PLATFORM_DISABLED`/`ENABLED`) | 팬 응답 승급·강등, [문제 신고] | Level 4 차단 범주, 자동 게시 판정, Workflow별 DB 역할 검토 |
+| 브릿지 | – | 이미지 안전 점수 | – |
+| n8n | Context에 `redact_jsonb`, 응답 검증에 금전·링크 요구 거부 | – | – |
+| Lovable | `/safety`, `/approvals` 통합 | 승급 조건 표시, [문제 신고] | – |
+
+**테스트**
+
+| 경우 | 기대 |
+|---|---|
+| Fan Agent 출력에 `create_content` | 스키마에서 거부 |
+| Level 3에서 `publish_post` | `DENY` (min_level 4), `policy_version` 기록 |
+| 정책에 `propose_strategy`를 `auto: always`로 저장 시도 | 하한 위반으로 저장 거부 |
+| 정책 버전을 못 읽음 | 모든 Decision `blocked` (`POLICY_UNAVAILABLE`) |
+| Instagram `publishing: false` | Instagram 게시·응답 없음, 다른 플랫폼과 수집은 계속 |
+| 전역 정지 중 Level 2 `create_content` | `EMERGENCY_BLOCK` |
+| `create_content` 민감 주제 (Level 2, Confidence 0.9) | 위험도 HIGH로 상향 → 승인 대기, `risk_factors` 기록 |
+| 승인 대기 72시간 방치 | `expired`, 실행 없음 |
+| 반려된 Decision을 같은 내용으로 다시 실행 시도 | `DENY` (하한 #3) |
+| 변형 4개 요청, 남은 예산 2개 | `ALLOW_WITH_LIMIT`, `limits_applied` |
+| AI 응답이 팬에게 송금·링크 요구 | `invalid` |
+| Context에 토큰 형태 문자열이 섞임 | `redact_jsonb`로 가려진 뒤 전송 |
+| Level 3 팬 응답에 [문제 신고] 1건 | 자동으로 Level 2, 알림 |
+| Level 4 자동 게시 대상이 광고 | 승인 대기 |
+
+### 33.17 원안 조정
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| Agent 역할 | 7개 Logical Agent | LLM 호출 종류 6개 (Prompt, Caption, Analytics, Strategy, Fan, Memory). Publishing·System Agent 없음 | 게시와 시스템 작업은 판단이 아니라 결정적 실행 |
+| 권한 표 | Read·Create·Modify·Execute·Publish | Agent별 Context·스키마·제안 가능 Action | LLM은 DB를 읽지도 쓰지도 않음 |
+| Tool | Tool Request → Validator → Executor | Tool 없음, Structured Output 하나 | 범용 실행 경로 자체를 두지 않음 |
+| Action 목록 | 13개 | 30.3·31장 Action에 대응, 분석·수집·생성은 AI Action이 아님 | 이미 정한 목록 |
+| `RUN_EXPERIMENT` 위험도 | MEDIUM | 채택 (30.3의 LOW에서 올림) | 30.9에서 이미 L3부터 자동 |
+| 전략 변경 위험도 | MEDIUM (조건부 자동) | HIGH (항상 승인) | 오래 지속되는 영향 |
+| Persona 변경 | AI 제안 → 사람 승인 | 제안도 받지 않음 | 캐릭터 일관성, 제품 결정 |
+| HIGH 자동 | 기본 승인 필요 | 하한으로 자동 금지 (Level 4 자동 게시만 예외, 그 조건도 하한) | 정책으로 풀 수 없게 |
+| 정책 | 구조화된 데이터 | 버전 문서(insert만) + 코드에 고정된 하한, 조이기만 가능 | 실수로 위험하게 푸는 것 방지 |
+| 정책 우선순위 | 7단계 | 10단계 평가 순서, 가장 제한적인 결과 | 예산·자동 조건까지 포함 |
+| 판정 결과 | 5개 | 그대로, Decision 상태에 대응 | 30.8 |
+| `permission_audit_logs` | 새 테이블 | `ai_decisions`에 `agent`·`permission`·`policy_version`·`risk_factors` + `security_events` | 모든 AI 제안이 이미 한 행 |
+| 승인 대상 | `approval_target_type`·`id` | 대상별 nullable FK + 하나만 CHECK, 유형 `publish`·`decision` | FK 무결성 |
+| 플랫폼 정지 | `DISABLED` | `platform_controls` 스위치 (계정 상태와 분리) | 재연결 때 정지가 풀리지 않게 |
+| Rate Limit 값 | 생성 3, 게시 5, 팬 100, Decision 10 / 일 | 15.18·30.10·31.10 값 유지 (생성 10, Agent 게시 3, 팬 자동 200, Run 3·Decision 15) | 이미 정한 값, 정책 문서로 조정 |
+| Cooldown | 전략 변경 24h | 14일 (32.5) | 효과가 나타날 시간 |
+| Permission 계층 위치 | n8n과 Python 사이 | Supabase DB 함수 | 우회 불가, 한 트랜잭션 |
+| Python 토큰 | `PYTHON_API_TOKEN` | `BRIDGE_TOKEN` + Cloudflare Access | 15.13 |
+| 콘텐츠 검사 | 텍스트·이미지 | 기존 검사 + 이미지 안전 점수 (V2b 기록, Long-term 자동 게시 조건) | 이미지 검사가 없었다 |
+| 금전 보호 | AI가 금전 행동 불가 | + AI 응답의 금전·링크 요구 거부 | AI가 사기 도구가 되는 것 방지 |
+| Level 4 자동 게시 | 정하지 않음 | 차단 범주 10개 (하한) | 32.10에서 미룬 것 |
+| 팬 응답 수준 | L0~L5 | 상한 3, 2→3 승급 조건, [문제 신고], 자동 강등 | HIGH·CRITICAL·broadcast는 언제나 사람 |
+| `/safety` | 새 화면 | 채택 (admin) | – |
