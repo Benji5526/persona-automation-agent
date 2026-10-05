@@ -37,7 +37,7 @@ content_jobs: queued ──WF-001──▶ generating
 
 ## 2. 사전 준비
 
-- [ ] Supabase에 마이그레이션 0001~0007 적용 ([supabase/README.md](../supabase/README.md))
+- [ ] Supabase에 마이그레이션 0001~0008 적용 ([supabase/README.md](../supabase/README.md))
 - [ ] Supabase에서 **n8n 전용 secret key**를 새로 만든다 (브릿지 키와 따로, TECH 15.6)
 - [ ] Cloudflare Tunnel이 브릿지(`127.0.0.1:8000`)에 연결돼 있고, Cloudflare Access에서 **Service Token**(Client ID·Secret)을 만들어 그 터널 앱에 허용 (TECH 15.7)
 - [ ] 브릿지 `.env`의 `BRIDGE_TOKENS` 값 확인
@@ -50,7 +50,7 @@ n8n → **Credentials → Add credential**. 비밀값은 노드 파라미터에 
 
 | 이름 (정확히 이대로) | 종류 | 값 | 쓰는 곳 |
 |---|---|---|---|
-| `PA Supabase` | **Custom Auth** | 아래 JSON | 모든 Supabase 노드 |
+| `PA Supabase` | **Custom Auth** | 아래 JSON | 모든 Supabase 노드 (LLM Workflow의 `reserve_llm_call` 포함) |
 | `PA Bridge` | **Custom Auth** | 아래 JSON | WF-003 브릿지 노드 |
 | `PA Webhook Secret` | Header Auth | Name `X-Webhook-Secret`, Value 무작위 32자 이상 | WF-001·003 Webhook |
 | `PA Callback Token` | Header Auth | Name `X-Callback-Token`, Value = 브릿지 `.env`의 `N8N_CALLBACK_TOKEN` | WF-004 Webhook |
@@ -156,7 +156,7 @@ N8N_CALLBACK_TOKEN=<PA Callback Token 값>
 | 값 | 동작 |
 |---|---|
 | `fake` (기본) | 고정 JSON을 돌려준다. M3 완료 조건(가짜 LLM으로 `queued → ready`)과 비용 없는 테스트용 |
-| `claude` | Claude API (`claude-opus-5-5`, effort `low`, Structured Output `output_config.format`). 안전 분류로 거절되면 `fallbacks: "default"`가 서버 쪽에서 다른 모델로 다시 시도한다 |
+| `claude` | 먼저 `reserve_llm_call`(마이그레이션 0008)로 하루 호출 한도(`limits.daily_llm_calls_limit`)를 확인한다. 통과하면 Claude API (`claude-opus-5-5`, effort `low`, Structured Output `output_config.format`). 한도 초과면 Job은 다음 UTC 자정에 재시도된다 (남은 시도가 있을 때. 마지막 시도였다면 `failed`가 되고 다시 실행해야 한다, TECH 21.18). 안전 분류로 거절되면 `fallbacks: "default"`가 서버 쪽에서 다른 모델로 다시 시도한다 |
 
 어느 모드든 n8n이 결과를 `prompt_generation.v1`·`caption_generation.v1` 스키마로 다시 검증한다 (TECH 12.9). LLM 요청 Timeout은 90초로, prompt·caption Job의 Heartbeat 제한(`app_settings.heartbeat_timeout_seconds`, 120초)보다 짧다. Timeout을 늘리면 Heartbeat 제한도 함께 늘린다.
 

@@ -23,7 +23,7 @@ from app import __version__
 from app.comfyui.builder import InputRequest, plan, render, resolve_workflow_id
 from app.comfyui.client import ComfyClient, iter_output_files
 from app.comfyui.registry import WorkflowSpec, missing_nodes
-from app.comfyui.validation import (MIME_EXT, check_models, make_thumbnail, output_invalid,
+from app.comfyui.validation import (MIME_EXT, check_models, combo_options, make_thumbnail, output_invalid,
                                     validate_input_image, validate_output)
 from app.config import Settings
 from app.database import Repository
@@ -333,8 +333,19 @@ class GpuWorker:
         await self.repo.sync_workflow_registry({wid: spec.sync_payload(enabled[wid]) for wid, spec in self.registry.items()})
         return enabled
 
+    async def installed_models(self) -> dict | None:
+        """ComfyUI에 설치된 체크포인트·LoRA 이름 (22.9 Visual Identity 드롭다운). 읽지 못하면 None."""
+        try:
+            info = await self.comfy.object_info()  # 5분 캐시라 새 파일은 최대 5분 늦게 보인다
+        except Exception as exc:  # 목록을 못 읽어도 상태 보고는 계속한다 (DB는 이전 목록 유지)
+            log.warning("could not read installed models: %s", type(exc).__name__)
+            return None
+        return {"checkpoints": sorted(combo_options(info, "CheckpointLoaderSimple", "ckpt_name") or []),
+                "loras": sorted(combo_options(info, "LoraLoader", "lora_name") or [])}
+
     async def status_info(self) -> dict:
         gpu: dict = {}
+        models = None
         try:
             stats = await self.comfy.system_stats()
             self.comfy_ok = True
@@ -342,11 +353,15 @@ class GpuWorker:
             gpu = {"name": device.get("name"),
                    "vram_total_mb": round(device.get("vram_total", 0) / 2**20),
                    "vram_free_mb": round(device.get("vram_free", 0) / 2**20)}
+            models = await self.installed_models()
         except Exception:
             self.comfy_ok = False
-        return {"comfyui_ok": self.comfy_ok, "gpu": gpu,
+        info = {"comfyui_ok": self.comfy_ok, "gpu": gpu,
                 "current_job_id": self.current["id"] if self.current else None,
                 "queue_size": len(self.pending), "version": __version__, "worker_loop_ok": self.healthy()}
+        if models is not None:  # 없으면 DB의 이전 목록을 유지한다 (0008)
+            info["models"] = models
+        return info
 
     async def report_loop(self) -> None:
         while True:

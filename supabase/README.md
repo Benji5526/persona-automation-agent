@@ -11,6 +11,7 @@
 | `migrations/0005_security.sql` | 권한 회수, RLS, 가입 허용 목록, Storage 버킷·정책 |
 | `migrations/0006_cron.sql` | pg_cron: 멈춘 Job 회수 (1분마다) |
 | `migrations/0007_workers_settings.sql` | `worker_status`, 설정 RPC, 오류 해결 RPC |
+| `migrations/0008_llm_limit_models.sql` | LLM 하루 호출 한도 `reserve_llm_call`, 설치된 모델 목록 `worker_status.models` |
 | `tests/stubs/supabase_stub.sql` | **로컬 테스트 전용.** 실제 프로젝트에 적용하지 않는다 |
 | `verify_production.sql` | 실제 프로젝트 적용 후 점검 (읽기 전용, TECH_DESIGN 24.4) |
 
@@ -45,7 +46,7 @@
 
 ## 로컬 테스트
 
-Docker 없이 내장 PostgreSQL(`pgserver`)에 Supabase 흉내 스키마와 0001~0007을 적용해 테스트한다. 0006(pg_cron)은 로컬에 확장이 없어 문법만 확인한다.
+Docker 없이 내장 PostgreSQL(`pgserver`)에 Supabase 흉내 스키마와 0006을 뺀 모든 마이그레이션을 적용해 테스트한다. 0006(pg_cron)은 로컬에 확장이 없어 문법만 확인한다.
 
 ```bash
 .venv/Scripts/python -m pip install -r requirements-dev.txt

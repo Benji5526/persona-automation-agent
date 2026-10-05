@@ -252,11 +252,18 @@ def test_status_report(env):
 
     info = env.run(go())
     assert info["comfyui_ok"] is True and info["gpu"]["vram_free_mb"] == 2048
-    row = env.seed.as_postgres().one("select comfyui_ok, gpu from worker_status where id = 'python:rtx5080-1'")
-    assert row["comfyui_ok"] is True and "RTX 5080" in row["gpu"]["name"]
+    # 설치된 모델 목록 (0008, 22.9): 예전 형식(체크포인트)과 COMBO 형식(LoRA) 모두 읽는다
+    models = {"checkpoints": ["model_a.safetensors"], "loras": ["gina_v3.safetensors"]}
+    assert info["models"] == models
+    row = env.seed.as_postgres().one("select comfyui_ok, gpu, models from worker_status where id = 'python:rtx5080-1'")
+    assert row["comfyui_ok"] is True and "RTX 5080" in row["gpu"]["name"] and row["models"] == models
 
+    # ComfyUI가 꺼지면 목록을 보내지 않고, DB는 이전 목록을 유지한다
     env.comfy.reachable = False
-    assert env.run(worker.status_info())["comfyui_ok"] is False
+    info = env.run(go())
+    assert info["comfyui_ok"] is False and "models" not in info
+    row = env.seed.as_postgres().one("select comfyui_ok, models from worker_status where id = 'python:rtx5080-1'")
+    assert row == {"comfyui_ok": False, "models": models}
 
 
 # -----------------------------------------------------------------------------

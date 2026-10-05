@@ -90,7 +90,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: 'claude-opus-5-5', max_tokens: $json.max_tokens || 8000, system: $json.system, messages: [ { role: 'user', content: $json.user } ], output_config: { effort: 'low', format: { type: 'json_schema', schema: $json.schema } }, fallbacks: 'default' }) }}",
+        "jsonBody": "={{ JSON.stringify({ model: 'claude-opus-5-5', max_tokens: $('LLM 모드 (fake | claude)').first().json.max_tokens || 8000, system: $('LLM 모드 (fake | claude)').first().json.system, messages: [ { role: 'user', content: $('LLM 모드 (fake | claude)').first().json.user } ], output_config: { effort: 'low', format: { type: 'json_schema', schema: $('LLM 모드 (fake | claude)').first().json.schema } }, fallbacks: 'default' }) }}",
         "options": {
           "timeout": 90000,
           "response": {
@@ -106,7 +106,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        720,
+        1200,
         -120
       ],
       "onError": "continueRegularOutput"
@@ -120,7 +120,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        960,
+        1440,
         -120
       ]
     },
@@ -139,8 +139,97 @@
     },
     {
       "parameters": {
-        "content": "## [PA] LLM - Structured Call (TECH 12.9, 14.7, 14.14)\nWF-002·WF-005가 부르는 하위 Workflow. LLM 공급자를 바꿀 때 이 Workflow만 고친다.\n\n**입력:** `schema_version`, `system`, `user`, `schema` (API용 스키마), `max_tokens`\n**출력:** `{ ok: true, data }` 또는 `{ ok: false, error_type, error_code, message, retryable, retry_after }`\n스키마 전체 검증(길이·형식)은 호출한 Workflow가 한다.\n\n**모드:** `LLM 모드` 노드의 `llm_mode`\n- `fake` (기본): 고정 JSON. M3 완료 조건 (16.8)\n- `claude`: Claude API (`claude-opus-5-5`, effort `low`, Structured Output). 거절되면 서버 쪽 fallback(`fallbacks: \"default\"`)이 다른 모델로 다시 시도한다\n\n**import 후:** `Claude API` 노드에 `PA Anthropic` (Header Auth, Name `x-api-key`) 연결\nLLM Timeout 90초: prompt·caption Job의 Heartbeat 제한(120초)보다 짧게 둔다",
-        "height": 460,
+        "method": "POST",
+        "url": "https://YOUR-PROJECT-REF.supabase.co/rest/v1/rpc/reserve_llm_call",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ p_job_id: $json.job_id, p_locked_at: $json.locked_at }) }}",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "pallm-reserve",
+      "name": "reserve_llm_call",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        -240
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 하루 LLM 호출 한도 (15.18, 마이그레이션 0008). 호출할 수 있을 때만 go = true.\nconst r = $input.first().json;\nconst deny = (o) => [{ json: { go: false, ok: false, ...o } }];\nif (typeof r.statusCode !== 'number') return deny({ error_type: 'transient', error_code: 'NETWORK_ERROR', message: 'reserve_llm_call failed: ' + String(r.error?.message || 'no response').slice(0, 300), retryable: true });\nif (r.statusCode === 401 || r.statusCode === 403) return deny({ error_type: 'authentication', error_code: 'INVALID_AUTH', message: `reserve_llm_call ${r.statusCode}: check the PA Supabase credential`, retryable: false });\nif (r.statusCode >= 400) return deny({ error_type: 'api', error_code: 'TEMPORARY_API_ERROR', message: `reserve_llm_call ${r.statusCode}: ${JSON.stringify(r.body).slice(0, 300)}`, retryable: true });\nconst b = r.body || {};\nif (b.allowed === true) return [{ json: { go: true } }];\nif (b.reason === 'rate_limited') {\n  const now = new Date();\n  const midnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);\n  return deny({ error_type: 'policy', error_code: 'RATE_LIMITED', message: `daily_llm_calls_limit (${b.limit}) reached`, retryable: true, retry_after: Math.ceil((midnight - now.getTime()) / 1000) + 60 });\n}\n// lock_lost: 회수·취소된 Job. 호출하지 않는다 (호출한 Workflow의 fail 보고는 잠금이 맞지 않아 무시된다)\nreturn deny({ error_type: 'transient', error_code: 'LOCK_LOST', message: 'job lock lost before the LLM call', retryable: true });"
+      },
+      "id": "pallm-reserve-check",
+      "name": "한도 확인",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        -240
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.go }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "pallm-if-go",
+      "name": "호출 가능?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        960,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 한도 초과·잠금 상실: 호출한 Workflow가 받는 { ok: false, … } 형식으로 돌려준다\nconst e = $input.first().json;\nreturn [{ json: { ok: false, error_type: e.error_type, error_code: e.error_code, message: e.message, retryable: e.retryable, retry_after: e.retry_after ?? null } }];"
+      },
+      "id": "pallm-denied",
+      "name": "호출 안 함",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## [PA] LLM - Structured Call (TECH 12.9, 14.7, 14.14)\nWF-002·WF-005가 부르는 하위 Workflow. LLM 공급자를 바꿀 때 이 Workflow만 고친다.\n\n**입력:** `schema_version`, `system`, `user`, `schema` (API용 스키마), `max_tokens`, `job_id`, `locked_at`\n**출력:** `{ ok: true, data }` 또는 `{ ok: false, error_type, error_code, message, retryable, retry_after }`\n스키마 전체 검증(길이·형식)은 호출한 Workflow가 한다.\n\n**모드:** `LLM 모드` 노드의 `llm_mode`\n- `fake` (기본): 고정 JSON. M3 완료 조건 (16.8)\n- `claude`: 먼저 `reserve_llm_call`로 하루 호출 한도(15.18)를 확인하고, 통과하면 Claude API (`claude-opus-5-5`, effort `low`, Structured Output). 한도 초과면 `RATE_LIMITED`(다음 UTC 자정에 재시도). 거절되면 서버 쪽 fallback(`fallbacks: \"default\"`)이 다른 모델로 다시 시도한다\n\n**import 후:** `YOUR-PROJECT-REF` 치환, `reserve_llm_call` 노드에 `PA Supabase`, `Claude API` 노드에 `PA Anthropic` (Header Auth, Name `x-api-key`) 연결\nLLM Timeout 90초: prompt·caption Job의 Heartbeat 제한(120초)보다 짧게 둔다",
+        "height": 500,
         "width": 680
       },
       "id": "pallm-note",
@@ -180,7 +269,7 @@
       "main": [
         [
           {
-            "node": "Claude API (Messages)",
+            "node": "reserve_llm_call",
             "type": "main",
             "index": 0
           }
@@ -199,6 +288,46 @@
         [
           {
             "node": "응답 해석",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "reserve_llm_call": {
+      "main": [
+        [
+          {
+            "node": "한도 확인",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "한도 확인": {
+      "main": [
+        [
+          {
+            "node": "호출 가능?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "호출 가능?": {
+      "main": [
+        [
+          {
+            "node": "Claude API (Messages)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "호출 안 함",
             "type": "main",
             "index": 0
           }

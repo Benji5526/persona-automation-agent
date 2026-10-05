@@ -4,7 +4,7 @@ Lovable에 붙여 넣는 프롬프트다. 설계 배경과 사용 방법은 [TEC
 
 **사용 순서**
 
-1. Lovable 프로젝트를 만들고, Lovable의 Supabase 통합으로 **기존** Supabase 프로젝트(마이그레이션 0001~0007 적용 완료)를 연결한다.
+1. Lovable 프로젝트를 만들고, Lovable의 Supabase 통합으로 **기존** Supabase 프로젝트(마이그레이션 0001~0008 적용 완료)를 연결한다.
 2. 아래 **§1 Master Prompt**를 Project Knowledge(또는 첫 메시지)에 넣는다. 이 단계에서는 코드를 만들지 말라고 한다.
 3. **§2 Phase 프롬프트**를 하나씩 보낸다. 각 Phase가 끝나면 체크리스트를 확인하고 GitHub에 동기화한 뒤 다음으로 넘어간다.
 4. Lovable이 SQL·마이그레이션 실행을 제안하면 **거절한다.** 스키마의 정본은 이 저장소의 `supabase/migrations`다.
@@ -180,7 +180,8 @@ comfy_workflows (id text, version, type, stage, enabled, params jsonb, inputs js
   — selectable workflows; params holds defaults and min/max/enum per parameter.
 
 worker_status (id text, kind 'python'|'n8n', comfyui_ok, gpu jsonb {name, vram_total_mb,
-  vram_free_mb}, current_job_id, queue_size, version, last_seen_at)
+  vram_free_mb}, current_job_id, queue_size, version, models jsonb {checkpoints: string[],
+  loras: string[]}, last_seen_at)
   — online if last_seen_at is within 90 seconds. comfyui_ok and gpu are meaningful only for
   kind 'python' (null / {} for n8n, and gpu is {} while ComfyUI is down).
 
@@ -286,8 +287,10 @@ and Success states.
   visual_settings = { default_workflow, base_model, lora_persona_asset_id, lora_strength 0..1,
     face_ref_persona_asset_id, default_params {width,height,steps,cfg}, style, appearance }.
   Visual Identity tab: Default Workflow select (comfy_workflows where enabled);
-  Base Model = text input for the checkpoint FILE NAME; LoRA = select from this persona's
-  persona_assets of type 'lora' plus "LoRA 이름 등록" (inserts a lora row by name, no upload);
+  Base Model = select from the python worker's worker_status.models.checkpoints (fall back to a
+  text input when the list is empty; warn if a saved name is not in the list);
+  LoRA = select from this persona's persona_assets of type 'lora' plus "LoRA 이름 등록"
+  (inserts a lora row by name, no upload; offer worker_status.models.loras as suggestions);
   LoRA strength slider; default params must respect the selected workflow's params
   (min, max, multiple_of, enum, and type int → integer steps);
   reference image upload (png/jpeg/webp, ≤50MB, uuid file name) into persona-private, shown
@@ -437,8 +440,9 @@ Implement Phase 2 only: Persona management.
   (status 'inactive', confirm dialog).
 - /personas/:id tabs 프로필 | 성격·말투 | Visual Identity | 콘텐츠 규칙 with the JSON shapes
   from the brief, validated by zod schemas in src/lib/schemas.ts.
-- Visual Identity: workflow select from comfy_workflows, base model file name input,
-  LoRA select + "LoRA 이름 등록" (persona_assets row by name, no upload), LoRA strength,
+- Visual Identity: workflow select from comfy_workflows, base model select from
+  worker_status.models.checkpoints (text input if empty), LoRA select + "LoRA 이름 등록"
+  (persona_assets row by name, no upload, suggestions from worker_status.models.loras), LoRA strength,
   default params bounded by the workflow's params, reference image upload to bucket
   'persona-private' at object path persona/{id}/refs/{uuid}.{ext} (no bucket prefix in the
   path) + persona_assets row with the same path, signed URL previews.

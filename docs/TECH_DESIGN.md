@@ -4655,7 +4655,7 @@ mTLS·서명 요청은 Long-term에 검토한다.
 | Worker | 성공 경로(실제 DB), OOM 재시도·축소, 시간 초과, 실행 오류, Heartbeat 잠금 상실, 취소, 종료, 출력 손상, 업로드 실패 | `tests/bridge/test_worker.py` |
 | 통합 (M5) | 실제 ComfyUI·Supabase로 `image_generation_v1` 1장 | 수동 + 16.13 장애 테스트 |
 
-DB는 `pgserver`로 실제 PostgreSQL에 마이그레이션 0001~0007을 적용하고, ComfyUI는 가짜 서버로 바꾼다. 원안의 장애 테스트 9개(ComfyUI Down, OOM, Invalid Workflow, Missing LoRA, Timeout, Storage Failure, Duplicate Job, Invalid Token, Corrupted Image)는 단위·API·Worker 테스트와 16.13 장애 테스트로 다룬다.
+DB는 `pgserver`로 실제 PostgreSQL에 마이그레이션 0001~0008을 적용하고, ComfyUI는 가짜 서버로 바꾼다. 원안의 장애 테스트 9개(ComfyUI Down, OOM, Invalid Workflow, Missing LoRA, Timeout, Storage Failure, Duplicate Job, Invalid Token, Corrupted Image)는 단위·API·Worker 테스트와 16.13 장애 테스트로 다룬다.
 
 ### 19.20 Python 실행 규칙과 Definition of Done
 
@@ -5074,7 +5074,7 @@ AI가 만든 Content Job도 Operator가 만든 것과 **같은 경로(WF-001 이
 | WF-006: `CLAIM` 기록으로 Job 찾기, `system_errors` 기록 | ✅ |
 | `execution_logs`에 n8n 실행 ID 기록, 노드별 Timeout, 비밀값은 Credential만 | ✅ |
 | 정적 검증 (JSON, 노드 참조, Code 노드 문법) + 코드 리뷰 반영 | ✅ |
-| `daily_llm_calls_limit`(15.18): LLM 호출 전 하루 호출 수 확인 | ❌ `claude` 모드로 바꾸기 전에 추가 (Worker RPC 필요) |
+| `daily_llm_calls_limit`(15.18): LLM 호출 전 하루 호출 수 확인 | ✅ 0008 `reserve_llm_call` + LLM 하위 Workflow (`claude` 모드에서만). 테스트 작성, 실행은 다른 PC에서 |
 | 원격 n8n 설치, Credential, import, DB Webhook 2개 연결 | ❌ M0 환경 준비 후 (n8n_guide) |
 | 가짜 LLM + 실제 브릿지로 `queued → ready` E2E (16.8 완료 조건) | ❌ 위 연결 후 |
 | 실패 경로: ComfyUI 꺼짐, 없는 모델, Content Job 취소 (16.13) | ❌ E2E와 함께 |
@@ -5106,7 +5106,7 @@ AI가 만든 Content Job도 Operator가 만든 것과 **같은 경로(WF-001 이
 
 ## 21. Supabase Implementation Specification ✅
 
-> 10번(DB)·11번(State Machine)·12.3~12.5(RPC)·15.3~15.5(권한·Storage)를 실제 SQL로 옮긴 결과를 정리한다. **정본은 `supabase/migrations/0001~0007`**이고, 이 장은 그 구조와 이유를 설명한다. 적용·테스트 방법은 [supabase/README.md](../supabase/README.md). ⚙️ 표시는 확정 설계와 마이그레이션에 맞춰 원안을 조정한 부분이다 (21.20).
+> 10번(DB)·11번(State Machine)·12.3~12.5(RPC)·15.3~15.5(권한·Storage)를 실제 SQL로 옮긴 결과를 정리한다. **정본은 `supabase/migrations/0001~0008`**이고, 이 장은 그 구조와 이유를 설명한다. 적용·테스트 방법은 [supabase/README.md](../supabase/README.md). ⚙️ 표시는 확정 설계와 마이그레이션에 맞춰 원안을 조정한 부분이다 (21.20).
 
 ### 21.1 목적과 원칙
 
@@ -5147,8 +5147,9 @@ Supabase
 | `0005_security.sql` | 권한 회수·부여, RLS, 가입 허용 목록, Storage 버킷·정책 |
 | `0006_cron.sql` | pg_cron 등록 (로컬 테스트에서는 건너뜀) |
 | `0007_workers_settings.sql` | `worker_status`, 설정 RPC, 오류 해결 RPC (18.19) |
+| `0008_llm_limit_models.sql` | LLM 하루 호출 한도 `reserve_llm_call`, `worker_status.models` (21.18) |
 
-원안은 테이블마다 파일을 나눠 17개로 둔다. 현재는 **관심사별 7개**다. 테이블·트리거·권한이 서로 참조해서, 테이블별로 나누면 파일 사이 순서 의존이 더 복잡해진다. 문제가 생긴 위치는 파일이 아니라 **테스트 이름**으로 찾는다 (`tests/db`, 21.19).
+원안은 테이블마다 파일을 나눠 17개로 둔다. 현재는 **관심사별 8개**다 (0008은 21.18). 테이블·트리거·권한이 서로 참조해서, 테이블별로 나누면 파일 사이 순서 의존이 더 복잡해진다. 문제가 생긴 위치는 파일이 아니라 **테스트 이름**으로 찾는다 (`tests/db`, 21.19).
 
 적용: `supabase db push` (supabase/README). 이미 적용한 마이그레이션은 고치지 않고 다음 번호 파일을 추가한다.
 
@@ -5186,7 +5187,7 @@ Supabase
 | `state_transitions` | 상태 변경 감사 기록 | 객체, 이전·다음 상태, `actor_type`, `reason` |
 | `comfy_workflows` | 로컬 Registry 사본 | `params`(범위), `inputs`, `enabled` |
 | `security_events` | 보안 이벤트 | 인증 실패, 한도 초과 등 (15.22) |
-| `worker_status` | 브릿지·GPU 상태 (0007) | `last_seen_at`, `comfyui_ok`, GPU 정보 |
+| `worker_status` | 브릿지·GPU 상태 (0007) | `last_seen_at`, `comfyui_ok`, GPU 정보, 설치된 모델 목록 `models` (0008) |
 
 원안과 다른 주요 칸 ⚙️:
 
@@ -5378,18 +5379,23 @@ Lovable → signInWithOAuth(google) → Google → Supabase Auth → auth.users 
 - `execution_logs`의 입력·출력·오류는 DB 함수가 한 번 더 비밀값을 가린다 (`private.redact_jsonb`, 15.21).
 - 백업은 15.23을 따른다.
 
-### 21.18 추가 예정: 0008
+### 21.18 0008: LLM 호출 한도와 모델 목록
 
 | 항목 | 내용 | 근거 |
 |---|---|---|
-| LLM 호출 한도 RPC | `reserve_llm_call(p_job_id uuid, p_locked_at timestamptz) returns boolean`. 오늘 호출 수가 `limits.daily_llm_calls_limit` 이상이면 `RATE_LIMITED`(`PT429`), 아니면 카운터 +1. 하루 단위 카운터 테이블(`usage_counters (day, key, count)`)에 저장 | 15.18. n8n LLM 하위 Workflow가 Claude API 호출 전에 부른다 (20.20 미완료 항목) |
-| `posts (platform, external_post_id)` Unique | V1 게시 마이그레이션과 함께 | 21.8 |
+| `private.usage_counters (day, key, count)` | 하루 단위 사용량 카운터. `private` 스키마라 API로 노출되지 않는다 | 15.18 |
+| `reserve_llm_call(p_job_id, p_locked_at) returns jsonb` | 잠금이 맞는 `prompt`·`caption` Job만 호출 하나를 예약한다. 한 문장(`insert … on conflict do update … where count < limit`)으로 늘려 동시에 불려도 한도를 넘지 않는다. 결과: `{allowed: true, count, limit}` / `{allowed: false, reason: "rate_limited", limit}` (+ `security_events`의 `RATE_LIMITED`) / `{allowed: false, reason: "lock_lost"}`. 하루 기준은 UTC (`daily_generation_limit`과 같음). `service_role`만 실행 | 15.18, 20.20 |
+| `worker_status.models` | 브릿지가 ComfyUI `object_info`에서 읽은 `{checkpoints: [...], loras: [...]}`. `report_worker_status`가 `p_info.models`를 저장하고, 값이 없으면(ComfyUI가 잠시 꺼짐) 이전 목록을 유지한다 | 22.9 |
 
-0008은 `claude` 모드를 켜기 전에 만든다. 기존 마이그레이션은 고치지 않는다.
+한도에 걸려도 예외를 내지 않고 `allowed: false`를 돌려준다. 예외를 내면 같은 트랜잭션의 `security_events` 기록도 롤백되기 때문이다. n8n은 이 결과를 `RATE_LIMITED`(다음 UTC 자정에 재시도)로 바꿔 `fail_automation_job`에 넘긴다 (20.11). 한도 초과로 미뤄진 시도도 `attempts`를 하나 쓴다 (`daily_generation_limit`과 같음). 그래서 이미 시도를 다 쓴 Job이 한도에 걸리면 재시도 없이 `failed`가 되고, Operator가 다시 실행한다. 한도에 자주 걸리면 한도를 올리거나 `max_attempts`를 늘린다.
+
+`worker_status`는 로그인한 Operator 모두가 읽는다 (0007). 그래서 `models`의 LoRA 파일 이름(Persona 이름이 들어갈 수 있음)도 모든 Operator에게 보인다. 1인 운영(PRD)이라 허용하고, Operator를 여러 명 두게 되면 목록을 RPC로 옮긴다.
+
+이후 예정: `posts (platform, external_post_id)` Unique는 V1 게시 마이그레이션과 함께 (21.8).
 
 ### 21.19 테스트와 Definition of Done
 
-`tests/db`는 Docker 없이 `pgserver`(내장 PostgreSQL)에 Supabase 흉내 스키마(`supabase/tests/stubs`)와 0001~0005·0007을 적용해 확인한다. 0006(pg_cron)은 문법만 확인한다.
+`tests/db`는 Docker 없이 `pgserver`(내장 PostgreSQL)에 Supabase 흉내 스키마(`supabase/tests/stubs`)와 0006을 뺀 모든 마이그레이션을 적용해 확인한다. 0006(pg_cron)은 문법만 확인한다.
 
 | 확인 내용 | 테스트 (일부) |
 |---|---|
@@ -5408,14 +5414,14 @@ Lovable → signInWithOAuth(google) → Google → Supabase Auth → auth.users 
 | 0001~0007 작성, 로컬 테스트 통과 (M1) | ✅ |
 | 실제 Supabase 프로젝트 생성·`db push`·Google 로그인·허용 목록·admin 지정 | ❌ M0 |
 | Security Advisor 경고 없음 확인 | ❌ M0 |
-| 0008 (LLM 호출 한도) | ❌ `claude` 모드 전 |
+| 0008 (LLM 호출 한도, 모델 목록) 작성 + `tests/db/test_llm_limit_models.py` | ✅ 작성 · ❌ 테스트 실행 (다른 PC에서 `pytest`) |
 | V1·V2 마이그레이션 | 해당 단계 |
 
 ### 21.20 원안에서 조정한 부분과 이유
 
 | 위치 | 원안 | 조정 | 이유 |
 |---|---|---|---|
-| 마이그레이션 | 테이블별 17개 파일 | 관심사별 0001~0007 | 이미 구현·테스트됨. 테이블·트리거·권한이 서로 참조 |
+| 마이그레이션 | 테이블별 17개 파일 | 관심사별 0001~0008 | 이미 구현·테스트됨. 테이블·트리거·권한이 서로 참조 |
 | 확장 | `uuid-ossp` | 쓰지 않음 (`gen_random_uuid()`), pg_cron 추가 | PostgreSQL 기본 기능 |
 | 기록 테이블 PK | uuid | `bigint identity` | 외부 노출 없음, 행이 많음 |
 | `updated_at` 함수 | `public.update_updated_at()` | `private.set_updated_at()` | API로 노출하지 않음 |
@@ -5582,15 +5588,15 @@ Header 배지는 원안의 4단계(HEALTHY·DEGRADED·ERROR·OFFLINE) 대신 3�
 | 항목 | 입력 방법 | 저장 |
 |---|---|---|
 | Default Workflow | 드롭다운 (`comfy_workflows`, `enabled = true`) | `visual_settings.default_workflow` |
-| Base Model | **파일 이름 입력** (예: `model_a.safetensors`) | `visual_settings.base_model` |
-| LoRA | `persona_assets` 중 `asset_type = 'lora'` 선택. 새 LoRA는 **파일 이름만 등록** | `visual_settings.lora_persona_asset_id` |
+| Base Model | `worker_status.models.checkpoints` 드롭다운. 목록이 비었으면(브릿지가 아직 보고하지 않음) 파일 이름 입력 | `visual_settings.base_model` |
+| LoRA | `persona_assets` 중 `asset_type = 'lora'` 선택. 새 LoRA는 **파일 이름만 등록** (`worker_status.models.loras`에서 고르거나 입력) | `visual_settings.lora_persona_asset_id` |
 | LoRA 강도 | 슬라이더 0~1 | `visual_settings.lora_strength` |
 | 기본 Parameter | 해상도·steps·cfg (선택한 Workflow의 `params` 범위 안) | `visual_settings.default_params` |
 | Face·Style·Character Reference | 이미지 업로드 | `persona-private/persona/{id}/refs/{uuid}.{ext}` + `persona_assets` |
 | 스타일·외모 설명 | 텍스트 | `visual_settings.style`, `visual_settings.appearance` (LLM 프롬프트용, 20.8) |
 
 - **모델·LoRA 파일은 업로드하지 않는다** ⚙️. 수 GB짜리 파일이고, ComfyUI가 있는 로컬 PC의 `models/` 폴더에 직접 둔다. Lovable에는 이름만 적고, 브릿지가 생성할 때 ComfyUI에 그 파일이 있는지 확인한다 (없으면 `MODEL_NOT_FOUND`·`LORA_NOT_FOUND`, 13.10).
-- 설치된 모델 목록을 드롭다운으로 보여주려면 브릿지가 목록을 DB에 올려야 하는데, 지금은 그 경로가 없다. MVP는 이름 입력 + **[테스트 이미지 생성]**으로 확인하고 (17.8), 모델 목록 동기화는 이후 과제로 둔다 (22.23).
+- 설치된 모델 목록은 브릿지가 30초마다 `worker_status.models`에 올린다 (0008, 21.18). ComfyUI 목록은 5분 캐시라 새로 넣은 파일은 최대 5분 뒤에 보인다 (브릿지를 다시 시작하면 바로). 목록에 없는 이름을 저장해도 막지는 않지만 경고를 보여주고, 실제 확인은 **[테스트 이미지 생성]**으로 한다 (17.8). Persona 설정과 목록은 브릿지가 생성할 때 다시 확인한다 (13.10).
 - 업로드는 이미지(PNG·JPEG·WEBP, 50MB 이하)만. 업로드 전에 형식·크기를 확인하고, 파일 이름은 UUID로 바꾼다.
 
 ### 22.10 Content Jobs
@@ -5827,7 +5833,6 @@ Phase 4까지는 n8n·브릿지 없이 만들 수 있다. SQL Editor에서 상�
 - **보안:** 22.21 전부
 - **최종 테스트:** 화면에서 Content Job 하나를 만들면 ComfyUI를 직접 만지지 않아도 Asset Library에 결과가 나타난다 (16.14)
 
-**이후 과제** (MVP 필수 아님): 설치된 모델·LoRA 목록 동기화 (브릿지가 `object_info`의 목록을 DB에 올리고 Visual Identity 드롭다운에 사용, 22.9).
 
 ### 22.24 원안에서 조정한 부분과 이유
 
@@ -5844,7 +5849,7 @@ Phase 4까지는 n8n·브릿지 없이 만들 수 있다. SQL Editor에서 상�
 | Persona 탭 | Appearance 별도, Memory·Performance 포함 | Visual Identity에 합침, Memory V2·성과 V1 | 17.8 |
 | 성격 항목 | Flirty 포함 | 제외 | 15.11 콘텐츠 리스크 |
 | Persona 보관 | Archive | `status = inactive` | DB CHECK |
-| 모델·LoRA | 업로드, 드롭다운 | 이름 입력·등록, 파일은 로컬 ComfyUI | 파일 크기, 실행 위치. 목록 동기화는 이후 과제 |
+| 모델·LoRA | 업로드, 드롭다운 | 파일은 로컬 ComfyUI, 드롭다운은 브릿지가 보고한 목록(`worker_status.models`) | 파일 크기, 실행 위치 |
 | Content Job 상태 | 대문자 11개 | DB 소문자 7개, 승인·게시는 Post | 21.6 |
 | 만들기 | `status = PENDING` INSERT, 예약 시각, AI 프롬프트 개선 | `create_content_job` RPC, 예약은 V1, AI 미리보기 없음 | 11.12, 17.25 |
 | 재시도 | [Retry] 하나 | 처음부터 / 실패한 단계만 | 18.11 |
@@ -5888,7 +5893,7 @@ Phase는 22.22 빌드 순서를 따른다. Phase 1~3은 n8n·브릿지 없이 �
 
 ### 23.3 사용 절차
 
-1. Lovable 프로젝트를 만들고 Supabase 통합으로 **기존 프로젝트**(마이그레이션 0001~0007 적용, supabase/README)를 연결한다.
+1. Lovable 프로젝트를 만들고 Supabase 통합으로 **기존 프로젝트**(마이그레이션 0001~0008 적용, supabase/README)를 연결한다.
 2. §1을 Project Knowledge에 넣는다.
 3. §2 Phase를 하나씩 보낸다. Phase가 끝날 때마다 확인 항목을 직접 해 보고, GitHub로 동기화한 코드에서 금지 문자열(`sb_secret`, `service_role`, `localhost:8188`, `/v1/jobs`, `webhook`)을 검색한다.
 4. Lovable이 SQL이나 마이그레이션을 제안하면 거절한다. 정말 스키마가 필요하면 이 저장소에 마이그레이션을 추가하고(21.3), `supabase gen types typescript`로 타입을 다시 만든 뒤 프롬프트의 §1 데이터 모델을 고친다.
@@ -5934,7 +5939,7 @@ Phase는 22.22 빌드 순서를 따른다. Phase 1~3은 n8n·브릿지 없이 �
 
 ## 24. Supabase Production Implementation ✅
 
-> 마이그레이션 0001~0007을 **실제 Supabase 프로젝트에 올리고 운영 가능한 상태인지 확인하는 절차**다. 스키마·RLS·RPC·Storage 설계는 21번이 정본이고 이미 SQL로 구현·테스트되어 있으므로, 이 장은 새 SQL을 만들지 않는다. 적용 후 점검은 `supabase/verify_production.sql`(읽기 전용)로 한다. ⚙️ 표시는 원안을 조정한 부분이다 (24.8).
+> 마이그레이션 0001~0008을 **실제 Supabase 프로젝트에 올리고 운영 가능한 상태인지 확인하는 절차**다. 스키마·RLS·RPC·Storage 설계는 21번이 정본이고 이미 SQL로 구현·테스트되어 있으므로, 이 장은 새 SQL을 만들지 않는다. 적용 후 점검은 `supabase/verify_production.sql`(읽기 전용)로 한다. ⚙️ 표시는 원안을 조정한 부분이다 (24.8).
 
 ### 24.1 목적
 
@@ -5968,7 +5973,7 @@ Phase는 22.22 빌드 순서를 따른다. Phase 1~3은 n8n·브릿지 없이 �
 | # | 작업 | 위치 | 확인 |
 |---|---|---|---|
 | 1 | 프로젝트 생성. Region은 **Seoul (ap-northeast-2)**. DB 비밀번호는 비밀번호 관리자에 보관 | Dashboard | – |
-| 2 | `supabase link --project-ref <ref>` → `supabase db push` | 이 저장소에서 CLI | 0001~0007 적용 (점검 1) |
+| 2 | `supabase link --project-ref <ref>` → `supabase db push` | 이 저장소에서 CLI | 0001~0008 적용 (점검 1) |
 | 3 | pg_cron 확인. `db push`에서 0006이 실패하면 Dashboard → Database → Extensions에서 `pg_cron`을 켜고 다시 push | Dashboard | 점검 13 |
 | 4 | **Google만** 켜고 Email·Phone·Anonymous 끄기 | Authentication → Sign In / Providers | – |
 | 5 | Google Cloud Console에서 OAuth Client(웹) 생성. 승인된 리디렉션 URI = `https://<ref>.supabase.co/auth/v1/callback`. Client ID·Secret을 4번 화면에 입력 | Google Cloud, Dashboard | – |
@@ -5990,7 +5995,7 @@ Supabase CLI 명령은 `supabase/README.md`에 있다. 1~12는 Lovable·n8n·브
 
 | # | 확인 | 기대 | 다르면 |
 |---|---|---|---|
-| 1 | 마이그레이션 버전 | 0001~0007 | `supabase db push` 다시 실행, 오류 메시지 확인 |
+| 1 | 마이그레이션 버전 | 0001~0008 | `supabase db push` 다시 실행, 오류 메시지 확인 |
 | 2 | RLS가 꺼진 테이블 | 0행 | Dashboard에서 테이블을 직접 만든 흔적. 지우고 마이그레이션으로 |
 | 3·4 | anon의 테이블·함수 권한 | 0행 | 0005 이후 Dashboard에서 권한을 바꾼 것. 0005의 회수 블록을 새 마이그레이션으로 다시 적용 |
 | 5 | authenticated가 실행할 수 있는 함수 | Operator RPC 11개만 | Worker RPC가 보이면 **즉시** 회수 마이그레이션 (Lovable이 상태를 마음대로 바꿀 수 있음) |

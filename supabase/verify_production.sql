@@ -5,7 +5,7 @@
 -- =============================================================================
 
 -- 1. 마이그레이션 적용 버전
---    기대: 0001 ~ 0007 일곱 줄 (파일 이름 앞부분이 version)
+--    기대: 0001 ~ 0008 여덟 줄 (파일 이름 앞부분이 version)
 select version
   from supabase_migrations.schema_migrations
  order by version;
@@ -54,7 +54,8 @@ select
   has_function_privilege('service_role',
     'public.fail_automation_job(uuid, timestamptz, text, text, text, boolean, integer, text)', 'execute')    as fail,
   has_function_privilege('service_role', 'public.register_asset(uuid, timestamptz, jsonb)', 'execute')       as register_asset,
-  has_function_privilege('service_role', 'public.report_worker_status(text, text, jsonb)', 'execute')        as report_worker_status;
+  has_function_privilege('service_role', 'public.report_worker_status(text, text, jsonb)', 'execute')        as report_worker_status,
+  has_function_privilege('service_role', 'public.reserve_llm_call(uuid, timestamptz)', 'execute')            as reserve_llm_call;
 
 -- 7. status 칸에 authenticated의 쓰기 권한이 있는지
 --    기대: 0행 (personas.status만 예외로 허용되어 있으므로 personas 한 줄은 정상)
@@ -128,8 +129,10 @@ select id, status_code, error_msg, created
  limit 10;
 
 -- 17. Worker 상태 (브릿지·n8n 연결 후)
---     기대: python:rtx5080-1과 n8n, last_seen_at이 90초 이내
+--     기대: python:rtx5080-1과 n8n, last_seen_at이 90초 이내. python 행의 models에 설치된 체크포인트·LoRA 수
 select id, kind, comfyui_ok, gpu ->> 'name' as gpu, queue_size, last_seen_at,
+       jsonb_array_length(coalesce(models -> 'checkpoints', '[]')) as checkpoints,
+       jsonb_array_length(coalesce(models -> 'loras', '[]')) as loras,
        last_seen_at > now() - interval '90 seconds' as online
   from public.worker_status
  order by id;
