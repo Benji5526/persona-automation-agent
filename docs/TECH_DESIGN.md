@@ -658,6 +658,8 @@ Asset이 SNS에 게시되는 단위다. 하나의 Asset을 여러 플랫폼에 �
 | collected_at | timestamptz | 수집 시간 |
 
 > ⚙️ 수집 시점은 **1·6·24·48·168시간**이다 (14.15, 28.11). PRD 3.6에서 확정한 24시간·7일(168시간)이 최소 기준이고, 나머지는 추이 분석용이다. `(post_id, snapshot_hours)`는 Unique (21.16).
+>
+> ⚙️ V1 마이그레이션에서 `engagement_rate_basis`, `profile_visits`, `quality_flags`, `automation_job_id`를 더한다. `engagement_rate`는 `record_metrics`가 계산하고, 수집 실패는 0이 아니라 행 없음이다 (29.3·29.4).
 
 ### 10.12 conversations (V2)
 
@@ -1632,7 +1634,7 @@ n8n이 받는 Webhook이다. 경로는 `/webhook/pa/…`로 통일한다.
 | `validate_account` | V1 | – | `account_id`, `username`, `account_type` (토큰으로 계정 확인, 28.2) |
 | `publish` | V1 | `post_id`, `media: [{ "url", "type" }]`, `caption`, `hashtags` | `external_post_id`, `permalink`, `published_at` |
 | `get_post` | V1 | `external_post_id` | `status`, `permalink`, `published_at` |
-| `get_metrics` | V1 | `external_post_id`, `snapshot_hours` | 정규화 지표: `views`, `likes`, `comments`, `shares`, `saves`, `reach`, `engagement_rate`, `followers_delta`, `raw` |
+| `get_metrics` | V1 | `external_post_id`, `snapshot_hours` | 정규화 지표: `views`, `likes`, `comments`, `shares`, `saves`, `reach`, `followers_delta`, `profile_visits`, `raw`. 주지 않는 값은 `null`. `engagement_rate`는 DB가 계산한다 (29.4) |
 | `get_messages` | V2 | `since` | `messages: [{ "external_message_id", "external_user_id", "username", "content", "created_at" }]` |
 | `reply` | V2 | `external_message_id` 또는 `external_post_id`, `content` | `external_reply_id` |
 
@@ -1719,20 +1721,7 @@ LLM 응답은 모델의 Structured Output 기능으로 받고, n8n이 아래 JSO
 
 **performance_insight v1 (V2, WF-011)**
 
-```json
-{
-  "schema_version": "performance_insight.v1",
-  "insights": [
-    {
-      "insight_type": "CONTENT_PERFORMANCE | POSTING_TIME | TOPIC | FORMAT",
-      "finding": "string (≤ 300자)",
-      "evidence": { "sample_size": 20, "metric": "engagement_rate", "delta_pct": 42.0 },
-      "confidence": 0.84,
-      "recommended_action": "string"
-    }
-  ]
-}
-```
+29.15가 정본이다 (`summary`, `insights`, `recommendations`). 문장에는 숫자를 쓰지 않고, 근거는 Analytics Context(29.14)의 `ref`로 가리킨다. 화면의 수치는 AI 출력이 아니라 Context에서 가져온다.
 
 ### 12.10 버전 관리
 
@@ -2489,7 +2478,7 @@ Schedule (10분)
 
 ```text
 WF-011: Schedule → 성과 집계 → LLM → Structured Insight
-        { "insight_type": "CONTENT_PERFORMANCE", "finding": "…", "confidence": 0.84, "recommended_action": "CREATE_MORE_TRAVEL_CONTENT" }
+        performance_insight.v1: summary + insights + recommendations (예: CREATE_MORE, target_ref = topic:travel). 형식은 29.15
 WF-012: Insight + Persona + Goals + Content History → AI Decision (9.8 스키마 검증) → ai_decisions 기록
         → Content Job 생성 (source = 'agent', ai_decision_id, status = queued) → WF-001
 ```
@@ -3284,8 +3273,8 @@ Lovable에는 secret key·service_role key를 절대 넣지 않는다. 브릿지
 |---|---|---|
 | **M6 SNS Account** | Meta 앱 등록·심사, Instagram 비즈니스 계정 OAuth 연결 화면, 토큰 Vault 저장, `get_social_account_token`, 토큰 만료 전 갱신 | 10.9, 12.5 |
 | **M7 Approval & Publishing** | V1 Operator RPC 7개, Approval 화면, WF-007·WF-008, `[PA] SNS - Instagram - Publish` 서브 워크플로우(checkpoint로 중복 게시 방지), 긴급 게시 정지, AI 생성 표기·광고 표기, 일일 게시 한도 | 11.8, 12.4, 12.8, 14.15, 15.11 |
-| **M8 Performance & Notification** | WF-009 (1h·6h·24h·48h·7d), `[PA] SNS - Instagram - Metrics`, WF-010 알림, `expire_approvals` cron, Video Generation·Upscale Workflow | 14.15, 13.4 |
-| **M9 AI Analysis & Decision** | `performance_insight.v1`, `ai_decision.v1`, WF-011·WF-012, `ai_decisions` 테이블, Agent 권한 수준, Agent 실행 예산 | 12.9, 14.16, 15.18, 15.19 |
+| **M8 Performance & Notification** | WF-009 (1h·6h·24h·48h·7d), `[PA] SNS - Instagram - Metrics`, WF-010 알림, `expire_approvals` cron, Video Generation·Upscale Workflow, Analytics 집계·`/analytics` (29) | 14.15, 13.4, 29 |
+| **M9 AI Analysis & Decision** | `performance_insight.v1`, `ai_decision.v1`, WF-011·WF-012, `ai_decisions` 테이블, Agent 권한 수준, Agent 실행 예산, `performance_analyses` | 12.9, 29, 14.16, 15.18, 15.19 |
 | **M10 Fan Interaction & Memory** | conversations·messages·fan_memories, WF-013·WF-014, 프롬프트 인젝션 대응, 개인정보 보관 기한·삭제 요청 | 15.12, 15.20 |
 | **M11 이후** | Autonomous Operation Loop, Risk 기반 자동 승인(Low → 자동, Medium → 승인, High → 차단), Experimentation, Multi-Persona, Self-Optimization (시스템 변경은 항상 Operator 승인) | PRD 8 |
 
@@ -3821,7 +3810,7 @@ GPU 메모리가 부족해서 생성하지 못했어요.
 | Posts | 상태별 탭: 초안 · 승인 대기 · 예약됨 · 게시됨 · 실패 |
 | Post Detail | Asset, Caption, Hashtag, 광고 표기, 플랫폼, 예약 시각, 외부 게시물 링크, 성과 |
 | Approvals | 승인 대기 Post 카드. 이미지, Persona, Caption, **승인을 요청한 이유**(V1은 "모든 게시물 사전 승인"), `[승인]` `[반려]` `[캡션 수정]` |
-| Analytics | 조회수, 좋아요, 댓글, 공유, 저장, 참여율, 팔로워 증가 그래프. 주제·게시 시간·플랫폼별 비교 막대 |
+| Analytics | 조회수, 좋아요, 댓글, 공유, 저장, 참여율, 팔로워 증가 그래프. 주제·게시 시간·플랫폼별 비교 막대. 상세는 29.18 |
 
 ### 17.16 V2 화면
 
@@ -5365,7 +5354,8 @@ Lovable → signInWithOAuth(google) → Google → Supabase Auth → auth.users 
 
 | 테이블 | 단계 | 원안과 다른 점 ⚙️ |
 |---|---|---|
-| `performance_metrics` | V1 | `snapshot_hours`(1·6·24·48·168) 칸과 `(post_id, snapshot_hours)` Unique. 원안은 metadata에 둠 (10.11) |
+| `performance_metrics` | V1 | `snapshot_hours`(1·6·24·48·168) 칸과 `(post_id, snapshot_hours)` Unique. 원안은 metadata에 둠 (10.11). 품질 표시·참여율 basis 칸 추가 (29.3) |
+| `performance_analyses` | V2 | AI 성과 분석 결과. Context(실제 데이터)와 result(AI 추론)를 나눠 저장 (29.16) |
 | `approvals` | V1 | Post 단위 승인, `expires_at`, `expire_approvals()` pg_cron 5분 (11.10) |
 | SNS 토큰 | V1 | **처음부터 Vault**에 저장하고 테이블에는 secret id만 (이미 0001에 칸이 있음). 원안처럼 MVP에 평문 저장 후 나중에 암호화하지 않는다 |
 | `conversations`, `messages` | V2 | 팬 메시지는 신뢰할 수 없는 입력으로 표시 (15.20) |
@@ -6818,7 +6808,7 @@ Instagram 피드 이미지는 **JPEG만**, 비율 **4:5 ~ 1.91:1**, 너비 320~1
 | Posts | 표: Thumbnail, Persona, 플랫폼, 캡션 앞부분, 상태, 예약 시각, 게시 시각, 참여율 |
 | Post Detail | 미리보기(게시용 JPEG), 계정, 캡션·해시태그 편집(`draft`·`rejected`일 때), 상태, 예약·게시 시각, permalink, 성과 Snapshot 그래프, 실행 기록 |
 | Approvals | 승인 대기 목록, Asset·캡션 미리보기, [승인] [반려(사유)] |
-| Analytics | Persona별·기간별 성과, 시점별 추이 |
+| Analytics | Persona별·기간별 성과, 시점별 추이. 상세는 29.18 |
 | 공통 | Header의 **긴급 정지** 스위치(admin, `publishing_enabled`), Realtime에 `posts`·`approvals` 추가 |
 
 ### 28.13 자율 게시 권한
@@ -6860,3 +6850,479 @@ Instagram 피드 이미지는 **JPEG만**, 비율 **4:5 ~ 1.91:1**, 너비 320~1
 | 자동 게시 | V1 Level 1~2, 명시적 활성화 시 자동 Publish | V1은 AI 게시 없음, V2 이후 | 15.19, 11.8 |
 | 경로 | `/social/accounts` | `/social` 안의 탭 | 18.3 |
 
+---
+
+## 29. Analytics & Performance Intelligence System (V1·V2) ✅
+
+> 게시 결과를 **수집 → 저장 → 분석 → 시각화 → AI 의사결정 입력**으로 잇는 데이터 파이프라인 설계다. 수집·정규화·기준선·대시보드는 V1(M8), AI 분석·추천은 V2(M9)다. 이미 정한 것(10.11, 12.8 `get_metrics`, 12.9 `performance_insight.v1`, 14.15·14.16, 28.11)을 모으고, 원안에서 계산 방법이 열려 있던 부분(점수 정규화, 기준선, 이상치, 분석 차원의 출처, 표본 기준, AI 수치 검증)을 정한다. **아직 구현되지 않았다.** ⚙️ 표시는 원안을 조정한 부분이다 (29.20).
+
+### 29.1 목적과 원칙
+
+Analytics는 좋아요·조회수를 보여주는 화면이 아니라 다음 질문에 답하는 계층이고, 마지막 답이 AI Decision Engine의 입력이 된다.
+
+```text
+무엇을 만들었나 → 어디에 게시했나 → 어떤 성과가 나왔나 → 왜 좋았나/나빴나 → 다음엔 무엇을 만들까
+
+SNS → performance_metrics (수집) → 분석 SQL·RPC (계산) → Lovable /analytics (사람)
+                                                   → Analytics Context → WF-011 AI 분석 → WF-012 AI Decision → Content Job
+```
+
+원안의 원칙 10개를 그대로 따른다. 구현에서 지키는 방법:
+
+| 원칙 | 구현 |
+|---|---|
+| Raw Data 보존 | `raw_metrics`에 플랫폼 응답 원본. Snapshot 행은 수정하지 않는다 (insert만) |
+| Snapshot 누적 | `(post_id, snapshot_hours)`마다 1행 (10.11) |
+| 플랫폼 차이 추상화 | Adapter가 공통 칸으로 매핑 (12.8) |
+| Content·Persona와 연결 | Post → Asset → Content Job → Persona로 모든 속성을 잇는다 (29.9) |
+| 계산 결과와 원본 구분 | 저장하는 계산 값은 `engagement_rate` 하나. 나머지 비율·성장·점수는 조회할 때 SQL로 계산 (29.5) |
+| AI 추론과 실제 데이터 구분 | AI 출력 문장에 숫자를 쓰지 못하게 하고, 화면 수치는 저장된 Context에서 가져온다 (29.15) |
+| 잘못된 Metric으로 자동 결정 금지 | 수집 실패 = 행 없음, 품질 표시(`quality_flags`), 표본 기준 (29.4, 29.12) |
+
+### 29.2 단계
+
+| 단계 | 범위 | Milestone |
+|---|---|---|
+| V1 | 수집(WF-009), 정규화, 품질 표시, 성장, 기준선, 점수, 이상치, 차원 분석 RPC, `/analytics`, Post 성과 상세 | M8 |
+| V2 | Analytics Context RPC, WF-011 AI 분석(`performance_insight.v1`), 추천 카드와 근거, WF-012 연결 | M9 |
+
+### 29.3 performance_metrics 확장 ⚙️
+
+10.11의 칸에 아래를 더한다. 테이블이 아직 없으므로(21.16) V1 마이그레이션에서 처음부터 포함한다.
+
+| Column | Type | Description |
+|---|---|---|
+| engagement_rate_basis | text, CHECK (`reach`, `views`) | `engagement_rate`의 분모 (29.5) |
+| profile_visits | bigint | 이 게시물에서 생긴 프로필 방문 |
+| quality_flags | text[], 기본 `{}` | `late`, `decreased`, `partial` (29.4) |
+| automation_job_id | uuid FK → automation_jobs | 수집한 `analytics` Job (추적용) |
+
+원안이 "추가로 고려"한 지표:
+
+| 지표 | 결정 | 이유 |
+|---|---|---|
+| `profile_visits` | 칸 추가 | Instagram media insight가 주고, "프로필 유입" 판단에 쓴다 |
+| `impressions` | 칸 없음, `raw_metrics`에만 | Instagram은 2025년에 media `impressions`를 `views`로 대체했다 (구현 시 최신 문서 확인). 다른 플랫폼을 붙일 때 다시 판단 |
+| `watch_time`, `average_watch_time`, `completion_rate` | 영상 게시를 시작할 때 칸 추가 | V1은 이미지만 게시한다 (28.9). 항상 NULL인 칸을 미리 두지 않는다 |
+| `link_clicks` | `raw_metrics`에만 | 피드 게시물에는 링크가 없다 |
+
+`followers_delta`는 **이 게시물로 생긴 팔로우 수**(Instagram media insight `follows`)다. 계정 전체의 팔로워 증감이 아니다. 화면에서도 "게시물로 얻은 팔로워"라고 쓴다. 계정 단위 팔로워 추이가 필요해지면 일별 계정 Snapshot을 따로 추가한다.
+
+### 29.4 수집과 데이터 품질
+
+**흐름**은 28.11 그대로다. 원안의 "Cron → 게시된 Post 찾기 → 수집 시점 판단" 대신, 게시가 끝날 때 `complete_publish`가 `analytics` Job 5개를 `run_after`로 미리 만들고(28.8) WF-009는 10분마다 기한이 지난 Job만 선점한다 ⚙️. 수집 시점을 매번 계산하지 않아도 되고, 누락·실패가 Job 상태로 그대로 보인다. 멱등 키는 `analytics:{post_id}:{snapshot_hours}`(원안 `metrics:{post_id}:{snapshot_type}`)이고 테이블의 `(post_id, snapshot_hours)` Unique가 한 번 더 막는다.
+
+**Snapshot 종류:** `snapshot_hours` = 1, 6, 24, 48, 168. 시점 목록은 `app_settings.analytics.snapshot_hours`에 두고, 30D(720)는 목록에 값을 넣기만 하면 된다. 원안의 `INITIAL`은 두지 않는다 ⚙️: 게시 직후에는 값이 거의 0이고 플랫폼 insight가 아직 없을 때가 많다. 성장 곡선의 0시점은 0으로 본다.
+
+**`record_metrics`가 하는 일** (계산을 DB 한 곳에서 한다)
+
+1. 입력 검증: 지표 칸은 NULL 또는 0 이상의 정수. 위반하면 `VALIDATION_FAILED` (원안 `INVALID_METRIC_RESPONSE`·`NORMALIZATION_FAILED`).
+2. `engagement_rate`·`engagement_rate_basis` 계산 (29.5). Adapter는 계산하지 않는다 ⚙️ (12.8 `get_metrics` 출력에서 뺀다).
+3. `quality_flags` 표시:
+   - `late`: `|collected_at − (published_at + snapshot_hours)|`가 max(15분, `snapshot_hours`의 10%)를 넘음 (n8n 중단 등). 저장하되 시점 비교(기준선·차원)에서 뺀다.
+   - `decreased`: `views` 또는 `likes`가 직전 Snapshot보다 5% 넘게 줄었음 (플랫폼 재집계·스팸 제거). 저장·표시하고 AI Context에서 뺀다.
+   - `partial`: `views`·`likes`·`comments` 중 하나라도 NULL.
+4. 행 insert + Job `done`. 같은 시점 행이 이미 있으면 새로 쓰지 않고 Job만 `done` (멱등).
+
+**0과 Unknown은 다르다**
+
+| 상황 | 저장 | 화면 |
+|---|---|---|
+| 수집 성공, 값이 0 | `0` | 0 |
+| 플랫폼이 그 지표를 주지 않음 | `NULL` | – (미제공) |
+| 수집 실패, 재시도 대기 | 행 없음, Job `pending` | 수집 중 |
+| 수집 최종 실패 | 행 없음, Job `failed` + `system_errors` | 수집 실패 [다시 수집] (`retry_automation_job`) |
+| 게시물이 플랫폼에서 삭제됨 | 행 없음, 남은 `analytics` Job `cancelled` | 플랫폼에서 삭제됨 |
+
+원안의 `collection status = FAILED`는 상태 칸 대신 위 표로 표현한다 ⚙️. 어떤 경우에도 실패를 0으로 저장하지 않는다. 시점마다 Job이 따로라서 24h 수집 실패가 48h 수집을 막지 않는다.
+
+**오류** (원안 29.35 → 12.8 정규화 코드. 재시도는 DB `fail_automation_job`이 결정하고, 모든 실패는 `system_errors`에 남는다)
+
+| 원안 | 현재 | 재시도 |
+|---|---|---|
+| `METRICS_FETCH_FAILED` | `NETWORK_ERROR`, `TIMEOUT`, `TEMPORARY_API_ERROR` | ✅ |
+| `PLATFORM_RATE_LIMIT` | `RATE_LIMIT` (`retry_after_seconds`) | ✅ |
+| `PLATFORM_UNAVAILABLE` | `TEMPORARY_API_ERROR` | ✅ |
+| `TOKEN_EXPIRED` | `TOKEN_EXPIRED`, `INVALID_AUTH` → 계정 `inactive` (28.6). 재연결 뒤 [다시 수집] | ❌ |
+| `INVALID_POST` | `INPUT_NOT_FOUND` → 그 Post의 남은 `analytics` Job 취소 | ❌ |
+| `INVALID_METRIC_RESPONSE`, `NORMALIZATION_FAILED` | `VALIDATION_FAILED` (Adapter 수정 필요) | ❌ |
+| `ANALYSIS_FAILED` | `LLM_OUTPUT_INVALID` (29.15 검증 포함) | 1회 |
+
+### 29.5 Raw와 정규화 지표
+
+| 구분 | 내용 | 위치 |
+|---|---|---|
+| Raw | 플랫폼 응답 원본 | `raw_metrics` |
+| 공통 지표 | `views`, `likes`, `comments`, `shares`, `saves`, `reach`, `followers_delta`, `profile_visits` | 칸 (Adapter 매핑) |
+| 저장하는 계산 값 | `engagement_rate`, `engagement_rate_basis` | 칸 (`record_metrics`) |
+| 조회 시 계산 | `like_rate`, `comment_rate`, `share_rate`, `save_rate`, 성장, 점수, 이상치 | 분석 SQL 함수 (29.13) |
+
+**Engagement Rate**
+
+```text
+interactions    = likes + comments + shares + saves     (NULL인 항목은 빼고 더한다)
+engagement_rate = interactions / reach × 100            reach > 0             → basis = reach
+                = interactions / views × 100            reach 없음, views > 0 → basis = views
+                = NULL                                  둘 다 없음
+```
+
+참여율은 **같은 basis끼리만** 비교한다. 기준선이 Persona×플랫폼 단위라(29.6) 보통 같다. `like_rate` 등 항목별 비율의 분모도 같은 basis다.
+
+**성장** (원안 29.9): 연속된 두 Snapshot `p → s`에 대해
+
+```text
+delta    = v(s) − v(p)
+rate     = delta / v(p)                 (v(p)가 0 또는 NULL이면 NULL)
+per_hour = delta / (s − p 시간)          (성장 속도, 성장 곡선용)
+```
+
+`views`, `likes`, `comments`, `shares`, `saves`, `followers_delta`에 계산한다. 0시점은 0으로 보므로 1h의 `rate`는 NULL이다.
+
+### 29.6 기준선 (Baseline) ⚙️
+
+| 항목 | 결정 |
+|---|---|
+| 단위 | **Persona × 플랫폼.** 다른 플랫폼 숫자는 섞지 않는다 |
+| 시점 맞춤 | 게시물의 h시간 Snapshot은 다른 게시물의 **같은 h시간** Snapshot과 비교한다. 168h가 아직 없는 새 게시물도 "24시간 기준 +40%"로 공정하게 비교된다 |
+| 범위 | 그 시점 Snapshot이 있고 `late`·`decreased`가 아닌 최근 게시물 20개 (게시 시각 순, 대상 게시물 자신은 뺀다). 10·50개는 설정값 `analytics.baseline_window` |
+| 통계량 | **중앙값** (원안: 평균). 바이럴 하나가 평균을 끌어올려 나머지가 전부 "기준 이하"가 되는 것을 막는다. 화면에도 "최근 20개 중앙값"이라고 쓴다 |
+| 최소 표본 | 5개. 모자라면 기준선 "아직 없음"이고 점수·이상치를 계산하지 않는다 |
+| 지표 | `views`, `reach`, `engagement_rate`, `shares`, `saves`, `followers_delta` |
+
+### 29.7 Content Performance Score ⚙️
+
+원안의 `normalized_*`를 **기준선 대비 비율**로 정한다.
+
+```text
+ratio_m = 게시물 값 / 기준선 중앙값                 (같은 snapshot_hours, 같은 Persona×플랫폼)
+sub_m   = clamp(50 + 25 × log2(ratio_m), 0, 100)   (게시물 값이 0이면 0)
+score   = Σ w_m × sub_m / Σ w_m                    (값이 있는 지표만)
+```
+
+| 지표 m | views | engagement_rate | shares | saves | followers_delta |
+|---|---|---|---|---|---|
+| 가중치 w | 0.35 | 0.25 | 0.15 | 0.15 | 0.10 |
+
+- **50 = 평소 수준**, 75 = 2배, 100 = 4배 이상, 25 = 절반. 점수 자체가 기준선 대비라 "87점"의 의미가 Persona·시기와 상관없이 같다.
+- 게시물 값이 NULL이거나 기준선 중앙값이 0·NULL인 지표(작은 계정의 `followers_delta`가 흔하다)는 빼고 남은 가중치로 다시 나눈다.
+- 가중치는 `app_settings.analytics.score_weights`에 고정한다. 학습 기반 가중치는 이후.
+- 기준 시점: 168h가 있으면 168h, 없으면 가장 늦은 Snapshot. 화면에 "24시간 기준 · 임시"처럼 표시한다.
+- 점수만 보여주지 않는다 (원안 29.12): `87 / 100 · 조회수 기준선 대비 +124% · 최근 20개 중앙값 18.4K`.
+
+### 29.8 이상치 (Outlier)
+
+| 표시 | 조건 (`views` ratio, 29.7) |
+|---|---|
+| 🔥 High Performer | ≥ 2.0 |
+| ⚠️ Underperformer | ≤ 0.5 |
+
+- 기준선이 있고, 기준 시점이 24h 이상이고, 품질 표시가 없을 때만 판정한다. 1h·6h는 초기 노출 편차가 커서 판정하지 않는다.
+- 경계값은 `analytics.outlier_ratio`. 원안 예(5.5배, 0.075배)는 둘 다 걸린다.
+- Underperformer도 원본 데이터를 그대로 두고 숨기지 않는다 (AI 실패 원인 분석용, 원안 29.25).
+
+### 29.9 분석 차원과 데이터 출처 ⚙️
+
+원안의 차원이 실제로 어디서 오는지 정한다. 자유 텍스트는 그룹으로 묶을 수 없으므로 **정해진 값만 차원이 된다.**
+
+| 차원 | 출처 | 상태 |
+|---|---|---|
+| Content Type | `content_jobs.content_type` | 있음 |
+| Topic | **`content_jobs.topic_category`** (새 칸, `^[a-z0-9_]+$`). Persona의 `content_rules.topic_categories` 목록에서 고른다. 기존 `topic`(자유 텍스트 500자)은 그대로 프롬프트용 | V1 마이그레이션 |
+| Visual Style | **`content_jobs.visual_style`** (새 칸, 같은 형식). Persona의 `visual_settings.styles` 목록에서 고른다 | V1 마이그레이션 |
+| Workflow | `content_jobs.workflow` | 있음 |
+| LoRA, Model | `assets.generation_metadata.lora`, `.model` (브릿지가 이미 기록) | 있음 |
+| Platform | `posts.platform` | 있음 |
+| Persona | `posts.persona_id` | 있음. Persona끼리 비교는 팔로워 규모가 달라 참고만 |
+| Posting Time | `posts.published_at` → 시간대 구간 | 계산 |
+| Day of Week | `posts.published_at` → 요일 | 계산 |
+| Caption | `posts.caption`, `hashtags`, `is_sponsored` → 특징 (29.10) | 계산 |
+
+- 두 새 칸은 nullable이다. 비어 있으면 "미분류"로 묶고 AI Context에서 뺀다. Create Content에 선택 칸을 두고, AI가 만든 Job(V2)이 목록 밖 값을 쓰면 `AI_DECISION_INVALID`다.
+- 시간대는 `app_settings.analytics.timezone`(기본 `Asia/Seoul`) 기준이다. 구간: 새벽 00–06, 아침 06–10, 점심 10–14, 오후 14–18, 저녁 18–22, 밤 22–24.
+
+### 29.10 캡션 특징
+
+SQL로만 계산한다 (LLM 분류 없음).
+
+| 특징 | 값 |
+|---|---|
+| 길이 | 짧음 (< 80자) / 보통 (80–300) / 김 (> 300) |
+| 이모지 | 있음 / 없음 (Unicode 이모지 범위 정규식) |
+| 질문형 CTA | 캡션에 `?` 또는 `？` 포함 |
+| 해시태그 수 | 0 / 1–5 / 6–15 / 16–30 |
+| 광고 표기 | `is_sponsored` |
+
+원안의 Tone·CTA 종류는 V1에서 분석하지 않는다 ⚙️. 믿을 만한 라벨이 없고(28.7에서 `caption_generation`의 `tone`을 뺐다), Operator가 승인 전에 캡션을 고치기 때문이다. 필요해지면 `caption_generation.v2`에 `cta_type`을 넣고 Operator가 고칠 수 있게 한다.
+
+### 29.11 차원별 성과
+
+그룹마다 `group`, `sample_size`, `views` 중앙값, `engagement_rate` 중앙값, `delta_pct`(그룹 중앙값 ÷ Persona 기준선 − 1, %), 표본 수준(29.12)을 낸다.
+
+- 기준 시점은 **24h Snapshot**이다 (`analytics.reference_snapshot_hours`). 모든 게시물이 하루 뒤 같은 조건으로 갖는 값이고, PRD 3.6의 최소 기준이다.
+- 대상은 기간 안 게시물 중 기준 시점 Snapshot이 있고 품질 표시가 없는 것이다.
+- 원안 예의 "Avg Views"는 중앙값으로 계산하고 화면에도 "중앙값"이라고 쓴다.
+
+### 29.12 표본 크기와 신뢰 수준
+
+| sample_size | 표본 수준 | 화면 | AI Context | 자동 결정 근거 (V2) |
+|---|---|---|---|---|
+| 1–4 | 부족 | 회색, "표본 부족" | 제외 | 불가 |
+| 5–9 | 낮음 | Low | 포함 | 불가 |
+| 10–19 | 보통 | Medium | 포함 | 가능 |
+| 20 이상 | 높음 | High | 포함 | 가능 |
+
+- 원안의 `sample_size >= 5`는 분석 참고 기준으로 쓰고, 자동 결정 근거는 **10개 이상 + |`delta_pct`| ≥ 20%**로 정한다 ⚙️. 통계적 유의성이 아니라 운영 규칙이다.
+- AI Confidence(0~1, 확률 아님)는 High ≥ 0.8, Medium 0.5~0.8, Low < 0.5로 표시한다. 화면은 **AI Confidence와 근거의 표본 수준 중 낮은 쪽**을 보여준다 ⚙️. 표본 4개에 AI가 0.95를 줘도 "표본 부족"이다.
+
+### 29.13 RPC와 캐싱
+
+원안 29.36대로 SQL/RPC에서 시작한다. 계산은 `private` 스키마의 SQL 함수 한 벌에 두고 화면 RPC와 AI Context RPC가 같은 함수를 쓴다. 그래서 **화면의 숫자와 AI가 받은 숫자가 같다.**
+
+| RPC | 호출자 | 반환 |
+|---|---|---|
+| `get_analytics_overview(p_persona_id, p_platform, p_days)` | Operator | KPI 카드, 데이터 기준 시각 |
+| `get_post_performance(p_post_id)` | Operator | Snapshot 목록·성장·비율·기준선 비교·점수·이상치·속성 |
+| `get_performance_leaderboard(p_persona_id, p_platform, p_days, p_order, p_limit)` | Operator | 상위·하위 게시물 |
+| `get_dimension_performance(p_persona_id, p_platform, p_dimension, p_days)` | Operator | 29.11 그룹 |
+| `get_analytics_context(p_persona_id, p_platform, p_days)` | service_role (WF-011, V2) | 29.14 Context |
+
+- Operator RPC는 `get_dashboard_summary`와 같은 형태다 (`security definer`, `require_owned_persona`).
+- 요약 테이블·Materialized View는 아직 만들지 않는다. 대시보드 RPC가 1초를 넘거나 게시물이 수천 개가 되면 pg_cron으로 갱신하는 요약 테이블을 붙인다. 원안 29.37의 5개 후보는 그때 고른다.
+- 인덱스: `performance_metrics (post_id, snapshot_hours)` Unique가 조회에도 쓰인다. `posts (persona_id, platform, published_at desc) where status = 'published'`를 추가한다.
+
+**KPI 카드** (원안 29.22. 변화는 직전 같은 길이 기간과 비교)
+
+| 카드 | 값 | 변화 |
+|---|---|---|
+| 게시 수 | 기간 안 `published` Post 수 | 개수 차이 (+8) |
+| 총 조회수 | 각 게시물 최신 Snapshot `views` 합 | **24h Snapshot 합끼리** 비교 ⚙️ (최신 값끼리는 오래된 게시물이 더 쌓여 불공정) |
+| 참여율 | 24h `engagement_rate` 중앙값 | %p 차이 |
+| 게시물로 얻은 팔로워 | 최신 Snapshot `followers_delta` 합 | 24h 합끼리 비교 |
+
+데이터 기준 시각은 `max(collected_at)`이고 화면에 "10분 전 업데이트"로 보여준다 (원안 29.33).
+
+### 29.14 Analytics Context (V2)
+
+원안 29.26과 29.31을 하나로 합친다. `get_analytics_context`가 만들고, **LLM에는 이것만 넘긴다** (DB 원본은 넘기지 않는다).
+
+```json
+{
+  "schema_version": "analytics_context.v1",
+  "persona": { "id": "uuid", "name": "…" },
+  "platform": "instagram",
+  "period": { "start": "…", "end": "…", "days": 30 },
+  "data_as_of": "…",
+  "reference_snapshot_hours": 24,
+  "baseline": { "window": 20, "sample_size": 20, "median_views": 18400, "median_engagement_rate": 4.8, "median_shares": 72 },
+  "posts_count": 42,
+  "top_performing":  [ { "ref": "post:…", "topic_category": "fashion", "visual_style": "lifestyle", "views": 41200, "views_ratio": 2.24, "score": 79 } ],
+  "underperforming": [ { "ref": "post:…", "topic_category": "coffee", "views": 3200, "views_ratio": 0.17, "score": 12 } ],
+  "dimensions": {
+    "topic":        [ { "ref": "topic:fashion", "sample_size": 18, "median_views": 31000, "median_engagement_rate": 5.7, "delta_pct": 68.5, "sample_level": "medium" } ],
+    "visual_style": [], "posting_time": [], "day_of_week": [], "caption": [], "content_type": [], "workflow": []
+  },
+  "excluded": { "low_sample_groups": 3, "flagged_snapshots": 2, "unclassified_posts": 5 }
+}
+```
+
+- `ref`는 AI가 근거를 가리키는 키다 (29.15). 형식: `post:{id}`, `topic:{slug}`, `style:{slug}`, `time:{구간}`, `dow:{요일}`, `caption:{특징}:{값}`, `type:{content_type}`, `workflow:{name}`.
+- 표본 부족 그룹과 품질 표시 Snapshot은 빼고, 몇 개를 뺐는지만 `excluded`로 알린다.
+- 원안의 `top_topics`·`best_posting_window` 같은 결론 요약은 넣지 않는다 ⚙️. 결론은 AI가 `dimensions`에서 내리고, 사람이 화면에서 같은 근거로 검증한다.
+- `data_as_of`가 `analytics.stale_hours`(48)보다 오래됐거나 기준선이 없으면 WF-011은 LLM을 부르지 않고 `skipped`(사유: 데이터 오래됨·부족)로 기록한다.
+
+### 29.15 AI 분석 출력과 숫자 검증 (V2) ⚙️
+
+12.9의 `performance_insight.v1`을 다음으로 바꾼다. 아직 구현 전이라 버전 번호는 올리지 않는다.
+
+```json
+{
+  "schema_version": "performance_insight.v1",
+  "summary": "string (≤ 300자, 숫자 없음)",
+  "insights": [
+    {
+      "insight_type": "TOPIC | VISUAL_STYLE | CAPTION | POSTING_TIME | DAY_OF_WEEK | CONTENT_TYPE | WORKFLOW | OUTLIER",
+      "finding": "string (≤ 300자, 숫자 없음)",
+      "direction": "above | below",
+      "evidence_refs": ["topic:fashion"],
+      "confidence": 0.0
+    }
+  ],
+  "recommendations": [
+    {
+      "type": "CREATE_MORE | CREATE_LESS | CHANGE_TOPIC | CHANGE_VISUAL_STYLE | CHANGE_CAPTION_STYLE | CHANGE_POSTING_TIME | CHANGE_FREQUENCY | REPEAT_SUCCESSFUL_PATTERN | RUN_EXPERIMENT | NO_CHANGE",
+      "target_ref": "topic:fashion",
+      "reason": "string (≤ 200자, 숫자 없음)",
+      "evidence_refs": ["topic:fashion", "time:evening"],
+      "priority": 0.0,
+      "confidence": 0.0
+    }
+  ]
+}
+```
+
+**"AI는 수치를 만들지 않는다"(원안 29.28)의 구현.** n8n 검증기가 스키마 검증 뒤에 확인한다.
+
+1. 문장 칸(`summary`, `finding`, `reason`)에 숫자를 쓸 수 없다 (`[0-9０-９]` 금지). "18:00–21:00" 같은 시간대도 `time:evening`처럼 ref로 가리킨다.
+2. 모든 insight와 recommendation(`NO_CHANGE` 제외)은 `evidence_refs`가 1개 이상이고, 각 ref가 Context에 있어야 한다.
+3. `direction`이 근거의 `delta_pct` 부호와 맞아야 한다.
+4. 화면의 수치(표본 수, 중앙값, 기준선, +68%)는 **저장된 Context에서** ref로 찾아 붙인다. AI 출력에서 오지 않는다.
+
+위반하면 위반 내용을 알려주고 `LLM_OUTPUT_INVALID`로 1회 재시도하고, 다시 실패하면 분석 `failed` + `system_errors`다 (원안 `ANALYSIS_FAILED`).
+
+**추천 종류와 다음 단계** (원안 29.32)
+
+| 추천 | WF-012에서 |
+|---|---|
+| `CREATE_MORE`, `REPEAT_SUCCESSFUL_PATTERN` | `create_content` / `vary_content` 후보 |
+| `RUN_EXPERIMENT` | `create_content` 후보, `content_jobs.metadata.experiment = true` (분석 때 따로 표시) |
+| `CHANGE_POSTING_TIME`, `CHANGE_FREQUENCY` | `change_schedule` 후보 |
+| `CREATE_LESS`, `CHANGE_TOPIC`, `CHANGE_VISUAL_STYLE`, `CHANGE_CAPTION_STYLE` | 실행 Action 없음. Operator에게 조언으로만 보여준다 (Persona 설정 변경은 AI 권한 밖, 15.19) |
+| `NO_CHANGE` | 없음 |
+
+### 29.16 분석 결과 저장: performance_analyses (V2) ⚙️
+
+원안 29.37의 `ai_analysis_results`에 해당하는 테이블 **하나만** 추가한다. 나머지 요약 테이블은 만들지 않는다.
+
+| Column | Type | Description |
+|---|---|---|
+| id | uuid PK | ID |
+| persona_id | uuid FK → personas | Persona |
+| platform | text | 플랫폼 |
+| period_start, period_end | timestamptz | 분석 기간 |
+| context | jsonb | 29.14 Context 원본 (실제 데이터) |
+| result | jsonb | 검증을 통과한 29.15 출력 (AI 추론) |
+| status | text | `done` / `skipped` / `failed` |
+| reason | text | `skipped`·`failed` 사유 |
+| model | text | 사용한 LLM |
+| created_at | timestamptz | 생성 |
+
+- 실제 데이터(`context`)와 AI 추론(`result`)을 한 행 안에 나눠 둔다 (원칙 9). 나중에 같은 근거로 다시 검증할 수 있다.
+- WF-011은 매일 1회, Persona×플랫폼마다, 지난 분석 뒤 새 24h Snapshot이 3개 이상일 때만 LLM을 부른다 (`daily_llm_calls_limit` 대상, 15.18).
+- `ai_decisions.input_context`에는 `performance_analysis_id`와 쓴 ref만 넣는다.
+
+### 29.17 Analytics → AI Decision → Content Job
+
+원안 29.42와 같고, 이미 정한 경로(9.8, 11.11, 14.16)를 따른다. 추천은 실행 명령이 아니다.
+
+```text
+performance_analyses.result.recommendations
+ → WF-012: Persona·목표·최근 Content Job + 추천 → LLM → ai_decision.v1
+ → 검증: 허용 action (15.19), params 범위, topic_category·visual_style이 Persona 목록 안,
+         근거 ref가 표본 수준 보통 이상이고 |delta_pct| ≥ 20% (29.12)
+ → ai_decisions 기록
+ → 권한 수준 2 이상: Content Job (source = 'agent', ai_decision_id) / 0~1: 화면에 제안만 (15.19)
+ → WF-001부터 Operator가 만든 Job과 같은 경로
+```
+
+`ai_decision.v1`의 `create_content`·`vary_content` `params`에 `topic_category`, `visual_style`을 허용 키로 넣는다.
+
+### 29.18 Lovable 화면
+
+**`/analytics`** (원안 29.39 순서)
+
+| 영역 | 내용 | 단계 |
+|---|---|---|
+| 필터 | Persona, 플랫폼, 기간(7·30·90일), "10분 전 업데이트" | V1 |
+| 1. 전체 성과 | KPI 카드 4개 (29.13) | V1 |
+| 2. 잘 되는 것 | `delta_pct` ≥ +20%, 표본 낮음 이상인 그룹 상위 3개. 예: 🔥 fashion +68% · 18개 · Medium | V1 |
+| 3. 주의 필요 | `delta_pct` ≤ −20% 그룹 3개. 예: ⚠ fitness −54% · 7개 · Low | V1 |
+| 4. 왜 | V1: 2·3의 항목을 누르면 그 그룹의 게시물 목록·중앙값·기준선. V2: AI insight 문장 + 근거 수치 | V1·V2 |
+| 5. AI 추천 | 추천 카드 (29.19). V1에는 영역을 만들지 않는다 | V2 |
+| 리더보드 | 상위 5개: Thumbnail, Topic, 플랫폼, 조회수, 참여율, 점수 | V1 |
+| 저조 콘텐츠 | ⚠ Underperformer: 기대(기준선 중앙값) vs 실제 | V1 |
+| 차원 탭 | 주제·스타일·시간대·요일·캡션·Workflow 막대. 막대마다 표본 수, 표본 부족은 회색 | V1 |
+
+- 표본 부족 그룹은 "잘 되는 것·주의 필요"에 올리지 않는다.
+- Realtime: `performance_metrics` insert를 구독해 화면 RPC를 다시 부른다 (5초 디바운스). 집계 결과 자체를 Realtime으로 받지 않는다 (원안 29.38). 실행 중 Job·게시 상태는 이미 Realtime이다.
+- 빈 화면: 게시물이 5개 미만이면 "기준선을 만들려면 게시물 5개가 필요합니다 (현재 n개)".
+
+**Post 성과 상세** (`/posts/:id`의 성과 영역 ⚙️, 원안 29.40)
+
+1. 성장 곡선: x축 = 게시 후 시점(0·1h·6h·24h·48h·7d), 실선 = 이 게시물 `views`, 점선 = 시점별 기준선 중앙값. 수집 실패 시점은 빈 점 + "수집 실패".
+2. 지표 표: 시점 × (`views`, `likes`, `comments`, `shares`, `saves`, `reach`, 참여율과 basis), 증가량·증가율. NULL은 "– (미제공)".
+3. 기준선 비교: 지표별 비율·%·점수, 이상치 표시.
+4. 콘텐츠 속성: 주제 분류, 스타일, Workflow, LoRA, 시간대, 요일, 캡션 특징.
+5. AI 분석 (V2): 이 게시물 ref가 근거로 들어간 insight.
+6. 원본: `raw_metrics` 펼쳐 보기 (admin).
+
+### 29.19 AI 추천 투명성 (V2)
+
+추천 카드는 근거를 Context에서 가져와 보여준다 (원안 29.41).
+
+```text
+AI 추천: fashion 콘텐츠를 더 만들기
+왜?
+  분석한 fashion 게시물 18개 · 24시간 조회수 중앙값 31K
+  Persona 기준선 (최근 20개 중앙값) 18.4K → +68%
+신뢰도: Medium (AI 0.86 · 표본 보통)
+데이터: 10분 전 기준 · 최근 30일
+[이 주제로 만들기]  [무시]
+```
+
+[이 주제로 만들기]는 Create Content를 `topic_category`를 채운 상태로 연다 (권한 수준 1의 실행 방식).
+
+### 29.20 작업 목록, 테스트, 원안 조정
+
+**작업**
+
+| 영역 | V1 (M8) | V2 (M9) |
+|---|---|---|
+| DB | `performance_metrics`(29.3 칸 포함), `record_metrics`의 계산·품질 표시, `content_jobs.topic_category`·`visual_style`, `app_settings.analytics`, 분석 SQL 함수, Operator RPC 4개, `posts` 인덱스, Realtime에 `performance_metrics` | `performance_analyses`, `get_analytics_context` |
+| n8n | WF-009, `[PA] SNS - Instagram - Metrics` (12.8 출력에서 `engagement_rate`를 빼고 `profile_visits` 추가) | WF-011 (29.15 검증기), WF-012 연결 |
+| Lovable | `/analytics`, Post 성과 상세, Create Content의 주제 분류·스타일 선택, Persona 설정의 목록 편집 | AI 추천 카드·근거 |
+
+`app_settings.analytics` 기본값 (`complete_publish`가 `snapshot_hours`로 `analytics` Job을 만든다):
+
+```json
+{
+  "snapshot_hours": [1, 6, 24, 48, 168],
+  "reference_snapshot_hours": 24,
+  "baseline_window": 20,
+  "min_baseline_sample": 5,
+  "score_weights": { "views": 0.35, "engagement_rate": 0.25, "shares": 0.15, "saves": 0.15, "followers_delta": 0.10 },
+  "outlier_ratio": { "high": 2.0, "low": 0.5 },
+  "attention_delta_pct": 20,
+  "stale_hours": 48,
+  "timezone": "Asia/Seoul"
+}
+```
+
+**테스트**
+
+| 영역 | 확인 |
+|---|---|
+| `record_metrics` | basis: reach 있음·없음·둘 다 없음 / NULL 항목을 뺀 합 / `late`·`decreased`·`partial` 표시 / 같은 시점 두 번 → 1행, Job `done` / 음수·문자열 → `VALIDATION_FAILED` |
+| 0과 Unknown | 수집 최종 실패 → 행 없음 (0이 저장되지 않음) / 삭제된 게시물 → 남은 Job `cancelled` / 24h 실패 뒤 48h는 정상 수집 |
+| 기준선 | 표본 4개 → 없음 / 자기 자신 제외 / 중앙값 / 다른 플랫폼·다른 시점이 섞이지 않음 / `late` 제외 |
+| 점수 | ratio 1 → 50, 2 → 75, 0.5 → 25, 0 → 0 / NULL 지표를 빼고 가중치 재분배 |
+| 이상치·차원 | 경계 2.0·0.5 / 6h는 판정 안 함 / 미분류 그룹 / 표본 수준 경계 4·5·9·10·19·20 |
+| 권한 | 다른 Operator의 Persona로 RPC 호출 → 거부 / `get_analytics_context`는 service_role만 |
+| V2 검증기 | 문장에 숫자 → 거부 / Context에 없는 ref → 거부 / `direction` 부호 불일치 → 거부 / 표본 낮음 근거로 자동 결정 → 거부 / 오래된 데이터 → `skipped` |
+| E2E (원안 29.43) | 28.15 E2E에 이어서: 24h Snapshot → `/analytics` 반영 (기준선은 시드 게시물 5개) → (V2) WF-011 → 추천 카드의 수치가 SQL 결과와 같음 → WF-012 → `ai_decisions` → Content Job 후보. 27장 형식으로 기록한다 |
+
+**원안 조정**
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 수집 방식 | Cron이 게시물·수집 시점을 판단 | 게시 완료 때 `analytics` Job 5개 예약, WF-009는 기한 지난 Job만 | 28.8. 누락·실패가 Job으로 보임 |
+| Snapshot 종류 | `INITIAL` 포함 6개 | `snapshot_hours` 1·6·24·48·168, `INITIAL` 없음 (0시점 = 0) | 게시 직후 값은 의미가 없음 |
+| Idempotency | `metrics:{post_id}:{snapshot_type}` | `analytics:{post_id}:{snapshot_hours}` + 테이블 Unique | 14.17 |
+| 추가 지표 | 6개 고려 | `profile_visits`만 칸, 영상 지표는 영상 게시 때, `impressions`·`link_clicks`는 raw | 플랫폼 제공 여부 |
+| 수집 실패 | collection status `FAILED` | 행 없음 + Job `failed` + `system_errors` | 상태 칸 없이 0과 Unknown 구분 |
+| 데이터 품질 | 실패만 구분 | `quality_flags` (`late`, `decreased`, `partial`) | 원칙 10 |
+| `engagement_rate` 계산 위치 | Adapter 출력 (12.8) | DB `record_metrics` | 계산 기준을 한 곳에 |
+| 그 밖의 비율·성장 | Normalized Metrics | 저장하지 않고 조회 때 계산 | 원칙 8. 공식을 바꿔도 다시 쓸 필요 없음 |
+| 기준선 | 최근 20개 평균 | 최근 20개 **중앙값**, 같은 시점끼리, Persona×플랫폼, 5개 미만이면 없음 | 바이럴 하나의 영향, 공정한 비교 |
+| 점수 | `normalized_*` (정의 없음) | 기준선 대비 log2 비율 → 0~100, 50 = 평소 | 점수 의미가 일정 |
+| 이상치 | 예시만 | 2배 / 0.5배, 24h 이상만 | 설정값으로 확정 |
+| Topic·Visual Style 출처 | 정하지 않음 | `content_jobs.topic_category`·`visual_style` (Persona 목록) | 자유 텍스트는 묶을 수 없음 |
+| 캡션 Tone·CTA | 분석 | 길이·이모지·질문·해시태그·광고만. Tone은 이후 | 믿을 만한 라벨이 없음 |
+| 표본 기준 | 5 이상, 자동 결정은 더 높게 | 5 참고, 자동 결정은 10 이상 + 20% 이상 차이 | 수치 확정 |
+| Confidence 표시 | AI 값 | AI 값과 표본 수준 중 낮은 쪽 | 작은 표본의 과신 방지 |
+| AI 수치 금지 | 원칙만 | 문장 숫자 금지 + `evidence_refs` + 수치는 Context에서 | 검증 가능하게 |
+| AI Context | `top_topics` 등 결론 요약 포함 | 차원별 그룹 + ref, 결론 요약 없음 | 결론은 AI가, 근거는 사람이 검증 |
+| AI 분석 출력 | `summary`·`insights`·`recommendations` | 12.9 `performance_insight.v1`을 이 형태로 개정 | 아직 구현 전 |
+| 분석 결과 저장 | 요약 테이블 5개 후보 | `performance_analyses` 1개 (V2) | 테이블 최소화 (원안 29.37) |
+| 팔로워 | Follower Growth | 게시물로 얻은 팔로워 (계정 전체는 이후) | 실제 데이터 출처 |
+| KPI 변화율 | 정하지 않음 | 24h 값끼리 비교 | 게시물 나이 차이 |
+| Post 성과 상세 경로 | 별도 화면 | `/posts/:id`의 성과 영역 | 18.3 |
