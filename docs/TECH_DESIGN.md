@@ -1871,7 +1871,7 @@ workflows/
 | `params` | 허용 Parameter와 기본값·범위. 여기 없는 키는 거부한다 |
 | `models` | 실행 전에 존재를 확인할 모델 칸. 칸마다 선택지를 조회할 ComfyUI 노드(`node`)와 입력 이름(`input`) (13.10) |
 | `inputs` | 필요한 입력 이미지 자리와 출처 (13.6) |
-| `output` | 기대하는 결과 종류와 MIME |
+| `output` | 기대하는 결과 종류와 MIME, 크기 범위(`min_bytes`, `max_bytes`. `max_bytes`는 `media` 버킷 한도 이하, 47.3) |
 | `oom_fallback` | GPU 메모리 부족 시 해상도를 낮춰 재시도해도 되는지 (13.12) |
 
 ### 13.4 Workflow 단계별 도입
@@ -2057,7 +2057,8 @@ ComfyUI가 성공을 반환해도 Job 성공으로 취급하지 않는다 (9.14)
 | 검증 항목 | 기준 |
 |---|---|
 | 파일 존재 | `/view` 다운로드 성공 |
-| 크기 | 최소 크기 이상 (이미지 10KB) |
+| 출력 파일 ⚙️ | `subfolder`가 `pa`이고 이름이 `{job_id}_숫자 5자리_.확장자`인 것만 받는다. 아니면 `OUTPUT_UNEXPECTED` (47.3) |
+| 크기 | 최소 크기 이상 (이미지 10KB), `output.max_bytes` 이하 (넘으면 `OUTPUT_TOO_LARGE`, 47.3) |
 | MIME | Registry `output.mime`과 일치 |
 | 열 수 있는지 | Pillow로 열고 `verify()` 통과 (영상은 V1에서 ffprobe) |
 | 해상도 | 요청한 width·height와 일치 (OOM 축소 시 축소값과 일치) |
@@ -2080,6 +2081,8 @@ ComfyUI 관련 오류는 상세 코드(`error_code`) ⚙️로 구분하고, 6.9
 | `COMFY_UNREACHABLE` | transient | ✅ | ComfyUI 연결 불가. 백오프 후 재시도 |
 | `FILE_ERROR` | transient | ✅ | 다운로드·업로드 실패 |
 | `OUTPUT_INVALID` | generation | ✅ | 실행 후 검증 실패. 1회 재시도 |
+| `OUTPUT_TOO_LARGE` ⚙️ | validation | ❌ | 출력이 Registry `output.max_bytes`(기본 50MB, `media` 버킷 한도)를 넘음. 재시도해도 같은 결과 (47.3) |
+| `OUTPUT_UNEXPECTED` ⚙️ | validation | ❌ | ComfyUI가 돌려준 출력 파일 이름·폴더가 이 Job의 것이 아님. `security_events`에도 기록 (47.3) |
 | `UNKNOWN` | unknown | ✅ | 재시도 후 `failed`, Operator 알림 |
 | `INTERRUPTED` | transient | ✅ | ComfyUI 화면 등 다른 곳에서 실행이 중단됨 |
 | `SHUTDOWN` | transient | ✅ | 브릿지가 작업 도중 종료됨. 종료할 때 실행·대기 중 Job을 재시도 대기로 돌려놓는다 |
@@ -2930,7 +2933,7 @@ MVP·V1에는 Operator 정보만 저장한다. 팬 데이터는 V2에서 생긴�
 | 위치 | 규칙 |
 |---|---|
 | Workflow 템플릿 | Workflow ID는 `^[a-z0-9_]+$`만 허용하고, Registry의 `file` 값으로만 파일을 연다 (요청 값으로 경로를 만들지 않음) |
-| ComfyUI 결과 다운로드 | `/view`에 넘기는 `filename`·`subfolder`는 ComfyUI `/history` 응답에서 받은 값만 쓴다. 요청으로 받지 않는다 |
+| ComfyUI 결과 다운로드 | `/view`에 넘기는 `filename`·`subfolder`는 ComfyUI `/history` 응답에서 받은 값만 쓴다. 요청으로 받지 않는다. ⚙️ 그리고 `subfolder = pa`, 이름 `{job_id}_숫자 5자리_.확장자`인 것만 받는다. `/view`는 이름 끝 표기(` [input]`)로 폴더를 바꿀 수 있다 (47.3) |
 | 로컬 임시 파일 | 브릿지 작업 폴더(예: `data/tmp/`) 아래에서만 만들고, 경로를 정규화한 뒤 그 폴더 안인지 확인한다. 작업이 끝나면 지운다 |
 | Storage 경로 | `persona/{uuid}/assets/{uuid}.{ext}` 형식으로 코드가 만든다. 사용자 입력이 경로에 들어가지 않는다 |
 
@@ -3813,6 +3816,8 @@ GPU 메모리가 부족해서 생성하지 못했어요.
 | `PROMPT_MISSING` | 주제나 프롬프트가 없어서 만들 수 없어요. | 프롬프트 입력 |
 | `WORKFLOW_PARAM_INVALID` | 설정값이 이 Workflow에서 쓸 수 없는 값이에요. (…) | 설정 수정 후 다시 만들기 |
 | `LLM_OUTPUT_INVALID` | AI가 프롬프트를 제대로 만들지 못했어요. | 다시 실행 또는 프롬프트 직접 입력 |
+| `OUTPUT_TOO_LARGE` ⚙️ | 결과 파일이 너무 커서 저장하지 못했어요. 해상도나 후보 수를 줄여 다시 만들어 주세요. | 설정 수정 후 다시 만들기 |
+| `OUTPUT_UNEXPECTED` ⚙️ | 생성 결과가 예상과 달라 저장하지 않았어요. 관리자에게 알려 주세요. | 실행 기록 |
 | `RATE_LIMITED` | 실행 한도에 도달했어요. (한도: …) | Settings의 실행 한도 |
 | `TOKEN_EXPIRED` (V1) | Instagram 연결이 만료됐어요. 다시 연결해 주세요. | Social 화면 |
 | 그 밖의 코드 | 작업을 완료하지 못했어요. | 실행 기록 |
@@ -4605,8 +4610,9 @@ POST /v1/jobs/{id}/cancel
 **검증 (13.11)**: ComfyUI가 성공했어도 바로 등록하지 않는다.
 
 ```text
-출력 파일 있음 → 크기 > 0 → Pillow로 열기·verify → 형식이 Registry output 허용 목록 → 가로·세로가 요청 값과 같음
-실패 → OUTPUT_INVALID
+출력 파일 이름이 이 Job의 것 (pa/{job_id}_…, 47.3) → 출력 파일 있음 → 크기가 min_bytes 이상·max_bytes 이하
+ → Pillow로 열기·verify → 형식이 Registry output 허용 목록 → 가로·세로가 요청 값과 같음
+실패 → OUTPUT_INVALID (이름이 다르면 OUTPUT_UNEXPECTED, 너무 크면 OUTPUT_TOO_LARGE)
 ```
 
 **Storage 경로** ⚙️ (14.10, 15.5):
@@ -4674,6 +4680,7 @@ mTLS·서명 요청은 Long-term에 검토한다.
 | `JOB_TIMEOUT_SEC` | `900` | ComfyUI 대기 한도 (원안 `MAX_GENERATION_TIMEOUT=600`) |
 | `HEARTBEAT_SEC`, `STATUS_REPORT_SEC` | `30` | |
 | `BRIDGE_HOST`, `BRIDGE_PORT` | `127.0.0.1`, `8000` | |
+| `WORKFLOW_DIR`, `WORK_DIR`, `POLL_INTERVAL_SEC` | `workflows/`, `data/tmp`, `1.0` | 보통 바꾸지 않는다 (47.2) |
 | `LOG_LEVEL` | `INFO` | |
 
 `MAX_RETRY_COUNT`는 없다. 최대 시도 횟수는 `automation_jobs.max_attempts`(14.11)다. `APP_ENV`(development·staging·production)도 두지 않는다 ⚙️. 개인 PC 한 대가 실행 환경이라 staging이 따로 없고, 환경 차이는 `.env` 값으로만 표현한다.
@@ -4713,6 +4720,7 @@ DB는 `pgserver`로 실제 PostgreSQL에 마이그레이션 0001~0008을 적용�
 - [x] 실행 후 검증, Thumbnail, Storage 업로드, Asset 등록, 완료 콜백
 - [x] pytest (실제 DB + 가짜 ComfyUI) 통과
 - [ ] 실제 ComfyUI에서 `image_generation_v1` 1장 생성 (M0 환경 준비 후, 절차는 25.6)
+- [ ] 36.12·47.3 보강: Persona 관계 검사, 출력 파일 허용 목록, 출력 크기 상한, 보관된 Persona의 재실행 차단 (첫 실제 생성 전)
 - [ ] n8n 연동 (M3), End-to-End (M5)
 
 ### 19.21 원안에서 조정한 부분과 이유
@@ -4948,7 +4956,7 @@ fail_automation_job(job_id, locked_at, error_type, error_code, message, retryabl
 
 | 재시도 | 재시도 안 함 |
 |---|---|
-| `TIMEOUT`, `COMFY_UNREACHABLE`(원안 `COMFYUI_UNAVAILABLE`·`CONNECTION_ERROR`), `NETWORK_ERROR`, `FILE_ERROR`(원안 `STORAGE_UPLOAD_FAILED`), `CUDA_ERROR`(원안 `TEMPORARY_GPU_ERROR`), `OUT_OF_MEMORY`(19.12), `RATE_LIMIT`·`RATE_LIMITED`, `TEMPORARY_API_ERROR`, `LLM_OUTPUT_INVALID`, `OUTPUT_INVALID`, `INTERRUPTED`, `SHUTDOWN`, `HEARTBEAT_TIMEOUT`, `UNKNOWN`·`N8N_WORKFLOW_ERROR` | `MODEL_NOT_FOUND`, `LORA_NOT_FOUND`, `WORKFLOW_INVALID`, `WORKFLOW_PARAM_INVALID`, `INPUT_NOT_FOUND`(원안 `INVALID_PERSONA`), `PROMPT_MISSING`, `NODE_ERROR`, `INVALID_AUTH`(원안 `PERMISSION_DENIED`), `POLICY_ERROR`, `LLM_REQUEST_INVALID` |
+| `TIMEOUT`, `COMFY_UNREACHABLE`(원안 `COMFYUI_UNAVAILABLE`·`CONNECTION_ERROR`), `NETWORK_ERROR`, `FILE_ERROR`(원안 `STORAGE_UPLOAD_FAILED`), `CUDA_ERROR`(원안 `TEMPORARY_GPU_ERROR`), `OUT_OF_MEMORY`(19.12), `RATE_LIMIT`·`RATE_LIMITED`, `TEMPORARY_API_ERROR`, `LLM_OUTPUT_INVALID`, `OUTPUT_INVALID`, `INTERRUPTED`, `SHUTDOWN`, `HEARTBEAT_TIMEOUT`, `UNKNOWN`·`N8N_WORKFLOW_ERROR` | `MODEL_NOT_FOUND`, `LORA_NOT_FOUND`, `WORKFLOW_INVALID`, `WORKFLOW_PARAM_INVALID`, `INPUT_NOT_FOUND`(원안 `INVALID_PERSONA`), `PROMPT_MISSING`, `NODE_ERROR`, `INVALID_AUTH`(원안 `PERMISSION_DENIED`), `POLICY_ERROR`, `LLM_REQUEST_INVALID`, `OUTPUT_TOO_LARGE`·`OUTPUT_UNEXPECTED`(47.3) |
 
 원안의 `INVALID_REQUEST`는 브릿지 API의 `422`로, Job을 선점하기 전에 거부되므로 재시도 대상이 아니다.
 
@@ -11561,7 +11569,7 @@ Lovable 앱 코드는 Lovable 프로젝트(그리고 그것이 연결한 GitHub 
 원안 40.62의 Phase 1~10(44단계)는 16장 마일스톤과 같은 방향이다. 범위의 정본은 16장이고, **실행 순서(Sprint)·관문·사람과 도구별 작업 분리는 44장**이다 ⚙️. 지금 위치는 README의 진행 상황이다.
 
 ```text
-[완료]  PRD 1~8, 기술 설계 9~46
+[완료]  PRD 1~8, 기술 설계 9~47
 [완료]  M1 DB (로컬 테스트), M2 브릿지 (로컬 테스트), M3 n8n Workflow 작성
 [다음]  M0 환경 (Supabase·n8n 서버·Cloudflare·Lovable 계정 = 직접 작업)
         → 24장 Supabase 적용 → 25장 PC 연결 → 26장 n8n 배포
@@ -12606,7 +12614,7 @@ DB 복원 뒤의 대조(38장 `reconcile_after_restore`)도 이 확인 실행과
 **지금 위치** (2026-10-06)
 
 ```text
-[완료]  PRD 1~8, 기술 설계 9~46
+[완료]  PRD 1~8, 기술 설계 9~47
 [완료]  M1 DB · M2 브릿지 (로컬 테스트 107개 통과), M3 n8n Workflow 작성
 [다음]  Sprint 1: M0 환경 → DB 적용 → [PC → n8n] ∥ [Lovable] → M5 (27장 E2E)
 ```
@@ -12695,7 +12703,7 @@ G1의 복원 시험 ⚙️: 38.13은 복원 검증·훈련을 V1에서 시작한
 
 | # | 단계 | 사람 | Claude Code | 통과 |
 |---|---|---|---|---|
-| 0 | 코드 | – | `pytest tests -q` 확인 (2026-10-06: 107개 통과). **36.12 MVP 수정**을 첫 `db push` 전에 한다 ⚙️: 브릿지의 `content_job.persona_id == job.persona_id` 검사, `automation_jobs`·`posts`의 Persona 일치 트리거(`persona_isolation` 마이그레이션), 격리 테스트, Foundation 보강 테스트(45.6), Content Job 보강 테스트(46.7) | 전부 통과, 36.12 격리 테스트의 MVP 행 |
+| 0 | 코드 | – | `pytest tests -q` 확인 (2026-10-06: 107개 통과). **36.12 MVP 수정**을 첫 `db push` 전에 한다 ⚙️: 브릿지의 `content_job.persona_id == job.persona_id` 검사, `automation_jobs`·`posts`의 Persona 일치 트리거(`persona_isolation` 마이그레이션), 격리 테스트, Foundation 보강 테스트(45.6), Content Job 보강 테스트(46.7), 47.3 보강(출력 파일 허용 목록, 출력 크기 상한, 보관 Persona 재실행 차단) | 전부 통과, 36.12 격리 테스트의 MVP 행 |
 | 1 | **M0 + DB 적용** | Supabase 프로젝트, Google OAuth Client(Google Cloud), 이메일 로그인 끔(새 사용자 가입 허용은 켬), `supabase link`·`db push`, 허용 목록 → **Lovable 프로젝트를 만들어 Supabase에 연결하고 빈 화면에서 Google 로그인**(또는 임시 페이지) → admin 지정, secret key 분리 (24.3) | 순서 안내, `verify_production.sql` 결과 해석 | `verify_production.sql` 1~14 |
 | 2 | PC (트랙 A) | 드라이버, ComfyUI(`127.0.0.1`), 체크포인트·LoRA, venv, `.env` 채우기 (25.3) | 설치 오류 분석 | `/v1/health` `ok` |
 | 3 | 첫 생성 (n8n 없이) | 25.6의 SQL·호출 실행 | 결과 확인, 실패 분석 | Content Job `ready`, Asset 1행 |
@@ -12844,7 +12852,7 @@ WF-011 분석 (performance_insight.v1) → WF-012 결정 (ai_decision.v1) → re
 
 | 이름 (예상 번호) | Sprint | 내용 |
 |---|---|---|
-| `persona_isolation` (0009) | 1 (0번) | 36.12 MVP 수정: `automation_jobs`·`posts`의 Persona 일치 트리거 |
+| `persona_isolation` (0009) | 1 (0번) | 36.12 MVP 수정: `automation_jobs`·`posts`의 Persona 일치 트리거. 보관된 Persona의 다시 시도·재생성·단계 재시도 거부 (47.3) |
 | `social_accounts` (0010) | 2 ① | `oauth_states`, Vault 함수(`upsert_social_account`, `get_social_account_token`), `create_oauth_state`·`consume_oauth_state` |
 | `publishing` (0011) | 2 ② | `approvals`, `posts (platform, external_post_id)` Unique, 28.14의 Operator·Worker RPC(`record_metrics`·`expire_approvals` 제외), `transcode` job_type, `check_publish_ready`(1~10번), 43.10 게시 RPC 변경, R8 확장, `generation_enabled`·`emergency_stop_all`, Realtime에 `approvals` |
 | `scheduler` (0012) | 2 ③ | 41.12 DB (업로드 Asset, `posts.origin`·`late_policy`, Likey·Fantrie, `media-uploads`, 42.4 RPC, `publisher` Worker, `platform_specs`·`platform_controls`), `check_publish_ready` 11·12번, `claim_next_automation_job(p_channel)`, `personas.timezone`, Realtime에 `social_accounts` |
@@ -13031,7 +13039,7 @@ F0 코드 보강 → F1 Supabase·Google → F2 Lovable 연결·Shell → F3 Per
 
 | # | 단계 | 사람 | Claude Code | Lovable | 통과 |
 |---|---|---|---|---|---|
-| F0 | 코드 보강 | – | 36.12 MVP 수정(브릿지 Persona 일치 검사, `persona_isolation` 마이그레이션, 44.5 0번), Foundation 보강 테스트(45.6), Content Job 보강 테스트(46.7). 마이그레이션이 하나 늘므로 `verify_production.sql` 1번·24.3 2번·24.4 1번의 기대값을 0001~0009로 고친다 (44.12 규칙 4) | – | `pytest tests -q` 전부 통과 |
+| F0 | 코드 보강 | – | 36.12 MVP 수정(브릿지 Persona 일치 검사, `persona_isolation` 마이그레이션, 44.5 0번), Foundation 보강 테스트(45.6), Content Job 보강 테스트(46.7), 47.3 보강(출력 파일 허용 목록, 출력 크기 상한, 보관 Persona 재실행 차단). 마이그레이션이 하나 늘므로 `verify_production.sql` 1번·24.3 2번·24.4 1번의 기대값을 0001~0009로 고친다 (44.12 규칙 4) | – | `pytest tests -q` 전부 통과 |
 | F1 | Supabase·Google | 프로젝트(Seoul), `supabase link`·`db push`, pg_cron 확인, Auth는 Google만, Google OAuth Client·동의 화면, 허용 목록 입력, secret key 분리, Advisors (24.3 1~5, 7, 9~11번) | 순서 안내, 점검 SQL 해석 | – | `verify_production.sql` 1~8, 10~14, Advisors 경고 0 (또는 이유 기록) |
 | F2 | Lovable 연결·Shell | Lovable 프로젝트 → 기존 Supabase 연결(publishable key) → Site URL·Redirect URLs 설정(24.3 6번) → §1 Master Prompt, Phase 1 보내기 → 첫 로그인 → `admin` 지정 (24.3 8번) → `supabase gen types` | Phase 1 코드 리뷰 (45.5) | Phase 1 | `verify_production.sql` 9, Phase 1 확인 항목 |
 | F3 | Persona | Phase 2 보내기 | Phase 2 코드 리뷰 (45.5) | Phase 2 | Phase 2 확인 항목 |
@@ -13362,7 +13370,7 @@ F2·F3의 Phase가 끝날 때마다, 그리고 F4에서 한 번 더 한다. **�
 | ③ CRUD 테스트 | Phase 3 확인 항목 + 다른 계정으로 격리 확인 (45.6 F4와 같은 방법) |
 | ④ Realtime 확인 | SQL Editor에서 상태를 바꿔 목록·상세가 새로고침 없이 바뀌는지 (22.22) |
 | ⑤ Claude Code 보안·선점 검증 | `tests/db`의 선점·멱등·전이 테스트 (`pytest tests -q` 107개 통과, 그중 `tests/db` 45개) + 46.7 추가 테스트 + Phase 3 코드 리뷰 (45.5 검색) |
-| ⑥ 47번 Python Execution | 브릿지는 M2에서 구현됐다. 다음 실행은 44.5 2·3번(PC 설치, 25.6 첫 생성)이다 |
+| ⑥ 47번 Python Execution | 브릿지는 M2에서 구현됐다. 다음 실행은 F0 보강(47.3) 뒤 44.5 2·3번(PC 설치, 25.6 첫 생성)이다 |
 
 Phase 3은 n8n·브릿지 없이 만든다 (22.22). 화면에서 만든 Job이 실제로 생성되는 것은 트랙 A가 연결된 뒤(44.5 6번 이후)다.
 
@@ -13386,4 +13394,111 @@ Phase 3은 n8n·브릿지 없이 만든다 (22.22). 화면에서 만든 Job이 �
 | Repository 층 | Page → Hook → Repository | Hook + RPC | 18.7, 45.4 |
 | Lovable 프롬프트 | 46.30 (테이블·RLS 생성 포함) | Phase 3 | 22.3 금지 4 |
 | Claude 프롬프트 | 46.31 (스키마·RLS·선점·인덱스 구현) | 대부분 M1에서 끝남. 46.7 추가 테스트, Phase 3 리뷰 | 0001~0005, `tests/db` |
-| 다음 단계 | 47 Python Execution 구현 | 44.5 2·3번 실행 (브릿지는 구현됨) | M2 |
+| 다음 단계 | 47 Python Execution 구현 | F0 보강(47.3) 뒤 44.5 2·3번 실행 (브릿지는 구현됨) | M2 |
+
+---
+
+## 47. Python Local Execution Layer — 원안 대응과 실행 ✅
+
+> 원안 47의 실행 계층은 **이미 구현되어 있다** (M2: `app/`, `workflows/registry.json`, `tests/bridge`). 원안 47은 19장이 반영한 원안과 거의 같아서, 대부분의 대응은 이미 **19.21**에 있다. 그 밖의 근거는 12.6(API), 13장(Workflow·검증·오류), 15.7·15.8·15.17(보안), 25장(PC 설치·첫 실제 생성)이다. 이 장은 19.21에 없는 원안 항목의 대응, 원안이 짚어 새로 찾은 빈틈 세 가지, Sprint 1에서의 실행을 정한다. 원안과 다른 곳은 ⚙️로 표시하고 47.6에 모았다.
+
+### 47.1 구현 상태 (원안 47.1~47.3, 47.38)
+
+원안의 원칙("Python은 판단하지 않고, 이미 결정된 작업을 안전하게 실행한다")과 책임 범위(원안 47.2)는 19.1·19.20 규칙과 같다.
+
+| 원안 완료 기준 (47.38) | 상태 | 근거 |
+|---|---|---|
+| 프로젝트, FastAPI, `/health`·`/ready`, 토큰 인증 | 완료 | `app/main.py`·`api.py`, `/v1/health`·`/v1/status` (12.6) |
+| Supabase 연결, Automation Job·Content Job·Persona·Persona Asset 조회 | 완료 | `app/database.py` (PostgREST + Worker RPC) |
+| Workflow Registry, Prompt Builder, ComfyUI 연결 | 완료 | `app/comfyui/` (13.3·13.7) |
+| 실행 후 검증, Storage 업로드, Asset 등록, 상태 갱신, 실행 기록 | 완료 | `app/worker.py` (13.11, 14.10, 19.16) |
+| 멱등, 재시도 분류, OOM 축소, 취소 | 완료 | 선점·잠금(19.7), 13.12, `test_oom_retries_same_values_then_downscales`, `/v1/jobs/{id}/cancel` |
+| 보안 테스트 | 완료 + 보강 (47.3) | `tests/bridge` (62개) |
+| Correlation ID | 두지 않음 ⚙️ | 47.2 |
+| **RTX 5080 실제 생성, E2E** | **남음** | 25.6 (M0 이후, 47.5) |
+
+### 47.2 19.21에 없는 원안 항목 (원안 47.5~47.10, 47.18, 47.29·47.30, 47.37)
+
+| 원안 | 여기 | 이유 |
+|---|---|---|
+| 환경 변수 `SUPABASE_SERVICE_ROLE_KEY`, `PYTHON_API_TOKEN`, `COMFYUI_URL`, `EXECUTION_HOST/PORT`, `WORKFLOW_DIR`, `MAX_GENERATION_TIMEOUT_SECONDS` | `SUPABASE_SECRET_KEY`(브릿지 전용), `BRIDGE_TOKENS`(교체용 2개), `COMFY_URL`(localhost만 허용), `BRIDGE_HOST/PORT`(기본 `127.0.0.1:8000`), `WORKFLOW_DIR`(`app/config.py`가 읽는다, 기본 `workflows/`. 19.18에 더함), `JOB_TIMEOUT_SEC`(900) | 19.18, `.env.example` |
+| `MAX_OUTPUT_FILE_SIZE_MB` | 환경 변수가 아니라 Registry의 `output.max_bytes` ⚙️. `media` 버킷 한도(50MB) 이하로만 둔다 | 업로드 한도는 버킷 하나라 그보다 크게 둘 수 없다. 영상 때문에 늘리려면 버킷 한도(새 마이그레이션)와 Supabase 전역 업로드 한도도 함께 올린다 (41.2). 지금은 검사가 없다 → 47.3 |
+| 원격 n8n은 VPN·Tailscale | Cloudflare Tunnel + Access Service Token + `X-Bridge-Token` (15.13 확정, 25.5) | 들어오는 포트를 열지 않고, 토큰 두 겹 |
+| `/ready`가 Supabase도 확인 | `/v1/health`(공개, 최소: `ok`·`comfyui`·대기열)와 `/v1/status`(토큰, GPU·모델·Workflow)만. Supabase는 확인하지 않는다 | 요청마다 DB를 부르지 않는다. DB 문제는 선점 단계의 5xx(`502`, 연결 자체가 안 되면 `500`)와 `worker_status` 보고 중단(37.4 Offline)으로 드러난다 |
+| 요청 본문 `automation_job_id`·`content_job_id`·`persona_id` | `job_id` 하나 (다른 키는 `422`) | Content Job·Persona는 선점한 Job 행에서 읽는다 (36.1). 값을 셋 받으면 서로 어긋날 수 있다 |
+| 생성 시작 조건: Automation Job·Content Job 상태, Persona `active` (47.10) | Job 상태는 원자적 선점(`pending → processing`, 아니면 `409`)이 보장한다. Content Job 상태는 Job을 만들 때 DB가 확인하고(`generating`), 취소되면 Job도 취소되어 잠금 확인에서 결과가 버려진다. Persona `active`는 실행 중에 다시 확인하지 않는다 ⚙️ | 이미 선점된 생성을 끝내도 해가 없고, 멈추려면 Content Job을 취소한다. 새 Content Job의 생성·제출은 DB가 막는다(`content_jobs_validate`, `submit_content_job`). 다시 시도·재생성·단계 재시도에는 그 확인이 없어서 47.3 4번에서 더한다 |
+| 서로 다른 Persona의 데이터가 섞이면 즉시 실패 (47.9) | 브릿지는 비교하지 않는다. DB는 RPC 경로(`create_automation_job`)에서만 거부한다 → 47.3 1번 | 36.1이 찾은 빈틈과 같다 |
+| ComfyUI가 준 파일 경로를 믿지 않음 (47.18) | 브릿지는 ComfyUI의 파일 시스템을 읽지 않는다. `/history`가 준 `filename`·`subfolder`로 `/view?type=output`을 부른다 (15.17). 이름 검사는 없다 → 47.3 2번 | ComfyUI의 `/view`는 output·input·temp 폴더 안으로 제한하지만, 파일 이름 끝 표기(` [input]` 등)로 폴더를 바꿀 수 있다 (이 PC의 ComfyUI 0.3.34에서 확인, 버전마다 다시 확인). 그래서 브릿지가 받을 이름을 정해 둔다 |
+| Correlation ID `corr_…` (47.29) | 두지 않는다 ⚙️. 추적은 뿌리 행(Content Job) → FK → `execution_logs`이고, ComfyUI 작업은 `execution_ref`(= `comfy_prompt_id`)로 잇는다 | 37.2, 40.11 |
+| 로그 칸 (47.30) | 정본은 DB의 `execution_logs`(Job ID, 단계, 서비스, 상태, 소요 시간, 오류). 지금 콘솔 로그는 텍스트(Job ID·단계)이고, 뿌리 ID·`persona_id`를 함께 적는 JSON 회전 파일은 V1이다 (37.2). 비밀값은 가린다 (`redact`, 15.21) | 37.2 |
+| `POST /assets/validate`, `GET /jobs/{id}` (47.37) | 두지 않는다 | `POST /assets/validate`는 40.14(검증은 브릿지 내부), `GET /jobs/{id}`는 19.4·19.21(상태는 Supabase가 정본) |
+| Python 3.11+ | 3.12 venv | 25.3 |
+
+19.21이 이미 다룬 것(구조 `app/`, `POST /v1/jobs`, 상태 값, 멱등은 DB 선점, 재시도 시점은 DB, 13.12 오류 코드, 단일 Worker 루프, Storage 경로 `media/persona/{persona_id}/assets/{asset_id}.{ext}`, 메모리 처리, `X-Bridge-Token`, httpx)은 다시 적지 않는다. 원안 47.23의 "재시도 가능하면 Content Job을 `GENERATING → PENDING`"도 같은 이유로 두지 않는다. 재시도 대기는 Automation Job의 `pending` + 미래 `run_after`이고, Content Job은 최종 실패 때만 `failed`가 된다 (11.9 R2).
+
+### 47.3 보강 (F0)
+
+원안이 짚은 것 중 코드에 없는 것이다. 1번은 이미 F0에 있던 항목이고(36.12), 2~4번이 새로 찾은 것이다. 모두 작은 변경이다.
+
+| # | 항목 | 지금 | 바꿀 곳 | 오류 | 테스트 | 시점 |
+|---|---|---|---|---|---|---|
+| 1 | **Persona 관계** (원안 47.9, 36.1·36.12에 이미 있음) | 브릿지는 Job과 Content Job의 `persona_id`를 비교하지 않는다. DB는 RPC 경로에서만 거부한다 | `worker._run`의 조립 단계 + `persona_isolation` 트리거 | `INPUT_NOT_FOUND` (재시도 없음) | 트리거가 들어가면 DB에 어긋난 행을 만들 수 없다. 브릿지 테스트는 선점한 Job dict의 `persona_id`를 메모리에서 바꿔 ComfyUI 호출 전에 실패하는지 본다 | F0 |
+| 2 | **출력 파일 확인** (원안 47.18) | `/history`의 `filename`·`subfolder`를 그대로 `/view`에 넘긴다. 이름 끝 표기로 다른 Job의 입력 이미지(다른 Persona의 참조 이미지일 수 있음)도 읽을 수 있다 | **허용 목록**: `subfolder`가 `pa`이고 `filename`이 `{job_id}_숫자 5자리_.{Registry 출력 확장자}`와 **전체** 일치할 때만 받는다. 브릿지가 `filename_prefix = pa/{job_id}`로 고정하므로(13.8) ComfyUI SaveImage가 만드는 이름이다. 첫 `/view`를 부르기 전에 모든 항목을 검사한다 | `OUTPUT_UNEXPECTED` ⚙️ (validation, 재시도 없음) + `security_events` 기록 | 다른 이름·표기·폴더가 하나라도 있으면 `/view`를 한 번도 부르지 않고 실패 | F0 (첫 실제 생성 전) |
+| 3 | **출력 크기 상한** (원안 47.5) | 최소 크기만 본다. 버킷 한도를 넘는 파일은 업로드에서 `FILE_ERROR`(재시도)가 나서 같은 결과를 되풀이한다 | Registry `output.max_bytes`(기본 52428800, `media` 버킷 한도 이하), `validate_output`의 최소 크기 검사 옆(`Image.open` 전) | `OUTPUT_TOO_LARGE` ⚙️ (validation, 재시도 없음) | 한도를 넘으면 업로드 전에 실패, 재시도 없음 | F0에 함께, 늦어도 영상 Workflow(V1) 전. MVP Workflow(PNG, 최대 2048×2048)는 약 13MB를 넘지 않는다 |
+| 4 | **보관된 Persona의 재실행** (리뷰에서 찾음) | Persona `active` 확인은 Content Job INSERT(`content_jobs_validate`)와 `submit_content_job`뿐이다. 보관(`inactive`)한 Persona에서도 [다시 시도]·[다시 만들기]·단계 재시도로 새 회차와 generation Job이 생긴다 | `retry_content_job`·`regenerate_content_job`·`retry_automation_job`에 활성 확인 (`persona_isolation` 마이그레이션에 함께). Worker RPC(`claim_content_job`, `create_automation_job`)는 바꾸지 않는다. 이미 대기 중인 일은 끝내고, 멈추려면 취소한다. Worker RPC를 막으면 Content Job이 `generating`에 걸린 채 WF-001 복구가 되풀이된다 | `VALIDATION_FAILED` (`PT422`, 생성과 같은 오류) | 보관된 Persona의 Job에 세 RPC → `PT422` | F0 |
+
+### 47.4 테스트 대응 (원안 47.35)
+
+원안의 19개 항목 중 18개는 이미 있고, Persona 관계 하나가 없다 (47.3 1번). 47.3의 2·3번은 출력 검증·경로 조작 항목을, 4번은 상태 검증 항목을 보강한다.
+
+| 원안 | 있는 테스트 |
+|---|---|
+| `/health`, `/ready` | `test_health_is_public_and_minimal`, `test_status_requires_token` |
+| 인증, 잘못된 토큰 | `test_bad_tokens_are_rejected_logged_and_blocked`, `test_token_rotation_accepts_old_and_new` |
+| Job 없음, 잘못된 상태 | `test_unknown_job_is_409`, `test_claims_job_and_queues_it`(같은 Job을 다시 보내면 `409`), `test_non_generation_job_is_rejected`(종류가 다르면 `422`) (+ **47.3 4번**) |
+| **Persona 관계** | **없음 → 47.3 1번** |
+| Workflow 없음 | `test_disabled_workflow_is_rejected`, `test_registry_rejects_path_in_file_name` |
+| ComfyUI 꺼짐 | `test_comfy_down_returns_503_without_claiming` |
+| Timeout | `test_timeout_cancels_comfy_and_retries` |
+| 출력 검증 | `test_validate_output`, `test_tiny_output_is_retryable_output_invalid`, `test_wrong_output_size_is_rejected` (+ **47.3 2·3번**) |
+| Storage 업로드, Asset 등록 | `test_storage_requests`, `test_lora_generation_end_to_end` |
+| OOM 축소 | `test_oom_retries_same_values_then_downscales`, `test_oom_downscale_only_on_third_attempt` |
+| 멱등 | `test_requeued_same_id_runs_with_new_lock` + DB `test_idempotent_job_creation_and_single_claim` |
+| 취소 | `test_cancel_removes_queued_job`, `test_cancel_while_generating_stops_worker` |
+| 재시도 | `test_node_error_is_not_retried`, `test_tiny_output_is_retryable_output_invalid` (재시도 시점은 DB 테스트) |
+| 비밀값 가리기 | `test_redaction` |
+| 경로 조작 | `test_storage_paths_are_safe`, `test_registry_rejects_path_in_file_name`, DB `test_persona_asset_path_must_stay_in_own_refs_folder` |
+
+### 47.5 실행 순서 (원안 47.36과 마지막 "실제 작업" 순서)
+
+원안의 순서("Python 폴더 생성·구현 → ComfyUI 연결 → RTX 5080에서 1장 → Storage → `assets` → `content_jobs` 확인")에서 앞의 두 단계는 끝났다. 남은 순서:
+
+| # | 할 일 | 누가 | 근거 |
+|---|---|---|---|
+| 1 | 47.3의 보강 + 테스트 | Claude Code | F0 (44.5 0번) |
+| 2 | Supabase 운영 프로젝트와 DB 적용 | 사람 | F1 (45.3) |
+| 3 | PC: 드라이버, ComfyUI(`--listen 127.0.0.1`), 체크포인트·LoRA, venv, `.env` | 사람 (Claude Code는 오류 분석) | 25.3, 44.5 2번 |
+| 4 | **n8n 없이 첫 생성**: SQL로 Persona·Content Job·generation Job → 브릿지 `POST /v1/jobs` 직접 호출 → Content Job `ready`, Asset 1행, 이미지 확인. 실패 경로(없는 모델)도 한 번 | 사람 + Claude Code | 25.6 = 원안 47.36 |
+| 5 | Cloudflare Tunnel → n8n 연결 → 화면 없이 파이프라인 | 사람 | 44.5 4~6번 (원안 49) |
+
+원안 47.36의 성공 상태 이름은 이 시스템에서 Automation Job `done`, Content Job `ready`, Asset `generated`다 (19.21).
+
+### 47.6 원안 조정
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 이 장의 성격 | 새 구현 명세 | 구현된 실행 계층의 대응·빈틈·실행 순서 | M2 완료, 19.21이 같은 원안을 이미 대응 |
+| 출력 크기 상한 | 환경 변수 `MAX_OUTPUT_FILE_SIZE_MB` | Registry `output.max_bytes`(버킷 한도 이하), `OUTPUT_TOO_LARGE`(재시도 없음) | 업로드 한도는 버킷 하나, 재시도해도 같은 결과 |
+| 원격 접근 | VPN·Tailscale | Cloudflare Tunnel + Access + Bridge Token | 15.13 확정 |
+| 준비 상태 | `/ready`가 Supabase 확인 | `/v1/health`·`/v1/status`, Supabase는 선점·보고에서 드러남 | 요청마다 DB 호출 없음 |
+| 요청 본문 | ID 3개 | `job_id` 하나 | 나머지는 선점한 행에서, 어긋남 방지 |
+| Persona `active` 재확인 | 생성 시작 조건 | 실행 중에는 하지 않음. 대신 다시 시도·재생성·단계 재시도에서 막음 (47.3 4번) | 선점된 생성은 끝내도 해가 없음, 새 회차는 막음 |
+| Persona 관계 검사 | 섞이면 즉시 실패 | 채택, F0 (브릿지 검사 + DB 트리거) | 36.1의 빈틈 |
+| 출력 경로 검사 | 출력 폴더 안인지 확인 | 파일 시스템을 읽지 않음 + 이름 허용 목록(`pa/{job_id}_…`), `OUTPUT_UNEXPECTED`(재시도 없음) | `/view`는 이름 끝 표기로 폴더를 바꿀 수 있다 |
+| Correlation ID | `corr_{uuid}` | 뿌리 행 + FK + `execution_ref` | 37.2 |
+| 로그 칸 | 콘솔 로그에 전부 | 정본은 `execution_logs`, 콘솔은 지금 텍스트, JSON 파일은 V1 | 37.2 |
+| 추가 API | `POST /assets/validate`, `GET /jobs/{id}` | 없음 | 40.14, 19.4·19.21 |
+| 재시도 중 Content Job | `GENERATING → PENDING` | `generating` 유지, 최종 실패만 `failed` | 11.9 R2, 재시도는 실행 단위 |
+| Python | 3.11+ | 3.12 | 25.3 |
+| 그 밖의 원안 항목 | 구조, API 경로, 상태, 멱등 키, Bearer, 클라이언트, 경로, 오류 코드 | 19.21 그대로 | 이미 대응됨 |
+| 다음 단계 | 48 ComfyUI Production Workflow | 13장 Registry 5개(MVP) + 25.6 실제 실행. ControlNet은 13.4 단계표에 없다 (도입하면 Registry에 Workflow를 더한다) | 13.3·13.4 |

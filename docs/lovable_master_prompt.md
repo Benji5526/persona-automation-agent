@@ -469,7 +469,7 @@ Implement Phase 3 only: Content Jobs.
   src/lib/errors.ts (error code → Korean sentence for the codes in the brief plus
   MODEL_NOT_FOUND, LORA_NOT_FOUND, WORKFLOW_INVALID, WORKFLOW_PARAM_INVALID, INPUT_NOT_FOUND,
   PROMPT_MISSING, NODE_ERROR, CUDA_ERROR, TIMEOUT, COMFY_UNREACHABLE, FILE_ERROR,
-  OUTPUT_INVALID, INTERRUPTED, SHUTDOWN, HEARTBEAT_TIMEOUT, LLM_OUTPUT_INVALID, RATE_LIMITED,
+  OUTPUT_INVALID, OUTPUT_TOO_LARGE, OUTPUT_UNEXPECTED, INTERRUPTED, SHUTDOWN, HEARTBEAT_TIMEOUT, LLM_OUTPUT_INVALID, RATE_LIMITED,
   POLICY_ERROR, N8N_WORKFLOW_ERROR, UNKNOWN; unknown codes fall back to a generic sentence).
 - /content-jobs table + kanban, filters and search in the URL query.
 - /content-jobs/new form → create_content_job.
