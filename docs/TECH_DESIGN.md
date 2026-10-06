@@ -4014,6 +4014,7 @@ Frontend가 아는 값은 `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY` �
 | `/safety` ⚙️ | 33.14 (admin) | V2 |
 | `/experiments`, `/experiments/:id` ⚙️ | 34.14 | Long-term |
 | `/optimization` ⚙️ | 35.14 | V2b (전략 보기·수정), Long-term (롤아웃) |
+| `/monitoring` ⚙️ | 37.12 | V1 |
 
 필터·탭·보기 방식은 URL Query에 둔다. 새로고침하거나 링크를 공유해도 같은 화면이 열린다.
 
@@ -4947,7 +4948,7 @@ Error Trigger → 메시지 비밀값 가리기·1,000자 제한 → error_type 
 | ERROR | Job `failed` | Failed 표시, Error Center |
 | CRITICAL | Worker Offline·Degraded(`worker_status`), 브릿지 `/v1/health` 연속 실패, Supabase 접속 불가 | Header 시스템 상태 배지, (V1) WF-010 알림 |
 
-알림(Email·Telegram 등)은 V1의 WF-010이다. MVP는 Dashboard 표시까지다 (14.13).
+알림(Email·Telegram 등)은 V1의 WF-010이다. MVP는 Dashboard 표시까지다 (14.13). V1부터 알림은 Incident 단위로 묶어 보낸다 (37.6).
 
 ### 20.13 실행 기록과 추적
 
@@ -6384,7 +6385,7 @@ select (select count from private.usage_counters
        (select value ->> 'daily_llm_calls_limit' from public.app_settings where key = 'limits') as limit;
 ```
 
-Worker 가용성은 `verify_production.sql` 17번 (`worker_status`). GPU 사용률·VRAM 추이, LLM 비용, SNS 게시 성공률은 원안처럼 이후(V1·V2)에 추가한다.
+Worker 가용성은 `verify_production.sql` 17번 (`worker_status`). GPU 사용률·VRAM 추이, LLM 비용, SNS 게시 성공률은 원안처럼 이후(V1·V2)에 추가한다. 그 설계는 37장이다 (`health_samples`, `evaluate_health`, `/monitoring`).
 
 ### 26.7 원안 요구사항 대응과 조정
 
@@ -9955,3 +9956,320 @@ SQL로 계산하고 `/optimization`에 보여준다. 테이블에 저장하지 �
 | Persona 상세 탭 | 12개 | 단계별로 추가, Content·Automation은 기존 화면 필터로 | 같은 화면을 두 번 만들지 않음 |
 | Timezone | Identity 항목 | `personas.timezone`으로 분석·예약에 사용 | 29.9의 전역 값 하나를 Persona별로 |
 | 빈틈 | – | 브릿지·DB의 Persona 일치 검사 (MVP 수정) | 지금 제약으로는 보장되지 않음 |
+
+---
+
+## 37. Production Monitoring & Observability ✅
+
+> 운영 중인 시스템이 정상인지 계속 확인하고, 문제가 생기면 무엇이·어디서·왜 실패했는지 추적하는 계층이다. 많은 부분이 이미 있다: `execution_logs`·`state_transitions`(추적), `system_errors`(오류), `worker_status`(Worker·GPU), `recover_stale_jobs`(멈춘 Job 회수), Error Center·알림 벨(17.11), 20.12 심각도, 26.6 운영 SQL, WF-010 알림. 이 장은 그것을 정리하고, 빠진 것(조용한 정지 감지, 감시자를 누가 감시하나, Incident, 차단기, 추이 데이터, 보존 기간)을 정한다. **아직 구현되지 않은 부분이 대부분이다.** ⚙️ 표시는 원안을 조정한 부분이다 (37.14).
+
+### 37.1 원칙과 이미 있는 것
+
+원안의 원칙 5개(모든 것을 관찰 가능하게, Correlation ID, Metrics + Logs + Traces, 실패는 정상 상태, 조치가 필요할 때만 알림)를 따른다. 이 시스템에서의 대응:
+
+| 원안 | 이 시스템 | 상태 |
+|---|---|---|
+| Logs | `execution_logs` (단계별 상태·소요 시간·오류·외부 실행 ID, 19.16·20.13), 브릿지 콘솔 로그 (텍스트, `redact()` 적용, 파일 저장 없음) | MVP |
+| Traces | Content Job → Automation Job → `execution_logs` → Asset → Post → `performance_metrics`의 FK 연결, `state_transitions` | MVP |
+| Metrics | `automation_jobs`·`execution_logs`·`system_errors`의 SQL 집계 (26.6), `worker_status` 현재 값 | MVP (현재 값만), V1 추이 (37.5) |
+| 오류 | `system_errors` (`error_type` 8종 + `error_code`, `service`, `retryable`, `resolved`) | MVP |
+| 실패 = 정상 상태 (원안 37.2) | Job `pending`(재시도 대기 = `RETRY_WAIT`), `failed`(= `DEAD`), 재시도 성공(= `RECOVERED`) (11.4) | MVP |
+| 멈춘 작업 | Heartbeat 30초 + `recover_stale_jobs` (pg_cron 1분, 11.6) | MVP |
+| 화면 | Overview, `/automation`(Worker·큐·Job), `/automation/errors`(Error Center), Header 시스템 상태 배지·알림 벨 | MVP |
+| 알림 | WF-010 (Email·Telegram·Slack·Discord) | V1 |
+
+### 37.2 Correlation ID와 추적 ⚙️
+
+원안 37.2·37.26의 `corr_{uuid}`는 **만들지 않는다.** 이 시스템의 작업은 언제나 **하나의 뿌리 행**에서 시작하고(Content Job, Post, Conversation, Decision Run), 그 아래 모든 행이 FK로 이어진다. 31.15·32.14·33.11과 같은 방식이다.
+
+| 흐름 | 뿌리 | 이어지는 것 |
+|---|---|---|
+| 생성 (원안 37.24 예) | `content_jobs.id` | `automation_jobs` → `execution_logs` (`execution_ref` = n8n Execution ID, ComfyUI `prompt_id`) → `assets` → `posts` |
+| 게시·성과 | `posts.id` | `publish`·`analytics` Job → `performance_metrics` |
+| 팬 응답 | `conversations.id` | `reply_draft` → `ai_decisions` → `reply_send` → `messages` (31.15) |
+| AI 결정 | `decision` Job | `ai_decisions` → `content_jobs.ai_decision_id` → … (32.14) |
+
+- 로그를 한 줄씩 남기는 곳(브릿지 로그, n8n)은 **뿌리 ID와 Job ID를 함께** 적는다 (`content_job_id`, `automation_job_id`, `persona_id`). 원안 37.22의 구조화 JSON 형식으로 브릿지 로그를 회전 파일에 남긴다 (V1. 지금은 콘솔 텍스트 로그뿐이다).
+- **추적 화면** (원안 37.24·37.25): `get_trace(p_root_type, p_root_id)` RPC가 `state_transitions`와 `execution_logs`를 시간순으로 합쳐 돌려준다. Job Detail(17.7)의 실행 기록이 이미 생성 흐름의 타임라인이고, V1에서 Post·Conversation·Decision 상세에도 같은 타임라인을 붙인다.
+- 비밀값은 로그에 넣지 않는다 (원안 37.23, 15.21). 팬 메시지 본문도 넣지 않는다 (31.13).
+
+### 37.3 오류 분류와 심각도 ⚙️
+
+**분류** (원안 37.19): 원안의 14종(`AUTH_ERROR` ~ `UNKNOWN_ERROR`)을 새로 만들지 않는다. 이미 `service`(어디서) × `error_type`(어떤 종류, 8종) × `error_code`(구체적 원인)의 세 칸이 있다.
+
+| 원안 | 현재 |
+|---|---|
+| `AUTH_ERROR`, `PERMISSION_ERROR` | `error_type = authentication` / `policy` |
+| `VALIDATION_ERROR` | `validation` |
+| `NETWORK_ERROR`, `TIMEOUT` | `transient` / `timeout` |
+| `GPU_ERROR`, `COMFYUI_ERROR`, `RESOURCE_EXHAUSTED` | `generation` + `service = comfyui`/`python` + `CUDA_ERROR`·`OUT_OF_MEMORY`·`COMFY_UNREACHABLE` |
+| `SNS_ERROR`, `LLM_ERROR` | `api` + `service = sns`/`llm` + 12.8·20장 코드 |
+| `RATE_LIMIT` | `api` + `RATE_LIMIT`/`RATE_LIMITED` |
+| `DATABASE_ERROR`, `STORAGE_ERROR` | `transient` + `service = supabase` + `FILE_ERROR` 등 |
+| `UNKNOWN_ERROR` | `unknown` |
+
+**`system_errors` 추가 칸** (원안 37.21): `persona_id`·`automation_job_id`·`error_code`·`service`·`retryable`·`resolved`는 이미 있다. `content_job_id`는 Job에서 따라가면 되므로 두지 않는다. `correlation_id`는 37.2 이유로 두지 않는다. **`resolved_at`만 더한다** (V1, MTTR 계산용). `severity` 칸은 두지 않는다. 개별 오류의 심각도는 20.12처럼 상태에서 정해지고, 심각도가 필요한 것은 **Incident**(37.6)다.
+
+**심각도** (원안 37.20·37.44): 원안은 오류 심각도(INFO·WARNING·ERROR·CRITICAL)와 알림 수준(INFO·WARNING·HIGH·CRITICAL)을 따로 둔다. 여기서는 20.12의 오류 표현을 유지하고, 알림 수준은 Incident에만 둔다: `warning` / `high` / `critical`. INFO는 알림이 아니다 (원안 원칙 5).
+
+### 37.4 상태 판정: 서비스, GPU, 시스템
+
+**서비스 상태** (원안 37.10~37.13). 각 서비스를 **살아 있음(liveness)**과 **일할 수 있음(readiness)**으로 나눈다.
+
+| 서비스 | 살아 있음 | 일할 수 있음 | 출처 |
+|---|---|---|---|
+| 브릿지 (Python) | `worker_status.last_seen_at` 90초 이내 | + `comfyui_ok = true` + 생성 차단기(37.7) 닫힘 | `report_worker_status` 30초 (17.4) |
+| ComfyUI | `comfyui_ok` | 같음 | 브릿지가 확인 |
+| GPU | 브릿지가 GPU 정보를 보고함 | VRAM 여유 ≥ 1GB | 37.5 |
+| n8n | `worker_status`(kind `n8n`) 2분 이내 | + Workflow 신호(37.5)가 정상 | WF-001 안전망 1분 |
+| Supabase | 화면이 데이터를 읽음 | 같음 | 외부 감시(37.8) |
+| SNS (플랫폼별) | 최근 1시간 Adapter 호출이 성공한 적 있음 | + 연결 계정 `active` | `execution_logs` (`service = sns`) |
+| LLM | 최근 1시간 LLM 호출 성공률 ≥ 80% | 같음 | `execution_logs` (`service = llm`) |
+
+- 상태 값은 원안처럼 `UP` / `DEGRADED`(살아 있지만 일할 수 없음) / `DOWN`이다. 원안 37.12의 예(Python 살아 있음, ComfyUI가 죽어 준비 안 됨)가 지금의 `Degraded`(17.4)다.
+- **의존 관계** (원안 37.13): 생성 가능 = 브릿지·ComfyUI·GPU 모두 일할 수 있음. 게시 가능 = n8n + 그 플랫폼 SNS + `publishing_enabled`. 화면은 "생성: 불가 (원인: GPU VRAM 부족)"처럼 기능 단위로도 보여준다.
+
+**GPU 상태** (원안 37.7): 원안의 6개 상태를 아래로 계산한다. 칸으로 저장하지 않는다.
+
+| 원안 | 조건 |
+|---|---|
+| `OFFLINE` | 브릿지 90초 넘게 보고 없음 |
+| `ERROR` | 최근 10분 `CUDA_ERROR` |
+| `DEGRADED` | `comfyui_ok = false`, 또는 최근 1시간 `OUT_OF_MEMORY` 2회 이상 |
+| `OVERLOADED` | 생성 대기 Job ≥ `monitoring.queue_warning`(기본 20) |
+| `BUSY` | 실행 중 Job 있음 |
+| `HEALTHY` | 위에 해당 없음 |
+
+**시스템 상태** (원안 37.54): `get_system_status()`가 계산한다.
+
+| 상태 | 조건 (위에서부터) |
+|---|---|
+| `EMERGENCY_STOP` | 전역 스위치(32.6) 중 하나라도 꺼짐 |
+| `MAJOR_OUTAGE` | 생성·게시 둘 다 불가, 또는 n8n `DOWN` |
+| `PARTIAL_OUTAGE` | 생성 또는 게시 중 하나가 불가 |
+| `DEGRADED` | 열린 `high` 이상 Incident, 또는 어떤 서비스가 `DEGRADED` |
+| `OPERATIONAL` | 해당 없음 |
+
+Supabase가 멈추면 이 함수도 못 부른다. 그때 Lovable은 "서버에 연결할 수 없음"을 보여주고, 알림은 외부 감시(37.8)가 맡는다.
+
+### 37.5 수집하는 신호 ⚙️
+
+**인프라** (원안 37.5·37.6): 지금 `worker_status.gpu`는 ComfyUI `/system_stats`의 GPU 이름·VRAM만 담는다. 사용률·온도·전력은 그 API에 없다.
+
+| 신호 | 방법 | 단계 |
+|---|---|---|
+| GPU 사용률, 온도, 전력, VRAM 사용량 | 브릿지가 NVML(`pynvml`)로 30초마다 읽어 `report_worker_status`의 `gpu`에 넣는다 | V1 |
+| CPU, RAM, 디스크 여유 (출력·모델 폴더 드라이브) | 브릿지가 `psutil`로 읽어 `host` 키에 넣는다 | V1 |
+| 생성 단계 시간 (대기, ComfyUI, 검증, 업로드) | `execution_logs` 단계별 `duration_ms` (이미 있음) | MVP |
+
+**추이 데이터** ⚙️: `worker_status`는 현재 값 한 줄뿐이라 "지난 밤 VRAM 추이"를 볼 수 없다. **`health_samples`** 테이블을 둔다 (V1): 5분마다 pg_cron이 `worker_status`와 큐 길이(job_type별 대기·실행·재시도 대기)를 한 행씩 복사한다. 30일 보존. 원안 37.62의 시계열 시스템은 Long-term이다.
+
+**Workflow 신호** ⚙️ (원안 37.14·37.15): n8n 실행 결과는 n8n 안에만 있고 14일 뒤 지워진다 (20.13). Job을 다루는 Workflow는 Job 결과(`automation_jobs` job_type별 성공·실패)로 건강을 알 수 있다. 문제는 **Job 없이 일정으로만 도는 Workflow**(WF-008 예약 게시, WF-009 수집, WF-015, WF-016 토큰 갱신)다. 이것들이 멈추면 아무 오류도 없이 **조용히** 일이 안 된다. 그래서 각 Workflow가 끝날 때 `report_workflow_run(p_workflow, p_ok)`를 부르고 `workflow_heartbeats`(Workflow별 마지막 성공·실패 시각, 연속 실패 수)에 남긴다 (V1).
+
+| Workflow 상태 (원안 37.15) | 조건 |
+|---|---|
+| `HEALTHY` | 마지막 성공이 예상 주기 × 3 이내 |
+| `DEGRADED` | 연속 실패 1~2회 |
+| `FAILING` | 연속 실패 3회 이상, 또는 마지막 성공이 예상 주기 × 3을 넘음 |
+| `DISABLED` | 그 Workflow를 쓰는 기능이 꺼짐 (예: `publishing_enabled = false`인 동안 WF-008) |
+
+**지연 시간 백분위** (원안 37.17·37.18): `execution_logs.duration_ms`에 `percentile_cont`로 P50·P90·P95를 계산한다 (V1, 화면·SQL). 저장하지 않는다.
+
+**업무 신호** (원안 37.27·37.30~37.43): 새로 모으지 않는다. 29장(성과), 30·32.12(AI 결정), 31.16(팬), 35.9(최적화), 32.13(비용)이 이미 정의한 계산값을 37.6의 규칙이 읽는다.
+
+### 37.6 알림 규칙과 Incident ⚙️
+
+**규칙은 DB가 평가한다.** 원안 37.70의 `[PA] 016 - System Health Monitor`(016은 Token Refresh) 대신 **pg_cron `evaluate_health()`**(1분)로 한다. 감시 대상 중 하나가 n8n인데, n8n이 감시를 맡으면 n8n이 멈췄을 때 아무도 알 수 없다. DB는 Source of Truth라 항상 켜져 있어야 하고, 모든 신호가 이미 DB에 있다.
+
+**규칙** (원안 37.9·37.31·37.34·37.36~37.43·37.45, 임계값은 `app_settings.monitoring`)
+
+| 규칙 | 조건 | 수준 | 단계 |
+|---|---|---|---|
+| 브릿지 Offline | 90초 넘게 보고 없음, 생성 대기 Job 있음 | critical (대기 없음이면 high) | V1 |
+| ComfyUI Degraded | 3분 넘게 `comfyui_ok = false` | high | V1 |
+| n8n 정지 | n8n 보고 3분 넘게 없음 | critical | V1 |
+| Workflow 조용한 정지 | `workflow_heartbeats`가 `FAILING` | high (WF-008·009는 critical) | V1 |
+| 큐 적체 | 생성 대기 ≥ 20 (warning), 30분 동안 계속 증가 (high) | warning·high | V1 |
+| 실패율 | 최근 1시간 job_type별 실패율 > 30% (최소 5건) | high | V1 |
+| 오류 급증 | 같은 `error_code` 15분에 10건 이상 | high | V1 |
+| GPU 위험 | 온도 ≥ 85°C 5분, 디스크 여유 < 20GB | warning (디스크 < 5GB면 critical) | V1 |
+| 토큰 만료 (원안 37.38) | 7일 이내 warning, 24시간 이내 high, 만료 critical (그 플랫폼 게시) | 단계별 | V1 |
+| 게시 실패 | 같은 계정 연속 3회 `failed` | high | V1 |
+| 저장 공간 급증 (원안 37.41) | 오늘 Asset 크기 합 > 최근 7일 일평균 × 5 | warning | V1 |
+| AI 이상 (원안 37.31) | 하루 Decision 수 > 최근 14일 중앙값 × 3, 또는 `invalid` 비율 > 30% (최소 10건) | high | V2 |
+| AI 쏠림 (원안 37.32) | 최근 7일 한 Action이 Decision의 80% 초과 (최소 20건, `no_action` 포함) | warning | V2 |
+| 팬 CRITICAL 미처리 (원안 37.36) | CRITICAL 팬 대화가 1시간 넘게 승인 대기 | high | V2 |
+| 비용 급증 (원안 37.43) | 오늘 추정 비용 > 최근 7일 중앙값 × 2 | warning | V2b (32.13) |
+| 최적화 불안정 (원안 37.34) | 14일에 롤백 2회 이상 | warning | Long-term (35장) |
+
+- 원안 37.34의 "하루 전략 변경 12회" 같은 상황은 35.5의 하루 1건 제한 때문에 일어날 수 없다. 대신 롤백 반복을 본다.
+- 원안 37.39의 "Rate Limit에 가까우면 게시 늦추기"는 28.9(게시 전 `content_publishing_limit` 확인)와 Adapter `RATE_LIMIT` 재시도가 이미 한다. 여기서는 `RATE_LIMIT` 응답이 하루 5번을 넘으면 warning만 낸다.
+
+**Incident** (원안 37.46~37.50): 규칙이 처음 걸리면 Incident를 연다. 같은 규칙이 다시 걸리면 **새로 만들지 않고 횟수만 올린다** (원안 37.46 중복 제거).
+
+**incidents** (V1)
+
+| Column | Type | Description |
+|---|---|---|
+| id | uuid PK | Incident ID |
+| rule_key | text | 규칙 + 대상 (예: `worker_offline:python:rtx5080-1`, `error_spike:COMFY_UNREACHABLE`). 열린 것 중 Unique |
+| severity | text | `warning` / `high` / `critical` (올라갈 수만 있음) |
+| status | text | `open` / `acknowledged` / `resolved` |
+| title | text | 화면 문장 |
+| started_at | timestamptz | 첫 신호 시각 (규칙이 본 가장 이른 원인 행) |
+| detected_at | timestamptz | Incident를 연 시각 |
+| acknowledged_at, acknowledged_by | | Operator 확인 |
+| resolved_at | timestamptz | 해결 |
+| occurrences | integer | 걸린 횟수 |
+| impact | jsonb | 영향: Persona 목록, 플랫폼, 영향받은 Job 수, 서비스 (원안 37.50) |
+| review | jsonb | 사후 기록 (원안 37.75): `root_cause`, `mitigation`, `prevention` (Operator가 씀) |
+
+- **상태 3개** ⚙️ (원안 6개 `OPEN` ~ `CLOSED`): 혼자 운영하는 시스템에서 `INVESTIGATING`·`MITIGATED`·`CLOSED`를 구분해 누를 사람이 없다. `open` → `acknowledged`(사람이 봤음, 반복 알림 중지) → `resolved`. 규칙이 15분 동안 다시 걸리지 않으면 자동으로 `resolved`가 된다. 사후 기록은 `review` 칸에 남긴다.
+- **알림**: Incident가 열릴 때, 수준이 올라갈 때, 해결될 때만 WF-010으로 보낸다. `warning`은 화면에만, `high` 이상은 알림. `acknowledged`가 아닌 `critical`은 30분마다 다시 알린다.
+- MTTD = `detected_at − started_at`, MTTR = `resolved_at − started_at`의 평균·중앙값 (원안 37.66·37.67).
+
+### 37.7 자동 완화와 차단기 ⚙️
+
+**자동으로 하는 것은 정해진 규칙뿐이다** (원안 37.51·37.80). AI가 하는 운영 조치는 없다.
+
+| 조치 | 방법 | 한계 |
+|---|---|---|
+| 프로세스 재시작 | 브릿지·ComfyUI·cloudflared는 Windows 작업 스케줄러가 실패 시 1분 뒤 재시작 (25.4), n8n은 Docker `restart: unless-stopped` (26.2) | 작업 스케줄러 재시작 한도: 1시간에 3회. 넘으면 멈춘 채로 두고 Incident `critical` |
+| 멈춘 Job 회수 | `recover_stale_jobs` (이미 있음) | – |
+| 생성 차단기 | 아래 | – |
+| Persona 생성 차단 | 36.5 (Persona 설정 오류) | – |
+
+**생성 차단기** (원안 37.52, V1): ComfyUI·GPU 쪽이 계속 실패할 때 큐 전체를 소모하지 않게 한다. 상태는 `service_circuits(service, state, failures, opened_at, next_probe_at)`에 둔다.
+
+```text
+closed ──(일시 오류로 생성 Job 5개 연속 실패: COMFY_UNREACHABLE, CUDA_ERROR, TIMEOUT, OUT_OF_MEMORY)──▶ open
+open ──(2분 뒤, 이후 4분·8분… 최대 30분)──▶ half_open : WF-003이 Job 하나만 보낸다
+half_open ──(성공)──▶ closed      half_open ──(실패)──▶ open (대기 시간 두 배)
+```
+
+- `open` 동안 WF-003은 생성 Job을 브릿지에 보내지 않는다. Job은 `pending`으로 남고 시도 횟수를 쓰지 않는다 (12장의 "ComfyUI가 꺼져 있으면 선점 전에 503"과 같은 원리를 큐 전체로 넓힘).
+- 차단기가 열리면 Incident(`high`)가 열리고, 닫히면 해결된다.
+- 원안 37.74의 예(타임아웃 증가 → 연속 실패 → 차단 → 알림 → Worker 재시작 → 시험 Job 성공 → 닫힘)가 이 흐름 그대로다.
+
+**재시도 폭주 방지** (원안 37.53): 지수 백오프(30초 → 2분 → 5분 → 15분)는 이미 DB에 있다 (20.11). 여기에 **±20% 지터**를 더한다(`fail_automation_job`이 `run_after`를 계산할 때). 많은 Job이 같은 순간에 실패하면 같은 순간에 다시 몰리기 때문이다. GPU는 Worker 1개라 동시 실행 수가 이미 1이고(20.15), 차단기가 나머지를 막는다.
+
+### 37.8 감시자를 누가 감시하나 ⚙️
+
+원안 37.72: 감시가 멈추면 "모름(UNKNOWN)"이어야 하고, 그것을 "시스템 정지"로 추론하면 안 된다.
+
+| 멈춘 것 | 누가 알아채나 | 알림 경로 |
+|---|---|---|
+| 브릿지, ComfyUI | `evaluate_health` (DB) | WF-010 |
+| n8n | `evaluate_health` (DB) | **DB에서 직접** (`pg_net`으로 Telegram·Slack Webhook 호출). WF-010이 n8n 안에 있어서 n8n이 멈추면 쓸 수 없다 |
+| `evaluate_health` 자체 | 매 실행마다 `workflow_heartbeats`에 `evaluate_health` 행을 갱신. 화면은 이 값이 3분 넘게 오래되면 시스템 상태를 **`UNKNOWN`**으로 표시 | 외부 감시 |
+| Supabase 전체 | **외부 감시** (V1): 무료 외부 업타임 서비스가 5분마다 n8n 공개 상태 주소(`/healthz`)와 Supabase의 공개 상태 RPC(`get_public_health()`: DB가 응답하고 `evaluate_health`가 3분 안에 돌았는지만 `true`/`false`로 돌려줌, 데이터 없음)를 부른다 | 외부 서비스의 Email |
+
+- 브릿지는 Cloudflare Access 뒤에 있어서 외부 감시가 직접 부를 수 없다. 대신 DB에 남은 브릿지 보고 시각을 `get_public_health()`가 함께 확인한다.
+- **감시가 `UNKNOWN`일 때** (원안 37.73): 이미 만든 Job·예약 게시·수집은 계속된다. 다만 `record_ai_decisions`는 `evaluate_health`가 5분 넘게 안 돌았으면 **자동 승인을 하지 않고** 승인 대기로 보낸다. 시스템 상태를 확인할 수 없을 때 자율 행동을 줄이는 Fail Closed다 (33.12). 원안 37.73의 "고위험 자율 행동 제한"을 자동 승인 전체로 넓혔다.
+
+### 37.9 AI와 모니터링
+
+- **AI는 운영 조치를 하지 않는다** ⚙️. 원안 37.78의 `REDUCE_CONCURRENCY`, `PAUSE_PERSONA`, `RETRY_FAILED_JOBS`, `REAUTH_SOCIAL_ACCOUNT`, `REVIEW_CONFIGURATION`은 AI Action으로 두지 않는다. 33.2에서 System Agent를 두지 않기로 했다. 재시도는 DB, 일시정지·재인증·설정 변경은 Operator, 동시 실행 조정은 설정 변경(사람)이다.
+- 원안 37.77의 "AI가 모니터링 데이터를 분석해 추천"도 V2에 두지 않는다. 규칙(37.6)이 사람보다 빨리, 결정적으로 알려준다. 운영 데이터는 Decision Context의 `system` 칸(32.3)으로만 AI에 들어가서, 생성 불가일 때 콘텐츠를 더 만들자고 하지 않게 한다.
+- 원안 37.79의 "Monitoring → Controller"는 이미 있다: WF-015가 시스템 상태가 나쁘면 Run을 건너뛰고(32.2), `record_ai_decisions`가 생성 불가일 때 생성 결정을 자동 승인하지 않는다 (30.10).
+- 원안 37.76의 "Incident에서 배운 규칙"은 Incident `review.prevention`에 적고, 설정 변경은 사람이 한다 (원안과 같음).
+- 원안 37.80의 "AI가 바꾸면 안 되는 것"(OS, 방화벽, 드라이버, 코드, Workflow, 스키마, 자격 증명, 보안 정책): AI에게 그런 도구가 없다 (33.2).
+
+### 37.10 보존 기간 ⚙️
+
+원안 37.61. 지금 `execution_logs`는 "영구"(20.13)이고, 기록 테이블은 지우지 않는다(21.17). 운영이 길어지면 `execution_logs`의 입력·출력 칸이 가장 크게 자란다. 감사와 추적에 필요한 것(누가·언제·무엇·결과·시간)은 남기고 크기만 줄인다.
+
+| 데이터 | 보존 |
+|---|---|
+| `execution_logs` | 행은 영구. **90일이 지나면 `input_data`·`output_data`를 비운다** (pg_cron). 단계·상태·소요 시간·오류·외부 실행 ID는 남아서 추적·지연 시간 통계는 계속된다 |
+| `health_samples` | 30일 |
+| n8n 실행 기록 | 14일 (20.13) |
+| 브릿지 로그 파일 | 30일 (V1부터 파일 회전) |
+| `system_errors`, `incidents`, `state_transitions`, `security_events`, `ai_decisions` | 영구 (감사) |
+| `performance_metrics` | 영구 |
+| 팬 데이터 | 31.13 (1년, Context 30일) |
+
+원안 37.60대로 **운영 기록과 감사 기록은 다르다**: `execution_logs`·`health_samples`는 "어떻게 동작했나", `state_transitions`·`security_events`·`ai_decisions`는 "누가 무엇을 바꿨나"다. 위 정리는 앞쪽만 줄인다.
+
+### 37.11 SLO와 운영 지표
+
+원안 37.64·37.68. SLO는 **화면의 목표선**이고 알림 규칙과 별개다 (원안: "MVP에서는 모니터링 기준으로만").
+
+| SLO | 목표 (30일) | 계산 |
+|---|---|---|
+| 생성 성공 | ≥ 95% | `generation` Job `done` ÷ (`done` + `failed`) |
+| 게시 성공 | ≥ 98% | `publish` Job |
+| 성과 수집 성공 | ≥ 98% | `analytics` Job |
+| 자동화 가용성 | ≥ 99% | `health_samples` 중 시스템 상태가 `MAJOR_OUTAGE`가 아닌 비율 |
+
+운영 지표: 위 성공률, 재시도율(`attempts > 1`), 최종 실패율, 큐 대기 시간 P50·P95, 생성 시간 P50·P95, OOM 횟수, MTTD·MTTR, 열린 Incident 수. 원안 37.68의 AI·업무 지표는 각 장의 화면(29·30·31·35장)에 있고 여기서는 링크만 둔다.
+
+### 37.12 화면 ⚙️
+
+원안 37.55~37.59의 `/monitoring`, `/monitoring/services`, `/monitoring/jobs`, `/monitoring/errors`, `/monitoring/incidents` 중 **Job과 오류는 이미 있는 화면을 쓴다**: `/automation`(Worker·큐·Job 표)과 `/automation/errors`(Error Center). 같은 화면을 두 번 만들지 않는다.
+
+**`/monitoring`** (V1, 18.3에 추가)
+
+| 탭 | 내용 |
+|---|---|
+| 개요 | 시스템 상태(37.4, `UNKNOWN` 포함), 기능별 가능 여부(생성·게시·수집·팬 응답), 열린 Incident, GPU(사용률·VRAM·온도, 24시간 그래프), 큐(job_type별 대기·실행·재시도 대기), 오늘 실패, SLO 목표선 |
+| 서비스 | 서비스별 살아 있음·일할 수 있음, 마지막 신호 시각, 최근 1시간 오류율, 버전(`worker_status.version`), Workflow 신호 표(37.5), 차단기 상태 |
+| Incident | 목록(수준, 제목, 시작, 지속 시간, 영향, 상태), 상세에 원인 행 링크(오류·Job), [확인] [해결], 사후 기록(`review`) |
+| 추이 | `health_samples` 7·30일: VRAM·온도·큐 길이, 생성 시간 P50·P95, MTTD·MTTR |
+
+- Header의 시스템 상태 배지(17장)는 `get_system_status()`를 쓰고, 누르면 `/monitoring`으로 간다.
+- Persona별 상태(원안 37.28·37.29)는 36.9의 `/personas` 운영 칸이다. 원안의 Health Score 숫자는 쓰지 않는다 (36.9와 같은 이유).
+- Error Center에 `resolved_at`과 "같은 Incident의 오류" 묶음 보기를 더한다.
+
+### 37.13 작업 목록과 테스트
+
+| 단계 | 작업 |
+|---|---|
+| MVP | 지금 있는 것(37.1) 유지. 변경 없음 |
+| V1 | `evaluate_health`(pg_cron 1분)와 37.6 V1 규칙, `incidents`, `workflow_heartbeats`·`report_workflow_run`, `service_circuits`와 WF-003의 차단기 확인, `fail_automation_job` 지터, `system_errors.resolved_at`, `health_samples`(5분, 30일), 브릿지 NVML·psutil 수집과 구조화 JSON 로그, `get_system_status`, `get_trace`, `get_public_health`, `pg_net` 직접 알림, 외부 업타임 감시 설정, `execution_logs` 90일 정리, `/monitoring` |
+| V2 | AI·팬 규칙 (37.6), Post·Conversation·Decision 상세 타임라인 |
+| V2b | 비용 급증 규칙 (32.13 이후) |
+| Long-term | 최적화 규칙, 외부 관측 스택(OpenTelemetry, 시계열·로그 저장소), 통계 기반 이상 감지 (원안 37.62·37.69) |
+
+| 경우 | 기대 |
+|---|---|
+| 브릿지 종료, 생성 대기 Job 있음 | 90초 뒤 Incident `critical`, WF-010 알림, 시스템 상태 `PARTIAL_OUTAGE` |
+| 브릿지 다시 켬 | 15분 동안 재발 없으면 Incident 자동 `resolved`, MTTR 기록 |
+| 같은 `COMFY_UNREACHABLE` 100번 | Incident 1개, `occurrences = 100` |
+| 생성 Job 5개 연속 `CUDA_ERROR` | 차단기 `open`, 새 Job 전송 중지(시도 횟수 소모 없음), 2분 뒤 시험 Job 1개 |
+| 시험 Job 성공 | `closed`, 큐 재개, Incident 해결 |
+| WF-009 Schedule을 끔 | 예상 주기 × 3 뒤 `FAILING`, Incident `critical` (오류 행이 하나도 없어도) |
+| n8n 컨테이너 정지 | 3분 뒤 DB가 `pg_net`으로 직접 알림 |
+| `evaluate_health` 정지 | 화면 `UNKNOWN`, 5분 뒤부터 자동 승인 대신 승인 대기, 외부 감시 경고 |
+| Supabase 응답 없음 | 외부 감시가 Email |
+| Instagram 토큰 23시간 남음 | Incident `high` |
+| 같은 순간 실패한 Job 20개 | 다시 시도 시각이 ±20% 범위로 흩어짐 |
+| 90일 지난 `execution_logs` | 입력·출력 칸만 비고 행·소요 시간은 남음 |
+
+### 37.14 원안 조정
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 범위 | 새 계층 | 이미 있는 추적·오류·Worker 상태를 정리하고 빈틈만 | 37.1 |
+| Correlation ID | `corr_{uuid}` 모든 로그에 | 뿌리 행 ID + FK 연결, 로그에는 뿌리·Job ID | 31.15·32.14와 같은 방식, 새 칸 없이 |
+| 오류 분류 | 14종 | `service` × `error_type`(8) × `error_code` 대응표 | 이미 세 칸이 있음 |
+| `system_errors` 추가 칸 | 9개 | `resolved_at`만 | 나머지는 있거나 FK로 따라감 |
+| 심각도 | 오류·알림 두 체계 | 오류는 20.12 그대로, 수준은 Incident에만 | 수준이 필요한 것은 Incident |
+| GPU·Workflow·서비스 상태 | 상태 값 | 신호로 계산, 저장하지 않음 | 상태와 신호가 어긋나지 않게 |
+| GPU 지표 | 사용률·온도·전력 | NVML·psutil 추가 (ComfyUI API에 없음) | 데이터 출처 |
+| 추이 | 시계열 | `health_samples` 5분·30일 | 현재 값만 있었음 |
+| 조용한 정지 | 언급 없음 | `workflow_heartbeats` | 일정 Workflow가 멈추면 오류가 안 남음 |
+| Health Monitor | n8n `[PA] 016` | DB pg_cron `evaluate_health` | 016은 Token Refresh, n8n도 감시 대상 |
+| Incident 상태 | 6개 | 3개 + 사후 기록 칸, 자동 해결 | 혼자 운영, 누를 사람이 없는 상태 제외 |
+| 알림 | 수준별 | Incident 열림·상승·해결 때만, `critical`은 30분 반복 | 중복 제거 |
+| 차단기 | 원칙 | 생성 차단기 (5회, 2분부터 두 배, 최대 30분) | 큐 소모 방지 |
+| 재시도 폭주 | 백오프 + 지터 + 동시성 + 차단기 | 지터 ±20% 추가 (나머지는 있음) | – |
+| 자동 재시작 | 최대 횟수 | 프로세스 감시자(작업 스케줄러·Docker), 1시간 3회 | 이미 있는 재시작 경로 |
+| 감시자 감시 | `UNKNOWN` | `evaluate_health` 신호, `pg_net` 직접 알림, 외부 업타임 감시, `get_public_health` | n8n·Supabase가 멈출 때도 알림 |
+| 감시 불가 시 | 고위험 자율 행동 제한 | 자동 승인 전체를 승인 대기로 | Fail Closed |
+| AI 운영 조치 | 6개 Action | 두지 않음 | System Agent 없음 (33.2) |
+| AI 모니터링 분석 | 추천 | 두지 않음, `system` 칸만 | 규칙이 더 빠르고 결정적 |
+| 최적화 불안정 | 하루 변경 수 | 롤백 반복 | 하루 1건 제한(35.5)으로 불가능 |
+| 보존 | 종류별 | `execution_logs`는 90일 뒤 입력·출력만 비움 | 추적·감사 유지, 크기만 줄임 |
+| 화면 | `/monitoring` 아래 5개 | `/monitoring` 4탭, Job·오류는 기존 `/automation`·Error Center | 같은 화면 두 번 만들지 않음 |
+| Health Score | 숫자 | 쓰지 않음 | 36.9 |
