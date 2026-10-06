@@ -11210,3 +11210,353 @@ half_open ──(15분 동안 시간당 속도가 기준 아래)──▶ closed
 | Experiment ROI | 개선 ÷ 비용 | 나란히 표시, 나눈 값 없음 | 단위 없는 숫자 |
 | 한도 재배분 | AI 제안 | 사용률 표시만 | AI 운영 조치 없음 (37.9) |
 | 화면 | 4개 경로 | `/monitoring` 탭 + Persona `limits` 탭 + Job 상세 | 같은 정보를 여러 곳에 두지 않음 |
+
+---
+
+## 40. Final Production Architecture & Master Specification ✅
+
+> 1~39장의 결정을 **하나의 기준 문서로 모은 요약·색인**이다. 새 기능을 정하지 않는다. 원안 40은 앞 장들이 조정하기 전의 이름·번호·상태를 많이 담고 있어서(예: Workflow `[PA] 016 System Health Monitor`, Content Job `REVIEW` 상태, `corr_` ID, 3단계 환경), 이 장은 원안의 구성을 따르되 **확정된 결정으로 바로잡아** 적는다. 바로잡은 곳은 40.18에 모았다.
+
+### 40.1 이 문서를 읽는 법
+
+- **정본 규칙**: 이 장은 요약이다. 세부 규칙의 정본은 괄호 안의 절이다. 둘이 다르면 그 절이 맞고, 이 장을 고친다.
+- **같은 절 안에서는 마지막 결정이 이긴다.** 앞 절이 뒤 절에서 바뀐 경우 앞 절에 ⚙️ 안내가 있다 (예: 15.19 → 33장, 32.9 → 34장, 30.11 게시 계획 → 35.2).
+- **단계 표기**: MVP / V1 / V2(V2a) / V2b / Long-term (40.4). 문서 전체가 이 다섯 개만 쓴다.
+- 처음 읽는다면: 9장(아키텍처) → 10장(DB) → 11장(상태) → 16장(구현 계획) → 27장(MVP E2E) → 이 장.
+
+### 40.2 제품과 불변 원칙
+
+**제품**: 버추얼 인플루언서 한 명을 하나의 AI 운영 단위로 보고, 콘텐츠 → 게시 → 팬 → 성과 → 결정 → 다음 콘텐츠를 반복하는 시스템 (PRD 1~3장). 중심 Entity는 **Content Job**이다 (10.1). 팬 상호작용은 Conversation을 중심으로 한 두 번째 루프다 (31장).
+
+**바뀌지 않는 원칙** (원안 40.64의 18개를 이 시스템의 근거와 함께)
+
+| # | 원칙 | 어떻게 지키나 |
+|---|---|---|
+| 1 | AI는 실행자가 아니다 | LLM은 Structured Output만 돌려준다. 실행은 DB 함수와 Job (11.11, 33.2) |
+| 2 | 모든 실행은 Job이다 | `automation_jobs` (10.15). AI 결정도 `decision` Job (30.4) |
+| 3 | 재시도 ≠ 중복 | 멱등 키 Unique (14.17), 게시 checkpoint (28.9), 복원 뒤 정합 맞추기 (38.7) |
+| 4 | 중요한 작업은 감사 가능 | `state_transitions`, `security_events`, `ai_decisions`(정책 버전 포함) (11.14, 15.22, 33.11) |
+| 5 | Persona는 독립 운영 단위 | 모든 테이블에 `persona_id`, RLS (36.1) |
+| 6 | 공유 인프라와 Persona 데이터 분리 | 36장 |
+| 7 | LLM 장애가 전체 장애가 아니다 | AI 전용·팬 전용 LLM 한도, 장애 격리 표 (30.13, 31.10, 32.7) |
+| 8 | GPU 장애가 데이터 손실이 아니다 | PC에 정본 없음 (38.1) |
+| 9 | 권한 ≠ 자율 수준 | 정책 문서의 `min_level`·`auto_min_level` (33.5) |
+| 10 | 예산 ≠ 권한 | 권한은 Job 만들 때, 예산은 실행 직전 (39.4) |
+| 11 | 안전은 AI보다 위 | 코드에 고정된 하한, 조이기만 가능 (33.4) |
+| 12 | 사람이 언제든 멈춘다 | 전역 3개 + 플랫폼 + Persona 정지 (32.6, 33.10) |
+| 13 | 중요한 변경은 되돌릴 수 있다 | 정책·Strategy는 insert만 하는 버전 (33.5, 35.4) |
+| 14 | 백업보다 복원 시험 | 주간 복원 검증, 분기 훈련 (38.6, 38.9) |
+| 15 | 작은 표본으로 전략을 바꾸지 않는다 | 표본 수준, 실험 Variant당 10개 + 검정 (29.12, 34.7) |
+| 16 | AI Confidence ≠ 통계적 확률 | 표시는 AI 값과 표본 수준 중 낮은 쪽, 실험 판정은 Mann-Whitney (29.12, 34.7) |
+| 17 | AI는 `no_action`을 고를 수 있다 | 정상 종료 상태 (30.8) |
+| 18 | 자동화는 점진적으로 | 권한 수준 0→3, Level 4 승급 조건 (32.10) |
+
+### 40.3 아키텍처: 네 영역과 구성 요소 책임
+
+```text
+                    Operator (Google 로그인)
+                          │
+                 Lovable (Control Center, 브라우저)
+                          │  publishable key + JWT (RLS)
+   ┌──────────────────────▼──────────────────────┐
+   │ Supabase  Auth · DB(Source of Truth) · Storage · Realtime · Vault · pg_cron │
+   │           정책·권한·예산 판정은 여기의 DB 함수가 한다 (33.6, 39.4)          │
+   └──────┬──────────────────────────────────────────┬──────────────┘
+          │ service_role (n8n용 secret key)            │ service_role (브릿지용 secret key)
+   ┌──────▼──────────────────────────┐        ┌────────▼────────────────────────┐
+   │ n8n (원격 서버, Docker)          │        │ Python 브릿지 (RTX 5080 PC)      │
+   │ WF-001~017, SNS Adapter 하위 WF,  │ ─────▶ │ /v1/jobs  (Cloudflare Tunnel +   │
+   │ LLM 하위 WF (Claude API)         │ 터널   │  Access + Bridge Token, 15.13)   │
+   └──────┬────────────────┬─────────┘        └────────┬────────────────────────┘
+          │                │                           │ 127.0.0.1
+     SNS API (공식)    Claude API                   ComfyUI → RTX 5080
+```
+
+| 영역 (원안 40.4) | 구성 요소 | 책임 | 하지 않는 것 |
+|---|---|---|---|
+| Control | **Lovable** | 화면, 로그인, Operator RPC 호출, Realtime 구독 (17·18·22장) | 비밀값 보관, GPU·SNS 직접 호출, 자동 실행 (18.1) |
+| Control | **Supabase** | 정본 데이터, RLS, 상태 전이 강제, 한도·권한·예산 판정, pg_cron(회수·만료·평가·샘플링), Vault(SNS 토큰) (10·11·15·21장) | – |
+| Intelligence | **LLM 하위 Workflow** (`[PA] LLM Structured Call`) + Context RPC | Agent 6종(Prompt, Caption, Analytics, Strategy, Fan, Memory)의 호출 (33.2). 운영 LLM은 **Claude API** (16장, `PA Anthropic`) | DB·API·파일 접근, Tool 호출 (33.2) |
+| Orchestration | **n8n** | Job 선점·전달, 일정, Adapter 호출, 알림 (14·20장) | 판단, 권한 판정 (DB가 함), 셸 명령 (15.9) |
+| Execution | **Python 브릿지** | Registry Workflow 조립 → ComfyUI 실행 → 검증 → Storage 업로드 → 결과 보고 (19장) | 임의 명령·경로·URL, Workflow JSON 수신 (15.8) |
+| Execution | **ComfyUI + RTX 5080** | 이미지 생성 (13장) | 외부 접속 (127.0.0.1만, 15.7) |
+| Execution | **SNS Adapter** = n8n 하위 Workflow `[PA] SNS - {Platform} - {Operation}` | 게시·지표·메시지·답장 (12.8, 28.2) | 토큰을 상위 Workflow에 노출 (28.6) |
+
+**Claude의 두 역할** (원안 40.48·40.49 조정): 운영 시스템 안의 LLM이 Claude API이고, 개발할 때 코드·SQL·Workflow를 만드는 도구로도 Claude(Claude Code)를 쓴다. 둘은 별개다. 운영 LLM은 LLM 하위 Workflow 하나에서만 호출하므로, 제공자를 바꾸더라도 그 Workflow와 Credential, 단가(`cost_rates`), Structured Output 호출 방식만 바꾸면 된다. 지금 바꿀 계획은 없다.
+
+### 40.4 단계와 마일스톤
+
+| 단계 | 마일스톤 | 범위 (요약) | PRD 자율성 | Persona 권한 수준 |
+|---|---|---|---|---|
+| **MVP** | M0 환경, M1 DB, M2 브릿지, M3 n8n, M4 Lovable, M5 통합 (16장) | Persona, Content Job → 프롬프트 → 생성 → Asset → 캡션 초안. 재시도·오류·회수, RLS, 하루 DB 백업 | L2 (정해진 Workflow 자동 실행) | 없음 |
+| **V1** | M6 계정, M7 승인·게시, M8 성과·알림 (16.11) | Instagram 연결, 사람 승인 게시, 예약, 성과 수집(1·6·24·48·168h), 분석 대시보드(29), 알림, 감시·Incident(37), 오프사이트 백업(38) | L2 (모든 게시를 사람이 승인) | 없음 |
+| **V2 (V2a)** | M9 AI 결정, M10 팬 | AI Decision(수동·매일, Level 0~2), 성과 분석, 팬 수집·초안·사람 승인, Memory, 정책 버전(33), `/safety` | L3 시작 | `agent` 0~2, `fan` 0~1 |
+| **V2b** | V2b (M10 이후, 16.11) | 예약 제안, 전략 제안, 팬 저위험 자동 응답, Strategy 저장(35.2~35.4), 금액 한도(39), 비용 추정 | L3 | `agent` 0~3, `fan` 0~3 |
+| **Long-term** | M11 이후 | WF-015 이벤트 루프, 실험(34), 최적화 롤아웃(35.5~), Level 4 자동 게시, 교차 Persona 학습, 역할, Bandit | L4~L5 | `agent` 4~5 (승급 조건 32.10), `fan`은 3이 상한 (33.15) |
+
+원안 40.19·40.57~40.60의 "MVP L0~L1(Instagram·AI 추천 포함), V1 L1~L2(실험·최적화 포함)"는 PRD와 16장의 순서와 다르다. 이 시스템은 **먼저 사람이 시키는 일을 안정적으로 자동 실행하고(MVP), 그다음 게시(V1), 그다음 AI 판단(V2)**을 올린다. AI 판단 없이도 쓸 수 있는 제품이 먼저 있어야, AI가 실패해도 기본 시스템이 돈다 (원칙 7).
+
+### 40.5 데이터 모델 지도
+
+| 영역 | 테이블 | 단계 | 절 |
+|---|---|---|---|
+| 신원 | `users`, `personas`, `persona_assets`, `persona_platform_settings` | MVP / V2 | 10.4~10.6, 36.3 |
+| 콘텐츠 | `content_jobs`, `assets`, `comfy_workflows` | MVP | 10.7·10.8, 12.5 |
+| 실행 | `automation_jobs`, `execution_logs`, `system_errors`, `state_transitions` | MVP | 10.15·10.16·10.19, 11.14 |
+| 설정·보안 | `app_settings`, `security_events`, `worker_status`, `private.usage_counters` | MVP | 15.3, 15.22, 17.4, 0008 |
+| SNS | `social_accounts`(토큰은 Vault), `posts`, `approvals`, `oauth_states`, `performance_metrics` | MVP 구조 / V1 | 10.9~10.11, 10.18, 28장, 29.3 |
+| 분석 | (계산 함수) + `performance_analyses` | V1 / V2 | 29.13, 29.16 |
+| AI | `ai_decisions`, `agent_policy_versions` | V2 | 30.7, 33.5 |
+| 팬 | `conversations`, `messages`, `fan_memories` | V2 | 31.4, 31.11 |
+| 전략 | `strategy_versions` / `optimization_runs`, `strategy_locks` | V2b / Long-term | 35.4 |
+| 실험 | `experiments`, `experiment_variants`, `experiment_samples` | Long-term | 34.3 |
+| 감시 | `monitoring_metrics`, `monitoring_events`, `monitoring_alerts`, `monitoring_incidents`, `workflow_heartbeats`, `service_circuits` | V1 | 37-A, 37.5, 37.7 |
+| 비용 | `monitoring_usage`, `cost_rates` | V1 | 37-A.5, 39.2 |
+| 백업 | `backup_runs`, `recovery_runs` | V1 | 38.10 |
+
+원안 40.8·40.9의 테이블 중 **만들지 않는 것**과 대신하는 것: `optimization_strategies`·`persona_strategy_states` → `strategy_versions`의 Champion (35.4). `resource_quotas`·`persona_resource_quotas` → `personas.limits_override` (36.4, 39.3). `persona_permissions` → Long-term `persona_members` (36.3). `permission_audit_logs` → `ai_decisions`의 `agent`·`permission`·`policy_version`·`risk_factors` (33.11). `service_health_snapshots`·`gpu_health_snapshots`·`queue_metrics`·`system_metrics` → `monitoring_metrics` (37-A.2). `alerts`·`incidents` → `monitoring_alerts`·`monitoring_incidents` (37-A.4). `resource_usage` → `monitoring_usage` (37-A.5). `budget_events` → Alert 규칙 (39.11). `strategy_metrics` → 계산 (35.9). `backup_manifests`·`restore_events` → `backup_runs.manifest`·`recovery_runs` (38.10). `monitoring_traces` → `execution_logs` + 뿌리 행 (37.2, 37-A.1).
+
+**격리** (원안 40.10·40.11): 위 테이블 중 Persona 데이터는 모두 `persona_id`를 갖고, RLS는 `auth.uid() = personas.user_id` → `persona_id`로 거른다. 쓰기는 RPC만 (11.12). `service_role`은 n8n·브릿지·pg_cron만 쓰고 각자 다른 secret key다 (15.6). Lovable·브라우저·LLM에는 절대 없다. 전체 인프라 데이터(`worker_status`, `monitoring_events`, Persona 없는 지표)는 모든 Operator가 읽는다 (37-A.6).
+
+### 40.6 상태 머신 정본
+
+원안 40.12~40.14의 상태 이름은 앞 장의 정본과 다르다. 아래가 정본이다.
+
+| 대상 | 상태 | 절 |
+|---|---|---|
+| Content Job | `draft` → `queued` → `generating` → `ready` → `published`, 그리고 `failed`·`cancelled` | 11.3 |
+| Automation Job | `pending` → `processing` → `done` / `failed` / `cancelled`. 재시도 대기 = `pending` + 미래 `run_after`, 최종 실패 = `failed`, 예산 미룸 = `pending` + `result.deferred` | 11.4, 39.4 |
+| Asset | `generated` / `approved` / `rejected` / `archived` | 11.7 |
+| Post | `draft` → `pending_approval` → `approved` → `scheduled` → `publishing` → `published`, 그리고 `failed`·`rejected`·`cancelled` | 11.8 |
+| Approval | `pending` → `approved` / `rejected` / `expired` / `cancelled` | 11.10 |
+| AI Decision | `invalid`, `blocked`, `duplicate`, `no_action`, `pending_approval`, `approved`, `rejected`, `expired`, `superseded`, `executed`, `failed` | 30.8 |
+| Conversation | `active` / `paused` / `blocked` / `closed` + `needs_reply`·`flags` | 31.4 |
+| 실험 | `draft` / `running` / `paused` / `analyzing` / `completed` / `cancelled` + `result` | 34.4 |
+| 최적화 Run | `pending_approval`, `rollout`, `held`, `awaiting_promotion`, `promoted`, `rolled_back`, `rejected`, `expired`, `ended` | 35.5 |
+| Alert / Incident | `open`, `acknowledged`, `resolved`, (`suppressed`, Alert만) | 37-A.4 |
+| Persona | 저장: `active` / `inactive` + `agent_paused`. 화면 표시(원안 40.14의 상태 9개)는 계산 | 32.6, 36.2 |
+
+- 원안 40.12의 Content Job `GENERATED → REVIEW → APPROVED → SCHEDULED → PUBLISHING`은 **Content Job 상태가 아니다.** 검토·승인·예약·게시는 **Post**와 **Approval**의 상태다 (Asset 하나를 여러 Post로 게시할 수 있으므로, 10.10).
+- 원안 40.13의 `CLAIMED`·`RUNNING`·`SUCCEEDED`·`RETRY_WAIT`·`DEAD`는 위 Automation Job 5개 상태로 표현된다 (31.5 대응표).
+
+### 40.7 Workflow·일정 레지스트리 정본
+
+원안 40.20의 번호 001~021은 앞 장들이 정한 번호와 다르다. **정본은 14.3**이다.
+
+| 번호 | 이름 | 단계 | 원안 번호 |
+|---|---|---|---|
+| WF-001 | Content Job Dispatcher | MVP | 001 |
+| WF-002 | Prompt Generator | MVP | (002 Image Generation의 앞부분) |
+| WF-003 | Generation Dispatcher (생성 차단기 확인, 37.7) | MVP | 002 |
+| WF-004 | Generation Result Handler | MVP | – |
+| WF-005 | Caption Generator | MVP | – |
+| WF-006 | Error Handler | MVP | 005 |
+| WF-007 | SNS Publisher | V1 | 006 |
+| WF-008 | Scheduled Publisher | V1 | 007 |
+| WF-009 | Performance Collector | V1 | 009 |
+| WF-010 | Notification | V1 | – |
+| WF-011 | AI Performance Analyzer | V2 | – |
+| WF-012 | AI Strategy Runner | V2 | 010 |
+| WF-013 | Fan Message Processor | V2 | 011 |
+| WF-014 | Fan Memory | V2 | 013 |
+| WF-015 | Autonomous Operation Controller (이벤트 감지만) | Long-term | 020 |
+| WF-016 | Token Refresh | V1 | 008 |
+| WF-017 | Fan Reply Sender | V2 | 012 |
+| 하위 | `[PA] LLM Structured Call`, `[PA] SNS - Instagram - {Connect, Publish, Metrics, ValidateAccount, Messages, Reply}` | MVP / V1 / V2 | – |
+
+**Workflow로 만들지 않는 것** (원안 번호 → 대신하는 것)
+
+| 원안 | 대신 | 이유 |
+|---|---|---|
+| 003 Generation Monitor, 004 Retry Handler | DB `fail_automation_job` 재시도 + pg_cron `recover_stale_jobs` | 14.3 |
+| 014 Experiment Manager | pg_cron `advance_experiments` (30분) | 외부 호출 없음 (34.6) |
+| 015 Self Optimization Engine | pg_cron `advance_optimizations` (1시간) | 35.10 |
+| 016 System Health Monitor | pg_cron `evaluate_health` (1분), `sample_metrics` (5분) | n8n도 감시 대상 (37.6) |
+| 017 Backup & Verification, 019 Restore Verification | 서버 systemd timer `deploy/backup/backup.sh`, `verify.sh` | n8n은 셸 명령을 막음 (38.3) |
+| 018 Disaster Recovery | 사람이 따르는 절차 | 판단이 필요 (38.8) |
+| 021 Resource & Budget Controller | DB 세 지점 (만들 때, LLM 직전, GPU 선점) | 우회 불가 (39.4) |
+
+**pg_cron** (Supabase): `recover_stale_jobs` 1분, `expire_approvals` 5분, `evaluate_health` 1분, `sample_metrics` 5분, `evaluate_ai_decisions` 매일 07:00, 보존 정리(Context 30일, 대화 1년, `execution_logs` 출력 90일, 지표 30일, 이벤트 1년), Asset 정리(`generated` 60일 → 보관, 보관 30일 → 파일 삭제), Long-term: `advance_experiments`, `advance_optimizations`.
+
+**하루 흐름**: 07:00 결정 평가 → 08:00 WF-011 분석 → 09:00 WF-012 매일 결정 (32.11).
+
+### 40.8 실행 판정 파이프라인
+
+원안 40.1·40.16의 파이프라인을 실제 위치로 적는다.
+
+```text
+LLM 출력 (Structured Output, 스키마에 실행 칸 없음)
+ → [n8n] JSON Schema, 문장 숫자 금지·근거 ref 확인 (29.15, 30.8 1~2)
+ → [DB record_ai_decisions, 한 트랜잭션] 33.6의 10단계:
+     긴급 정지 → 하한 → 플랫폼 정책 → Persona 정책 → Agent 역할 → Action 정책
+     → 위험도(상향 포함) → 예산·한도·냉각·중복 → 자동 조건 → 판정
+     ALLOW / ALLOW_WITH_LIMIT → 실행 (Content Job 생성 등)
+     REQUIRE_APPROVAL → approvals → 사람 → 실행
+     DENY / EMERGENCY_BLOCK → blocked·invalid
+ → [실행 직전] LLM 금액 예약, GPU 선점 시 Persona GPU 분 (39.4 ②③) → 실행 / 미룸
+ → 결과 → 성과 → 평가 → 다음 Context
+```
+
+정책 충돌은 **가장 제한적인 결과가 이긴다** (33.6). 사람 승인이 언제나 필요한 것: 게시(Level 4 차단 범주 밖의 예외 제외, 33.8), 전략 변경(`propose_strategy`), HIGH·CRITICAL 위험, 롤아웃 시작·Champion 승격 (33.4, 35.7). AI에게 아예 없는 것: 삭제, Persona 정체성 변경, 자동화·정책·한도 변경, 자격 증명·금전·보안 행동 (33.3).
+
+### 40.9 파이프라인별 요약
+
+| 흐름 | 요약 | 절 |
+|---|---|---|
+| 생성 | Content Job `queued` → WF-001 선점 → `prompt` Job(WF-002, LLM) → `generation` Job(WF-003 → 브릿지 → ComfyUI) → 검증·업로드 → Asset → `caption` Job(WF-005) → Post `draft` | 14·19·20장 |
+| 게시 | Post 승인 → 예약 → WF-008 → `publish` Job → 게시 전 검사 10개 → Instagram 컨테이너 → 게시 → `external_post_id` → 수집 Job 5개 | 28.8·28.9 |
+| 성과 | WF-009 → `record_metrics`(참여율 계산·품질 표시) → 기준선(최근 20개 중앙값) → 점수 → 차원 분석 | 29장 |
+| AI 결정 | `decision` Job → Decision Context → Strategy Agent → 검증 → `record_ai_decisions` → 실행·승인 → 평가 | 30장 |
+| 팬 | Webhook(서명 확인) → 저장(중복 제거) → 60초 묶음 → Fan Agent → 위험 분류(규칙·LLM·채널 최댓값) → 승인·자동 → WF-017 → Memory Job | 31장 |
+| 실험 | 가설(닫힌 변수 목록) → 짝 무작위 배정 → 24h 지표 → Mann-Whitney → 결과 | 34장 (Long-term) |
+| 최적화 | `variant_wins` → 후보(±20%p, 차원 하나) → 사람 승인 → 25 → 50% → 사람 승격 / 자동 롤백 | 35장 (Long-term) |
+
+원안 40.28의 Snapshot `INITIAL`은 두지 않는다 (29.4). 원안 40.30의 롤아웃 10 → 25 → 50 → 100%는 게시 빈도에 따라 정한다(기본 25 → 50, 100%는 승격) (35.6).
+
+### 40.10 정지·장애·복구 요약
+
+| 상황 | 결과 | 절 |
+|---|---|---|
+| 전역 긴급 정지 `emergency_stop_all` | `publishing_enabled`·`agent_enabled`·`generation_enabled` 모두 끔. 진행 중 작업은 마무리, 수집·감시·백업·복구는 계속, 다시 켤 때는 스위치마다 | 32.6 |
+| 플랫폼 정지 | `platform_controls`: 그 플랫폼 게시·답장·AI Action만 | 33.10 |
+| Persona 정지 | `agent_paused`: 그 Persona의 AI·자동 응답만 | 32.6 |
+| LLM 장애 | 새 프롬프트·결정·초안 없음. 예약 게시·수집·프롬프트 있는 생성은 계속 | 32.7 |
+| GPU·PC 장애 | 생성만 멈춤 (`pending`), 생성 차단기 | 32.7, 37.7 |
+| n8n 장애 | DB가 감지해 `pg_net`으로 직접 알림, 재시작 시 안전망 Polling | 37.8 |
+| Supabase 장애 | 외부 업타임 감시가 알림. 복구 후 정합 맞추기 | 37.8, 38.7 |
+| 감시 정지 | 화면 `UNKNOWN`, AI 자동 승인 중지 | 37.8 |
+| 예산 소진 | 실험 → AI 자동 승인 → 새 실행 순으로 줄임. 게시·수집 보호 | 39.5 |
+| 재해 D01~D12 | 공통 순서: 멈춤 → 기록 → 복원 → 검증 → 정합 → 시험 → 단계 재개 | 38.8 |
+
+원안 40.38의 복구 순서와 40.54의 "Supabase 장애 시 로컬 감시 계속"은 38.8·37.8과 같다. 원안의 Incident 상태 6개(40.35)는 3개다 (37-A.4).
+
+### 40.11 추적, 비용, 백업 요약
+
+- **추적** (원안 40.34): `corr_` ID 없이 뿌리 행(Content Job·Post·Conversation·Decision Run) → FK 연결 → `execution_logs`(= Span). `get_trace`가 타임라인을 만든다 (37.2).
+- **비용** (원안 40.40·40.41): 사용량은 `monitoring_usage`, 금액은 그 시점의 `cost_rates`로 계산. LLM은 금액, GPU는 분, Storage는 GB로 통제. AI에게는 금액이 아니라 예산 상태·비율만 준다 (39.1·39.8).
+- **백업** (원안 40.37): DB 6시간 덤프(V1) + Supabase 자체 백업 + 다른 회사 오프사이트(Object Lock). 쓰이는 Asset·참조 파일 증분. 서버에는 암호화 공개키·쓰기 전용 키만 (38.3·38.4).
+
+### 40.12 환경과 배포 ⚙️
+
+원안 40.42의 Development → Staging → Production 3단계는 두지 않는다 (19.18: PC 한 대, staging 없음).
+
+| 환경 | 구성 | 쓰임 |
+|---|---|---|
+| 로컬 테스트 | `pgserver` 내장 PostgreSQL + Supabase 흉내 스키마(`supabase/tests/stubs`), 가짜 ComfyUI·LLM | `tests/db`, `tests/bridge` (16.12) |
+| 운영 | Supabase 프로젝트 1개, n8n 서버 1대, PC 1대, Lovable 1개 | 실제 운영 |
+| 임시 (필요할 때) | 무료 등급 Supabase 프로젝트 | 분기 복원 훈련 (38.9), 위험한 마이그레이션 사전 시험 |
+
+Staging이 필요해지는 시점(사람이 둘 이상, Persona가 많아짐)에는 운영과 같은 구성을 하나 더 만든다. 그때도 코드 차이가 아니라 `.env`·Credential 값만 다르다.
+
+**배포 단위**
+
+| 대상 | 방법 | 절 |
+|---|---|---|
+| DB | `supabase/migrations/` 번호 순서대로 적용 → `verify_production.sql` | 24장 |
+| n8n | Docker Compose + Caddy, Workflow JSON import (정본은 저장소 `n8n/`) | 26장, n8n_guide |
+| 브릿지 | PC에서 venv + 작업 스케줄러 자동 시작, Cloudflare Tunnel | 25장 |
+| Lovable | 23장 Master Prompt와 Phase별 프롬프트 | 22·23장 |
+| 백업 | n8n 서버 systemd timer | 38.3 |
+
+**비밀값** (원안 40.43): Git·설정 파일에 넣지 않는다. 위치는 15.6 표가 정본이다 (n8n Credential, PC `.env`(사용자 권한만), Supabase Vault, 오프라인 보관).
+
+### 40.13 저장소 구조 ⚙️
+
+원안 40.44의 구조(`lovable/`, `execution/app/api/services/…`) 대신 **지금 저장소**가 정본이다.
+
+```text
+persona-automation-agent/
+├── app/                  Python 브릿지 (api.py, worker.py, comfyui/, database.py, storage.py, security.py, …)
+├── workflows/            ComfyUI Workflow 템플릿 + registry.json
+├── n8n/                  n8n Workflow JSON (pa_001 ~ pa_006, pa_llm_structured_call, V1~ 추가)
+├── supabase/
+│   ├── migrations/       0001 ~ 0008 (V1부터 0009~)
+│   ├── tests/stubs/      로컬 테스트용 흉내 스키마
+│   └── verify_production.sql
+├── tests/                db/, bridge/
+├── deploy/
+│   ├── n8n/              docker-compose.yml, Caddyfile
+│   ├── backup/           (V1) backup.sh, verify.sh, systemd timer        38.3
+│   └── local/            (V1) models.manifest.json, comfy_nodes.lock, verify_models.py   38.8
+├── docs/                 PRD.md, TECH_DESIGN.md, lovable_master_prompt.md, n8n_guide.md
+└── README.md
+```
+
+Lovable 앱 코드는 Lovable 프로젝트(그리고 그것이 연결한 GitHub 저장소)에 있다. 이 저장소에는 Lovable에 줄 프롬프트(`docs/lovable_master_prompt.md`)만 둔다 (23장).
+
+### 40.14 API·Storage 경계 ⚙️
+
+| 경계 | 정본 | 원안과 다른 점 |
+|---|---|---|
+| Lovable → Supabase | 테이블 조회(RLS) + Operator RPC + Realtime (12장) | – |
+| n8n → 브릿지 | `POST /v1/jobs`(Job ID만), `GET /v1/health`, `GET /v1/status`, `POST /v1/jobs/{id}/cancel` (12.6) | 원안의 `/jobs/generate`, `/assets/validate` 없음 (검증은 브릿지 내부) |
+| 브릿지 → n8n | 콜백 Webhook `/webhook/pa/generation-result` (12.7) | – |
+| n8n → LLM | `[PA] LLM Structured Call` 하나 (Claude API, Structured Output) | – |
+| n8n → SNS | `[PA] SNS - {Platform} - {Operation}`, 공식 API만 (12.8) | 원안 40.25의 TypeScript Interface 대신 n8n 하위 Workflow (28.2). `schedulePost`는 우리 시스템이, `deletePost`는 없음 |
+| 브릿지 → ComfyUI | `127.0.0.1:8188` | – |
+
+**Storage 경로** (원안 40.24 조정, 15.5·28.9)
+
+| 버킷 | 경로 | 공개 |
+|---|---|---|
+| `media` | `persona/{persona_id}/assets/{asset_id}.{ext}`, 게시용 `{asset_id}_publish.jpg` | 공개 (추측할 수 없는 uuid, 목록 조회 정책 없음) |
+| `persona-private` | `persona/{persona_id}/refs/…` (Face·Style·Character Reference, LoRA 원본) | 비공개 (Signed URL) |
+
+원안의 `{user_id}/{persona_id}/{content_job_id}/image_001.png`는 쓰지 않는다. 파일명에 순서·주제를 넣지 않고 Asset ID만 쓴다 (15.5).
+
+### 40.15 화면 경로 정본
+
+18.3이 정본이다. MVP: `/login`, `/dashboard`, `/personas`, `/personas/:id`, `/content-jobs`(`/new`, `/:id`), `/assets`(`/:id`), `/automation`, `/automation/errors`, `/settings`. V1: `/social`, `/posts`(`/:id`), `/approvals`, `/analytics`, `/monitoring`(개요·서비스·Incident·추이·백업·복구·비용 탭). V2: `/ai-decisions`, `/ai-activity`, `/conversations`(`/:id`), `/strategy`, `/safety`. V2b: `/optimization`(보기·수정). Long-term: `/experiments`(`/:id`), `/optimization` 롤아웃.
+
+### 40.16 Production 준비 체크리스트
+
+원안 40.61의 항목을 **단계별**로 나눈다. 각 단계의 완료 조건은 해당 절에 있다.
+
+| 단계 | 완료 조건 | 시험 |
+|---|---|---|
+| MVP | 16장 M0~M5 Definition of Done, 보안 체크리스트 MVP (15.15), 격리 테스트 (36.12) | **27장 MVP E2E** (브라우저를 닫은 채 생성 완료) |
+| V1 | 28.14 작업, 29.20, 37.13·37-A.10, 38.13 V1, 15.15 V1 | 28.15 E2E + 실패 테스트, 37.13 감시 테스트, 38.13 복원 테스트 |
+| V2 | 30.17·30.18, 31.19, 33.16, 36.12 V2, 39.12 V2 | 각 절의 테스트 표 |
+| V2b | 각 절의 V2b 작업, 39.12 V2b | 같음 |
+| Long-term | 32.15, 34.17, 35.15, 32.10 승급 조건 | 같음 |
+
+### 40.17 구현 순서
+
+원안 40.62의 Phase 1~10(44단계)는 16장 마일스톤과 같은 방향이다. 정본은 16장이고, 지금 위치는 README의 진행 상황이다.
+
+```text
+[완료]  PRD 1~8, 기술 설계 9~40
+[완료]  M1 DB (로컬 테스트), M2 브릿지 (로컬 테스트), M3 n8n Workflow 작성
+[다음]  M0 환경 (Supabase·n8n 서버·Cloudflare·Lovable 계정 = 직접 작업)
+        → 24장 Supabase 적용 → 25장 PC 연결 → 26장 n8n 배포
+        → M4 Lovable (23장 프롬프트) → M5 통합 = 27장 E2E 통과
+[그다음] M6~M8 (V1) → M9~M10 (V2) → V2b → M11 이후
+```
+
+원안의 결론("새 기능을 계속 추가하기보다 구현 단위로 쪼개는 것")에 동의한다. 설계는 이 장에서 닫고, 다음 작업은 **M0 환경 구성과 24장 적용**이다. 구현 중 설계를 바꿔야 하면, 해당 절을 고치고 ⚙️로 표시한 뒤 이 장의 요약을 맞춘다.
+
+### 40.18 원안 40과 확정 결정의 차이
+
+| 원안 40 | 확정 | 절 |
+|---|---|---|
+| Intelligence = GPT, Claude는 개발 보조 | 운영 LLM = Claude API (LLM 하위 Workflow 하나에서만 호출), 개발에도 Claude 사용 | 16장, 40.3 |
+| Permission/Safety 계층이 n8n과 Python 사이 | Supabase DB 함수 | 33.13, 40.8 |
+| SNS Adapter = TypeScript Interface | n8n 하위 Workflow | 28.2 |
+| 자율 단계 MVP L0~1, V1 L1~2 | MVP·V1에는 AI 결정 없음, V2부터 | 30.2, 40.4 |
+| MVP에 Instagram·Analytics·AI 추천 | Instagram·분석은 V1, AI는 V2 | 16장, 40.4 |
+| V1에 실험·최적화 | Long-term (Strategy 저장만 V2b) | 34·35장, 40.4 |
+| Content Job 10개 상태 (`REVIEW`·`SCHEDULED` 포함) | 7개, 검토·예약은 Post·Approval | 11.3, 11.8 |
+| Automation Job 7개 상태 | 5개 | 11.4 |
+| Persona 9개 상태 | `active`/`inactive` + `agent_paused`, 표시는 계산 | 36.2 |
+| Workflow 001~021 | 14.3의 WF-001~017, 나머지는 pg_cron·서버 timer·사람 절차 | 40.7 |
+| 테이블 목록 (30여 개) | 40.5 (대신하는 것 포함) | 40.5 |
+| Correlation ID | 뿌리 행 + FK | 37.2 |
+| Incident 6개 상태 | 3개 | 37-A.4 |
+| Snapshot `INITIAL` | 없음 | 29.4 |
+| 롤아웃 10 → 25 → 50 → 100% | 게시 빈도별, 기본 25 → 50, 100%는 사람 승격 | 35.6 |
+| 3단계 환경 | 로컬 테스트 + 운영 (+ 임시 프로젝트) | 19.18, 40.12 |
+| 저장소 구조 (`execution/`, `lovable/`) | 지금 저장소 구조 | 40.13 |
+| 브릿지 API `/jobs/generate`, `/assets/validate` | `/v1/jobs` 등 4개 | 12.6 |
+| Storage 경로 `{user_id}/{persona_id}/{content_job_id}/image_001.png` | `persona/{persona_id}/assets/{asset_id}.{ext}` | 15.5 |
+| 비용 Context에 남은 금액 | 예산 상태·비율 | 39.8 |
+| Monitoring = n8n + Supabase, Backup = Supabase + n8n | 감시는 pg_cron, 백업은 서버 timer (n8n 아님) | 37.6, 38.3 |
