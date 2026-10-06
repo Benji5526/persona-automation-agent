@@ -2686,6 +2686,7 @@ grant update (display_name, avatar_url) on public.users to authenticated;
 |---|---|---|---|---|
 | `media` | **공개** | 생성 결과물 `persona/{persona_id}/assets/` | Python(`service_role`)만 | 공개 URL (Lovable 표시, Instagram 게시) |
 | `persona-private` | 비공개 | Face·Style·Character Reference, 프로필 원본 `persona/{persona_id}/refs/` | 소유 Operator | 소유 Operator(Signed URL), Python(`service_role`) |
+| `media-uploads` ⚙️ | 비공개 | Operator가 올린 기존 미디어 `persona/{persona_id}/{asset_id}.{ext}` (V1, 41·42장) | 소유 Operator (insert만) | 소유 Operator(서명 URL), n8n·브라우저 게시 Worker(`service_role`, 게시용 서명 URL 6시간) |
 
 생성 결과물은 단순함을 위해 **공개 버킷을 유지**한다. 경로를 아는 사람은 누구나 파일을 볼 수 있다는 위험은 받아들이고, 아래 규칙으로 노출을 줄인다.
 
@@ -3436,6 +3437,7 @@ UI는 세 가지를 동시에 만족해야 한다.
 | Analytics | V1 | `chart-line` |
 | AI Decisions | V2 | `brain` |
 | Conversations | V2 | `messages-square` |
+| 예약 게시 (`/scheduler`) ⚙️ | V1 (M7b, 42.2) | `calendar-clock` |
 | Settings | MVP | `settings` |
 
 V1·V2 메뉴는 해당 단계 전까지 **숨긴다** (비활성 메뉴를 보여주지 않는다).
@@ -5491,6 +5493,7 @@ Lovable은 **Supabase하고만** 통신한다. 명령은 RPC로 보내고, 결�
 | `@supabase/supabase-js` v2 | Auth, DB(테이블·RPC), Storage, Realtime | |
 | TanStack Query ⚙️ | 서버 데이터 캐시, Realtime 이벤트 시 무효화 | 18.2 |
 | zod | 폼·JSON 칸 검증 | 18.13 |
+| `date-fns`, `date-fns-tz` ⚙️ | 날짜 계산, 시간대 → UTC 변환 | 42.7 (V1) |
 | Supabase 생성 타입 | `src/types/database.ts` | 직접 수정하지 않음 |
 
 Redux 같은 전역 상태 라이브러리는 쓰지 않는다. 전역 상태는 Auth, 선택한 Persona, Sidebar 접힘, 테마뿐이다.
@@ -5529,7 +5532,7 @@ Lovable이 아래를 만들면 그 변경은 받아들이지 않는다.
 | 단계 | 경로 |
 |---|---|
 | MVP | `/login`, `/dashboard`(`/`에서 이동), `/personas`, `/personas/:id`, `/content-jobs`, `/content-jobs/new`, `/content-jobs/:id`, `/assets`, `/assets/:id`, `/automation`, `/automation/errors`, `/settings` |
-| V1 | `/social`, `/posts`, `/posts/:id`, `/approvals`, `/analytics` |
+| V1 | `/social`, `/posts`, `/posts/:id`, `/approvals`, `/analytics`, `/scheduler`(`/new`, `/calendar`, `/:id`, 42장), `/monitoring` |
 | V2 | `/ai-decisions`, `/ai-activity`, `/conversations`, `/conversations/:id`, `/strategy`, `/safety` |
 | V2b | `/optimization` (전략 보기·수정, 롤아웃은 Long-term) |
 | Long-term | `/experiments`, `/experiments/:id` |
@@ -11509,7 +11512,7 @@ Lovable 앱 코드는 Lovable 프로젝트(그리고 그것이 연결한 GitHub 
 | 버킷 | 경로 | 공개 |
 |---|---|---|
 | `media` | `persona/{persona_id}/assets/{asset_id}.{ext}`, 게시용 `{asset_id}_publish.jpg` | 공개 (추측할 수 없는 uuid, 목록 조회 정책 없음) |
-| `media` (업로드) | `persona/{persona_id}/uploads/{asset_id}.{ext}` (41.2) | 공개 |
+| `media-uploads` (업로드) | `persona/{persona_id}/{asset_id}.{ext}` (41.2, 42.3) | 비공개 (화면은 서명 URL 1시간, 게시용은 n8n이 서명 URL 6시간) |
 | `persona-private` | `persona/{persona_id}/refs/…` (Face·Style·Character Reference, LoRA 원본) | 비공개 (Signed URL) |
 
 원안의 `{user_id}/{persona_id}/{content_job_id}/image_001.png`는 쓰지 않는다. 파일명에 순서·주제를 넣지 않고 Asset ID만 쓴다 (15.5).
@@ -11607,15 +11610,15 @@ AI 콘텐츠:  AI Decision / Operator → Content Job → 프롬프트(LLM) → 
 | `origin` | 새 칸 `text`: `generated` / `uploaded` |
 | `content_job_id` | `not null` → nullable. CHECK: `origin = 'generated'`이면 필수, `uploaded`면 null |
 | 상태 | 업로드 Asset은 만들 때부터 `approved` (Operator 자신의 미디어) |
-| 경로 | `media/persona/{persona_id}/uploads/{asset_id}.{ext}` (15.5 규칙: 추측할 수 없는 uuid, 파일명에 원래 이름·주제를 넣지 않음. 원래 파일명은 `generation_metadata.original_name`) |
+| 경로 | **비공개** 버킷 `media-uploads/persona/{persona_id}/{asset_id}.{ext}` ⚙️ (42.3에서 공개 `media`에서 바꿈: 유료 구독 콘텐츠 보호) (15.5 규칙: 추측할 수 없는 uuid, 파일명에 원래 이름·주제를 넣지 않음. 원래 파일명은 `generation_metadata.original_name`) |
 | 체크섬 | `sha256`, `file_size` (38.6) |
 
 **업로드 순서** (원안 41.8 Option A)
 
 ```text
 Lovable [미디어 올리기]
- → RPC create_media_upload(p_persona_id, p_mime, p_size) : 형식·크기 확인 → asset_id·경로 발급, Asset 행(status = uploading 대신 아직 없음)
- → Storage 업로드 (Storage 정책: 자기 Persona의 uploads/ 경로에만 insert, 15.5에 추가)
+ → RPC create_media_upload(p_persona_id, p_mime, p_size) : 형식·크기 확인 → asset_id·경로 발급 (Asset 행은 아직 없음)
+ → Storage 업로드 (`media-uploads` 버킷, 정책: 자기 Persona 폴더에만 insert, 42.3)
  → RPC register_uploaded_media(p_asset_id, p_width, p_height, p_duration, p_sha256)
      : Storage에 실제 파일이 있는지·크기가 같은지 확인 → assets 행 생성 (origin = uploaded, approved)
 ```
@@ -11687,7 +11690,7 @@ V1에서는 모든 게시를 사람이 승인한다 (11.8: 승인 없이는 게�
 |---|---|---|---|
 | `scheduled` (예약 2분 전까지) | 미디어·캡션·계정·시각 수정 가능. `self_scheduled` Post는 **수정한 사람이 곧 승인자**라서 새 승인 행을 자동으로 만들고 `scheduled`를 유지한다 (28.7의 "승인 뒤 바뀌면 다시 승인 대기"를 `self_scheduled`에서는 이렇게 처리) ⚙️ | 가능 (`cancel_post`) | 가능 |
 | `publishing` | 불가 | 불가 (플랫폼 업로드 중) | 가능 |
-| `published` | 불가 (원본 기록 유지) | – | 가능 (`duplicate_post(p_post_id, p_scheduled_at)` → 새 Post) |
+| `published` | 불가 (원본 기록 유지) | – | 가능 (채운 예약 폼을 연다, 42.4) |
 | `failed` | 가능 | 가능 | 가능. [재시도]는 `failed → scheduled`(11.8에 이미 있는 전이) |
 
 **여러 개 예약** (원안 41.39): 원안의 CSV(`media_url, caption, platform, datetime`)는 외부 URL이라 받지 않는다. 대신 **여러 파일을 한 번에 올리고, 표에서 파일마다 플랫폼·캡션·시각을 채우거나 CSV(파일 이름 기준)를 붙여 넣는다.** 잘못된 행은 표시만 하고 나머지는 예약한다 (원안 권장과 같음). V2.
@@ -11832,6 +11835,7 @@ python -m app.publisher   (GPU 브릿지와 다른 프로세스, 같은 PC)
 | 선점 | `claim_due_scheduled_posts` RPC | 기존 `claim_automation_job` (원자적, 11.5) | 같은 기능이 있음 |
 | 승인 | 언급 없음 | Operator가 직접 예약 = 승인 (같은 트랜잭션에서 승인 행 생성) | 11.8 불변식 유지, 두 번 묻지 않음 |
 | 미디어 입력 | `media_url` + allowlist | Storage에 올린 Asset만, Asset ID로 | SSRF 방지 (15.8) |
+| 업로드 버킷 | – | 비공개 `media-uploads` + 서명 URL (42.3에서 바꿈) | 유료 구독 콘텐츠 보호 |
 | Instagram 이미지 형식 | 언급 없음 | 브라우저에서 JPEG 변환, 비율은 막음 | 28.9 규격, PC 없이 |
 | 로컬 업로더 | n8n → `127.0.0.1:8001` Webhook | PC Worker가 DB에서 Job을 가져감, 들어오는 포트 없음 | 원격 n8n은 PC localhost에 닿지 못함 |
 | 브라우저 자동화 | Likey·Fantrie에 Playwright | 15.11의 조건부 예외 9개 조건 (기본 꺼짐, 약관 확인, 게시만, 우회 금지, 비밀번호 없음, 세션은 PC만, 횟수 제한, 자동 꺼짐, 미성년 금지) | 2026-10-06 확정 |
@@ -11844,3 +11848,257 @@ python -m app.publisher   (GPU 브릿지와 다른 프로세스, 같은 PC)
 | 재시도 간격 | 5 → 15 → 60분 | 브라우저 게시에만 채택, API 게시는 기존 | 브라우저 쪽이 일시 장애가 김 |
 | API | REST 8개 + 내부 3개 | Operator RPC + 기존 Worker RPC | 12장 방식 |
 | [AI 캡션 생성] | 향후 | V2, Caption Agent | 33.2 |
+
+---
+
+## 42. Scheduler — Lovable Frontend & Supabase 구현 명세 ✅
+
+> 41장의 예약 게시를 Lovable에서 만드는 기준이다. 정본 데이터는 원안의 `scheduled_posts`가 아니라 **`posts` + 업로드 Asset**이다 (41장, 2026-10-06 확정). 그래서 원안의 쿼리·상태 머신·프롬프트를 `posts`와 RPC 기준으로 바꿔 쓴다. 프론트엔드의 공통 규칙(18장: Hook·Realtime·상태 값·폼 검증·폴더, 22.3 금지 사항, 17.22 한국어 문구)을 그대로 따른다. Lovable에 보낼 프롬프트는 `docs/lovable_master_prompt.md`의 **V1 Phase S**다 (42.12). **아직 구현되지 않았다.** ⚙️ 표시는 원안을 조정한 부분이다 (42.13).
+
+### 42.1 책임 범위와 선행 조건
+
+원안 42.2의 범위(만들기, 조회, 수정, 취소, 재시도, 복제, 달력, 미리보기, 플랫폼·캡션·시각 입력, 상태 표시, Realtime)를 그대로 받는다. 원안의 "하지 않는 것"(SNS API, Playwright, n8n·Python 직접 호출, 토큰, service_role)은 22.3 금지 사항 1·2와 같다.
+
+**선행 조건** (Lovable 작업 전에 이 저장소에서 끝나 있어야 함)
+
+| 조건 | 근거 |
+|---|---|
+| V1 마이그레이션: `assets.origin`, `posts.origin`·`late_policy`·`scheduled_timezone`, 플랫폼 CHECK, `media-uploads` 버킷과 정책, 아래 42.4의 RPC | 41.12, 42.3 |
+| `supabase gen types typescript` 다시 실행 → `src/types/database.ts` | 22.2 |
+| Realtime publication에 `posts`·`approvals` (V1, 18.8) | 18.19 |
+| 연결된 계정이 하나 이상 (M6) | 16.11 |
+
+Lovable은 테이블·칼럼·정책을 만들지 않는다 (22.3 금지 4). 위가 없으면 Phase S를 보내지 않는다.
+
+### 42.2 화면과 내비게이션
+
+| 경로 | 화면 | 18.3 |
+|---|---|---|
+| `/scheduler` | 요약 + 목록 (42.6) | V1 |
+| `/scheduler/new` | 예약 만들기 (42.7) | V1 |
+| `/scheduler/:id` | 예약 상세 = `/posts/:id`와 같은 컴포넌트, 예약 게시용 버튼 구성 (42.9) | V1 |
+| `/scheduler/calendar` | 달력 (42.10) | V1 |
+
+**Sidebar** (17.2에 추가): **예약 게시**(`calendar-clock`, V1)를 Assets 다음에 둔다. 원안 42.4의 그룹(CONTENT / INTELLIGENCE)은 지금 Sidebar가 그룹 없이 한 줄이라 쓰지 않는다 ⚙️. V1 메뉴는 V1 전까지 숨긴다 (17.2).
+
+**Overview 카드** (원안 42.39, V1): "예약 게시 — 오늘 n건 · 다음: Instagram 18:00 · 실패 n" → 누르면 `/scheduler`.
+
+### 42.3 업로드와 Storage ⚙️
+
+원안 42.11·42.12의 **비공개 버킷 + 서명 URL**을 채택한다. 41.2는 업로드 미디어를 공개 `media` 버킷에 두었는데, Likey·Fantrie는 **유료 구독자용 콘텐츠**를 올리는 플랫폼이라 공개 버킷에 두면 경로가 새는 순간 유료 콘텐츠가 노출된다. 그래서 업로드 미디어는 새 비공개 버킷으로 옮긴다 (41.2를 이것으로 고친다).
+
+| 버킷 | 공개 | 경로 | 쓰기 | 읽기 |
+|---|---|---|---|---|
+| `media-uploads` (새) | **비공개** | `persona/{persona_id}/{asset_id}.{ext}` | 소유 Operator (자기 Persona 경로에만 insert. update·delete 없음) | 소유 Operator: 서명 URL(1시간) / n8n: 게시할 때 서명 URL을 만들어 Instagram·X에 넘김 / 브라우저 게시 Worker: service key로 직접 내려받음 |
+
+- 원안의 `scheduled-media/{user_id}/{uuid}/media.mp4`는 쓰지 않는다. 다른 버킷과 같이 Persona 폴더 아래에 Asset ID만 둔다 (15.5).
+- **서명 URL 유효 시간**: Instagram은 컨테이너를 만들 때 URL에서 파일을 가져가고 영상은 처리에 시간이 걸린다. n8n이 만드는 게시용 서명 URL은 **6시간**으로 둔다 (구현 시 Meta가 언제 가져가는지 확인). 화면 미리보기용은 1시간.
+- 버킷 형식: `image/jpeg`, `image/png`, `image/webp`, `video/mp4`, `video/quicktime`. 크기 한도는 41.2.
+- AI가 만든 Asset은 지금처럼 공개 `media` 버킷이다 (15.13 확정). Scheduler에서 AI Asset을 고르면 공개 URL을 그대로 쓴다.
+
+**업로드 순서** (원안 42.11을 41.2 RPC로)
+
+```text
+파일 선택 → (Instagram 대상 이미지가 PNG·WEBP면 Canvas로 JPEG 변환, 41.2)
+ → 브라우저에서 크기·형식·가로세로·영상 길이 읽기 (<img>, <video> metadata)
+ → rpc('create_media_upload', { p_persona_id, p_mime, p_size })      → { asset_id, path }
+ → storage.from('media-uploads').upload(path, file, { upsert: false })
+ → rpc('register_uploaded_media', { p_asset_id, p_width, p_height, p_duration, p_sha256 })
+     (sha256은 브라우저 SubtleCrypto로 계산)
+ → 미리보기: createSignedUrl(path, 3600)
+```
+
+- 업로드 중 진행률은 실제 바이트 진행만 보여준다 (가짜 % 금지, 22.3 금지 10).
+- `register_uploaded_media`가 실패하면 올라간 파일은 Asset 행 없이 남는다. 하루 한 번 pg_cron이 `media-uploads`에서 Asset이 없는 24시간 지난 파일을 지운다.
+
+### 42.4 데이터 접근: RPC와 Hook
+
+**쓰기는 모두 RPC다** (22.3 금지 5). 원안 42.18의 `INSERT INTO scheduled_posts`, 42.19의 `PATCH`는 쓰지 않는다 ⚙️.
+
+| 동작 (원안) | RPC | 상태 변화 |
+|---|---|---|
+| 만들기 (42.18) | `schedule_own_media(p_asset_id, p_social_account_id, p_caption, p_hashtags, p_scheduled_at, p_timezone, p_late_policy)` (41.3) | → `scheduled` (승인 행 포함) |
+| 수정 (42.19) | `update_scheduled_post(p_post_id, p_asset_id, p_social_account_id, p_caption, p_hashtags, p_scheduled_at, p_timezone, p_late_policy)` ⚙️ (새, 41.6 규칙: `scheduled`이고 2분 전까지, `self_scheduled`면 승인 행 자동) | `scheduled` 유지 |
+| 취소 (42.20) | `cancel_post(p_post_id)` (28장) | → `cancelled` |
+| 재시도 (42.21) | `retry_scheduled_post(p_post_id, p_scheduled_at)` ⚙️ (새): `failed → scheduled`. 시각을 주지 않으면 지금 + 1분 | `failed` → `scheduled` |
+| 게시됨으로 표시 | `mark_post_published_manually(p_post_id, p_permalink)` (41.7·41.9) | `failed`(UNCONFIRMED)·수동 알림 → `published` |
+| 복제 (42.22) | RPC 없음. `/scheduler/new?from={post_id}`로 이동해 미디어·계정·캡션을 채워 연다 ⚙️ | – |
+| 플랫폼·계정 목록 | `get_scheduler_targets(p_persona_id)` ⚙️ (새, 42.5) | – |
+
+- 원안 42.21의 "재시도 때 `attempt_count` 유지": `publish:{post_id}`는 Unique라 새 Job을 만들 수 없다. `retry_scheduled_post`는 실패한 그 Job을 `retry_automation_job`처럼 `pending`으로 되돌리므로 `attempts` 기록이 남는다 (20.11).
+- 원안 42.22의 "복제는 생성 화면에서 고칠 수 있게 하는 것이 안전"을 그대로 따라, 바로 새 예약을 만들지 않고 채워진 폼을 연다. 41.6의 `duplicate_post` RPC는 이것으로 대신한다.
+
+**Hook** (18.7 형태: `{ data, isLoading, error, refetch }`, TanStack Query)
+
+| Hook | 출처 | Realtime |
+|---|---|---|
+| `useScheduledPosts(filters)` | `posts` + `assets(id, origin, mime_type, storage_bucket, storage_path, thumbnail_url, generation_metadata->original_name)` + `social_accounts(platform, username)`. 기본 필터: `status in (scheduled, publishing, published, failed, cancelled)` | `posts`, `automation_jobs` |
+| `useScheduledPost(id)` | 위 + `publish` Job(`attempts`, `max_attempts`, `error_code`, `result.deferred`), `state_transitions`, `execution_logs` | 같음 |
+| `useSchedulerSummary(personaId?)` | count 쿼리 4개 (42.6) | `posts` |
+| `useSchedulerTargets(personaId)` | `get_scheduler_targets` | `social_accounts`, `worker_status` |
+| `useSignedMediaUrl(asset)` | `media-uploads`면 `createSignedUrl`(1시간, 캐시 50분), `media`면 `public_url` | – |
+| 명령 Hook | `useScheduleOwnMedia`, `useUpdateScheduledPost`, `useCancelPost`, `useRetryScheduledPost`, `useMarkPublishedManually`, `useUploadMedia`(42.3 순서 전체) | 성공 시 해당 쿼리 무효화 |
+
+원안 42.30·42.31의 Repository 층(`scheduledPostRepository.list()`)은 따로 두지 않는다 ⚙️. 18.7대로 Hook이 Supabase를 부르고, 같은 쿼리를 여러 Hook이 쓰면 `src/lib/scheduler/queries.ts`에 쿼리 빌더 함수를 둔다. 한 층을 더 두면 TanStack Query 캐시 키와 Hook이 두 곳으로 나뉜다.
+
+**Realtime** (원안 42.23): 18.8의 `useRealtime('posts')`, `useRealtime('automation_jobs')` 그대로. 이벤트를 화면에 직접 쓰지 않고 쿼리를 무효화한다. `DELETE` 이벤트는 오지 않는다 (Post는 지우지 않는다, 42.11).
+
+### 42.5 플랫폼과 연결 상태
+
+원안 42.33은 플랫폼 목록을 Frontend 배열로 두고 "나중에 DB로"라고 한다. 처음부터 **DB에서 받는다** ⚙️: `get_scheduler_targets(p_persona_id)`가 그 Persona의 계정마다 아래를 돌려준다. 값은 41.5의 `platform_specs`와 계정·Worker 상태에서 계산한다.
+
+```json
+[{ "social_account_id": "…", "platform": "instagram", "username": "gina.daily",
+   "channel": "api", "state": "connected",
+   "limits": { "caption_max": 2200, "hashtags_max": 30, "image_mimes": ["image/jpeg"],
+               "image_ratio": [0.8, 1.91], "video_mimes": ["video/mp4", "video/quicktime"],
+               "video_max_seconds": 900, "video_max_mb": 300 } }]
+```
+
+| `state` (원안 42.34) | 조건 | 화면 | 예약 |
+|---|---|---|---|
+| `connected` | API: 계정 `active`, 토큰 7일 넘게 남음 / 브라우저: 계정 `active` + 게시 Worker Online + `browser_publishing` 켜짐 | ● 연결됨 | 가능 |
+| `expiring` | 토큰 7일 이내 (28.5) | ● 곧 만료 | 가능 + 안내 |
+| `reconnect_required` (원안 `EXPIRED`) | 계정 `inactive` (토큰·세션 만료) | ○ 다시 연결 필요 | 불가 |
+| `publisher_offline` (원안 `LOCAL_UPLOADER_OFFLINE`) | 브라우저 플랫폼인데 게시 Worker 90초 넘게 보고 없음 | ⚠ PC 게시 프로그램 꺼짐 | 가능 + 경고 ("게시 시각에 PC가 켜져 있어야 합니다") |
+| `manual` | 브라우저 플랫폼인데 `browser_publishing` 꺼짐 (41.7) | ○ 수동 게시 알림 | 가능 + 안내 ("예약 시각에 알림을 보내고, 직접 올립니다") |
+| `platform_stopped` | `platform_controls`로 정지 (33.10) | ⏸ 정지됨 | 불가 |
+
+- 원안의 `DISCONNECTED`·`ERROR`는 `reconnect_required`로 합친다. 사용자가 할 일이 같다 (다시 연결).
+- 원안 42.35대로 브라우저는 PC 게시 Worker를 직접 확인하지 않는다. Worker가 `worker_status`(kind `publisher`)에 보고한 값을 RPC가 읽는다.
+- 연결된 계정이 없는 플랫폼은 목록에 나오지 않고, "Social에서 계정 연결" 링크를 보여준다.
+
+### 42.6 목록 화면 (`/scheduler`)
+
+**요약 카드** (원안 42.6, 누르면 그 필터로)
+
+| 카드 | 조건 |
+|---|---|
+| 예약됨 | `status = scheduled` |
+| 오늘 | `scheduled_at`이 **사용자 브라우저 시간대의 오늘**에 있고 `status in (scheduled, publishing, published)` |
+| 게시됨 (30일) | `status = published`, `published_at` 최근 30일 |
+| 실패 | `status = failed` |
+
+**목록** (원안 42.5): 썸네일, 원래 파일 이름, 플랫폼 배지 + 계정, 예약 시각(사용자 시간대) + 상대 시각("2시간 뒤"), 상태 배지, 출처 배지(`업로드` / `AI 생성`). 기본 정렬: 예약 시각 오름차순(다가오는 것 먼저), 지난 것은 아래.
+
+**필터** (원안 42.7, URL Query에 둔다 18.3): 상태(전체, 예약됨, 게시 중, 게시됨, 실패, 취소됨), 플랫폼, 날짜 범위, Persona(Header 선택이 기본값, 17.2), 출처.
+
+**검색** (원안 42.8): 캡션(`ilike`), 원래 파일 이름(`generation_metadata->>original_name`), 게시물 주소·ID. 세 칸 모두 V1에서 한다 (원안은 MVP에 캡션만).
+
+**모바일** (원안 42.28): 768px 아래에서 표 대신 카드 목록. 요약 카드는 가로 스크롤 2줄.
+
+### 42.7 예약 만들기 (`/scheduler/new`)
+
+한 화면 폼이다. 위에서부터:
+
+| # | 칸 | 규칙 (zod + DB, 18.13) |
+|---|---|---|
+| 1 | **Persona** | Header 선택이 기본. 바꾸면 아래 계정 목록이 다시 로드 |
+| 2 | **미디어**: [파일 올리기] / [Asset Library에서 고르기](`approved` Asset, 출처 배지) | 필수. 고른 뒤 미리보기(이미지·영상 재생), 파일 이름, 크기, 가로×세로, 길이 |
+| 3 | **게시할 계정** (42.5 목록, 라디오) | 필수, `state`가 예약 가능 |
+| 4 | **미디어 규격 확인** (계정을 고르면 자동) | 형식·비율·길이·크기가 `limits` 안. Instagram 대상 PNG·WEBP → "JPEG로 바꿔 올립니다" 안내 후 변환. 비율 밖이면 "이 비율은 Instagram에 올릴 수 없어요 (4:5 ~ 1.91:1)" |
+| 5 | **캡션** + 해시태그 | 글자 수 `n / caption_max`, 해시태그 수, Persona 금지 표현이 들어가면 그 부분 표시 (판정은 DB `schedule_own_media`가 다시 함, 41.4). 광고·협찬이면 [광고 표기] 체크 (15.11) |
+| 6 | **날짜·시각·시간대** | 시간대 기본값: Persona `timezone`(36.8), 없으면 브라우저. 지금 + 2분 이후 (41.3). 선택한 시간대 기준 "한국 시간으로는 …"도 함께 표시 |
+| 7 | **늦어지면** | `2시간 넘게 늦어지면 게시하지 않음`(기본) / `늦어도 게시` (41.6) |
+| 8 | [예약] | 위가 모두 통과해야 활성. 실패 사유는 칸 옆에 (17.12 문구) |
+
+`?from={post_id}`로 열면 그 Post의 미디어·계정·캡션·해시태그·늦은 게시 정책을 채우고 시각은 비운다 (복제, 42.4).
+
+**시간대 처리** (원안 42.15·42.16): 입력은 "선택한 시간대의 벽시계 시각"이고, 보낼 때 UTC로 바꾼다. 시간대 없는 문자열을 보내지 않는다. 변환은 `date-fns-tz`(`fromZonedTime`)로 한다 ⚙️ (22.2에 `date-fns`·`date-fns-tz` 추가. 브라우저 기본 API만으로는 임의 시간대의 벽시계 시각을 UTC로 정확히 바꾸기 어렵다, 특히 서머타임). DB에는 `scheduled_at timestamptz` + 표시용 `scheduled_timezone`.
+
+### 42.8 상태 표시 ⚙️
+
+원안 42.24의 상태(Pending·Processing·Completed·Failed·Cancelled)는 **Post 상태 값**으로 표시한다 (18.6: 상태 값은 DB와 정확히 같게, 22.3 금지 6). 이름과 색은 `src/lib/status.ts`와 17.3 토큰이다.
+
+| 원안 | Post 상태 | 화면 이름 | 색 토큰 (17.3) |
+|---|---|---|---|
+| Pending | `scheduled` | 예약됨 | neutral |
+| Processing | `publishing` | 게시 중 | active |
+| Completed | `published` | 게시됨 | success |
+| Failed | `failed` | 실패 | error |
+| Cancelled | `cancelled` | 취소됨 | muted |
+| – | `scheduled` + Job `result.deferred` | 예약됨 · 대기 (예산·PC) | warning |
+
+`draft`·`pending_approval`·`approved`·`rejected`는 AI 파이프라인 Post의 상태라 `/scheduler`의 기본 필터에서 빠진다 (출처 `AI 생성`을 고르면 보인다).
+
+**원안 42.43의 상태 머신**(`draft → pending → processing → completed`, `failed → pending`)은 이 시스템에 없는 값이다. Phase S 프롬프트(42.12)는 Post 상태만 쓴다.
+
+### 42.9 상세 화면 (`/scheduler/:id`)
+
+`/posts/:id`와 같은 페이지 컴포넌트를 쓰고(28.12), `origin = self_scheduled`면 버튼 구성을 아래처럼 바꾼다. 원안 42.25·42.35의 표시 항목: 미리보기, 계정·플랫폼, 캡션·해시태그, 예약 시각(예약한 시간대 + 사용자 시간대), 상태, 시도 횟수(`attempts / max_attempts`), 마지막 오류, 게시 시각·게시물 주소, 실행 기록(타임라인, 17.9).
+
+| 상태 | 버튼 (18.11 방식: `src/lib/actions.ts`에 정의) |
+|---|---|
+| `scheduled` (2분 전까지) | [수정] [취소] [복제] |
+| `scheduled` (2분 이내) | [복제] (수정·취소 없음: 곧 실행) |
+| `publishing` | [복제] |
+| `published` | [게시물 보기] [복제] |
+| `failed` | [다시 시도] (지금 / 시각 정하기) [수정] [취소] [복제]. `UNCONFIRMED`면 맨 앞에 [게시됨으로 표시] |
+| `cancelled` | [복제] |
+
+**오류 표시** (원안 42.25): 오류 코드를 17.12 방식으로 한국어 문장 + 할 일로 바꾼다 (`src/lib/errors.ts`에 41.9의 코드 추가: `SESSION_EXPIRED`, `CHALLENGE_REQUIRED`, `ADAPTER_BROKEN`, `UNCONFIRMED`, `MISSED_WINDOW`, `TOKEN_EXPIRED`, `INVALID_MEDIA`, `POLICY_ERROR`, `RATE_LIMIT`). 원래 코드는 "기술 정보 보기"를 펼쳤을 때만 보인다.
+
+### 42.10 달력 (`/scheduler/calendar`)
+
+| 항목 | 결정 |
+|---|---|
+| 보기 | 월·주. 일 보기는 주 보기에서 하루를 누르는 것으로 대신 |
+| 표시 | 칸마다 그날 예약을 시각 순으로: `18:00 IG gina.daily` + 상태 점. 4개를 넘으면 "+n" |
+| 플랫폼 배지 | IG · X · LK · FT (원안 42.34) |
+| 클릭 | `/scheduler/:id` |
+| 빈 날짜 클릭 | `/scheduler/new?date=YYYY-MM-DD` |
+| 시간대 | 사용자 브라우저 시간대. 상단에 표시 |
+| 구현 | **라이브러리 없이** Tailwind 격자 + `date-fns` ⚙️. 월·주 격자와 시각 순 목록이면 충분하고, 무거운 달력 라이브러리는 22.2 고정 Stack을 늘린다 |
+| 끌어서 옮기기 (원안 42.27) | V1 이후. 넣을 때는 `scheduled`이고 2분 전까지인 것만, 놓으면 `update_scheduled_post` |
+
+### 42.11 권한, 삭제, 감사
+
+**권한** (원안 42.36): 원안의 OWNER·ADMIN·EDITOR·VIEWER 표는 쓰지 않는다 ⚙️. 지금 권한 모델은 18.12(`admin`·`operator`, `viewer`는 이후)와 Persona 소유이고, Persona별 역할은 Long-term `persona_members`(36.3)다. Scheduler에서:
+
+| 동작 | 누가 | 확인 |
+|---|---|---|
+| 보기·만들기·수정·취소·재시도·복제·게시됨 표시 | 그 Persona의 소유 Operator | RPC의 `require_owned_persona` + RLS |
+| 브라우저 게시 켜기·끄기 (41.7) | admin | RPC |
+| 삭제 | 없음 | – |
+
+**삭제** (원안 42.37): Post와 업로드 Asset은 지우지 않는다. 예약은 취소, 미디어는 Asset 보관(`archive_asset`)이다. 원안의 soft delete가 이미 이 두 상태다. 업로드 Asset을 보관하면 30일 뒤 파일만 지운다 (15.5와 같은 규칙, 버킷만 다름).
+
+**감사** (원안 42.38): 새 감사 테이블 없이 `state_transitions`가 남긴다 (11.14). 만들기는 `reason = self_scheduled`, 수정은 `self_revised`, 재시도는 `retry`, 수동 완료는 `manual_published`. 원안의 `SCHEDULED_POST_CREATED` 같은 행위 이름은 상세 화면 타임라인에서 이 사유를 한국어로 바꿔 보여준다.
+
+**분석 연결** (원안 42.40·42.41): 원안은 `scheduled_posts → posts → performance_metrics`로 옮겨 적는데, 여기서는 처음부터 `posts`라 옮길 것이 없다. 게시가 끝나면 WF-007이 수집 Job을 예약하고(28.8), 성과는 29장 분석에 그대로 들어간다 (Instagram·X만, 41.5).
+
+### 42.12 Lovable 프롬프트
+
+`docs/lovable_master_prompt.md` §2에 **V1 Phase S — Scheduler**로 넣는다. 원안 42.43의 프롬프트를 이 장의 결정(`posts`·RPC·상태 값·비공개 버킷·한국어 문구·기존 Hook 방식)으로 고친 것이다. 42.1의 선행 조건이 끝난 뒤에만 보낸다.
+
+### 42.13 완료 기준과 원안 조정
+
+**완료 기준** (원안 42.45를 이 장 기준으로)
+
+| 영역 | 항목 |
+|---|---|
+| 화면 | `/scheduler`, `/scheduler/new`, `/scheduler/:id`, `/scheduler/calendar`, Sidebar 메뉴, Overview 카드 |
+| 입력 | 업로드(실제 진행률, JPEG 변환, sha256), Asset Library에서 고르기, 미리보기, 계정·연결 상태, 규격 확인, 캡션 검사 표시, 날짜·시각·시간대, 늦은 게시 정책 |
+| 동작 | 예약, 수정(2분 전까지), 취소, 다시 시도, 복제(채운 폼), 게시됨으로 표시 |
+| 상태 | `scheduled`·`publishing`·`published`·`failed`·`cancelled` + 대기 표시, Realtime으로 새로고침 없이 바뀜 |
+| 목록 | 요약 카드, 필터(URL), 검색(캡션·파일 이름·게시물 주소), 모바일 카드 |
+| 안전 | Supabase 외 호출 없음, 비밀값 없음, 상태 칸 직접 UPDATE 없음, 다른 Operator의 예약이 보이지 않음 (22.21 점검) |
+| E2E | 41.12 MVP 완료 조건 (Instagram 1개 + 브라우저 플랫폼 1개) |
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 정본 데이터 | `scheduled_posts` | `posts` + 업로드 Asset | 41장 확정 |
+| 쓰기 | `INSERT` / `PATCH` | RPC만 (`schedule_own_media`, `update_scheduled_post`, …) | 22.3 금지 5, 승인 행을 함께 만들어야 함 |
+| 상태 | `pending`·`processing`·`completed` | Post 상태 값 (`scheduled`·`publishing`·`published`) | 18.6, 22.3 금지 6 |
+| 업로드 버킷 | 비공개 `scheduled-media/{user_id}/{uuid}/` | 비공개 `media-uploads/persona/{persona_id}/{asset_id}` (41.2의 공개 버킷 결정을 바꿈) | 유료 구독 콘텐츠 보호, 15.5 경로 규칙 |
+| 플랫폼 목록 | Frontend 배열, 나중에 DB | 처음부터 RPC (`get_scheduler_targets`) | 규격·상태를 두 곳에 두지 않음 |
+| 연결 상태 | 5개 | 6개 (`expiring`·`manual`·`platform_stopped` 추가, `DISCONNECTED`·`ERROR`는 다시 연결로 합침) | 사용자가 할 일 기준 |
+| Repository 층 | Component → Hook → Repository | Hook + 쿼리 빌더 (18.7) | 캐시 키를 한 곳에 |
+| 복제 | 새 행 생성 | 채운 폼 열기 | 원안 권장(고칠 수 있게) |
+| Sidebar 그룹 | CONTENT·INTELLIGENCE | 기존 한 줄 목록에 추가 | 17.2 |
+| 권한 | 4개 역할 | 소유 Operator + admin (역할은 Long-term) | 18.12, 36.3 |
+| 감사 | Audit 행위 | `state_transitions` 사유 | 11.14 |
+| 달력 | 월·주·일, 끌어서 옮기기 | 월·주, 라이브러리 없이, 끌어서 옮기기는 이후 | 22.2 Stack |
+| 시간대 변환 | 언급 | `date-fns-tz` 추가 | 임의 시간대 → UTC 정확 변환 |
+| 검색 | MVP는 캡션만 | 캡션·파일 이름·게시물 주소 | 칸이 이미 있음 |
+| 프롬프트 | 42.43 | lovable_master_prompt.md V1 Phase S (Post 상태·RPC·비공개 버킷·한국어) | 원안 프롬프트는 없는 테이블·상태를 만들게 함 |

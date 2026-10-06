@@ -523,6 +523,82 @@ Report what you changed.
 
 ---
 
+### V1 Phase S — Scheduler (예약 게시)
+
+**보내기 전에** (TECH 42.1): V1 마이그레이션(업로드 Asset, `posts.origin`·`late_policy`·`scheduled_timezone`, `media-uploads` 버킷, 42.4 RPC)이 적용되어 있고, `supabase gen types typescript`를 다시 실행했고, 연결된 SNS 계정이 하나 이상 있어야 한다.
+
+```text
+Implement V1 Phase S only: the Scheduler (scheduled publishing of media the operator already owns).
+This module never generates content: no LLM, no ComfyUI, no content jobs. It schedules existing
+media through the existing posts pipeline.
+
+Data (already in the database — do not create tables, columns, buckets or policies):
+- posts is the source of truth. Scheduler rows are posts with origin = 'self_scheduled'
+  (also show origin = 'pipeline' posts when the user filters by source "AI 생성").
+- Uploaded media are assets with origin = 'uploaded' in the PRIVATE bucket 'media-uploads'
+  at persona/{persona_id}/{asset_id}.{ext}. Show them with createSignedUrl(path, 3600).
+  AI assets (origin = 'generated') stay in the public 'media' bucket: use public_url.
+- Post status values are exactly: scheduled, publishing, published, failed, cancelled
+  (plus draft, pending_approval, approved, rejected for pipeline posts). Use src/lib/status.ts.
+  Do not invent pending / processing / completed.
+
+Writes go only through these RPCs (never insert/update posts or status columns directly):
+- create_media_upload(p_persona_id, p_mime, p_size) -> { asset_id, path }, then
+  storage.from('media-uploads').upload(path, file, { upsert: false }), then
+  register_uploaded_media(p_asset_id, p_width, p_height, p_duration, p_sha256)
+  (read width/height/duration in the browser; sha256 with SubtleCrypto; show real upload progress only).
+- schedule_own_media(p_asset_id, p_social_account_id, p_caption, p_hashtags, p_scheduled_at,
+  p_timezone, p_late_policy)
+- update_scheduled_post(p_post_id, ...same fields) - only when status = scheduled and at least
+  2 minutes before scheduled_at
+- cancel_post(p_post_id)
+- retry_scheduled_post(p_post_id, p_scheduled_at) - failed -> scheduled; null time = now + 1 minute
+- mark_post_published_manually(p_post_id, p_permalink)
+- get_scheduler_targets(p_persona_id) -> accounts with platform, username, channel, state
+  (connected | expiring | reconnect_required | publisher_offline | manual | platform_stopped)
+  and limits (caption_max, hashtags_max, image_mimes, image_ratio, video_mimes,
+  video_max_seconds, video_max_mb). Never hard-code platform limits.
+
+Screens (Korean UI copy; Sidebar item "예약 게시" with lucide calendar-clock, after Assets):
+- /scheduler: summary cards 예약됨 / 오늘 (browser timezone) / 게시됨 (30일) / 실패 that set the
+  filter; list (thumbnail, original file name from generation_metadata.original_name, platform
+  badge + account, scheduled time + relative time, status badge, source badge 업로드 / AI 생성);
+  filters in the URL query (status, platform, date range, persona from the header selector,
+  source); search on caption, original file name and permalink; cards instead of a table under 768px.
+- /scheduler/new: one form - persona, media (upload or pick an approved asset from the Asset
+  Library), target account from get_scheduler_targets with its state, automatic media check
+  against limits (convert PNG/WEBP to JPEG in the browser when the target is Instagram; block
+  Instagram images outside the 4:5-1.91:1 ratio), caption with live counts and the sponsored
+  toggle, date + time + timezone (default persona timezone, else browser) converted to UTC with
+  date-fns-tz fromZonedTime, late policy (skip if more than 2 hours late - default - or publish
+  anyway), [예약] enabled only when valid. ?from={post_id} pre-fills media, account, caption,
+  hashtags and late policy for duplication (time left empty). ?date=YYYY-MM-DD pre-fills the date.
+- /scheduler/:id: reuse the /posts/:id page component; buttons from src/lib/actions.ts by status:
+  scheduled (>2 min) 수정, 취소, 복제 / scheduled (<2 min) 복제 / publishing 복제 / published 게시물 보기,
+  복제 / failed 다시 시도 (지금 or 시각 정하기), 수정, 취소, 복제, and 게시됨으로 표시 first when
+  error_code is UNCONFIRMED / cancelled 복제. Show attempts / max_attempts, the last error as a Korean
+  sentence from src/lib/errors.ts (add SESSION_EXPIRED, CHALLENGE_REQUIRED, ADAPTER_BROKEN,
+  UNCONFIRMED, MISSED_WINDOW, TOKEN_EXPIRED, INVALID_MEDIA, POLICY_ERROR, RATE_LIMIT) with technical
+  details collapsed, and the timeline from state_transitions + execution_logs.
+- /scheduler/calendar: month and week views built with Tailwind + date-fns (no calendar library),
+  entries "18:00 IG account" with a status dot, "+n" after 4, click -> /scheduler/:id, empty day
+  click -> /scheduler/new?date=..., browser timezone shown. No drag and drop yet.
+- Overview card: today's count, next post (platform + time), failed count -> /scheduler.
+
+Hooks follow the existing pattern ({ data, isLoading, error, refetch } with TanStack Query):
+useScheduledPosts, useScheduledPost, useSchedulerSummary, useSchedulerTargets, useSignedMediaUrl,
+and one mutation hook per RPC that invalidates its queries. Shared query builders go in
+src/lib/scheduler/queries.ts. Realtime: reuse useRealtime for posts and automation_jobs
+(invalidate + refetch), plus social_accounts and worker_status for target states.
+
+Do NOT call n8n, the Python bridge or browser publisher, SNS APIs, ComfyUI or any LLM from the
+browser. No service_role or secret keys. No mock data. No fake progress.
+Verify: upload an image and a video and see signed previews; schedule a post and see it as 예약됨;
+change its status in the Supabase dashboard and watch list, detail and calendar update without
+reload; editing is refused within 2 minutes of the time; duplicate opens a pre-filled form; a second
+Google account cannot see these posts or files.
+```
+
 ## §3 보내지 말아야 할 요청
 
 | 요청 | 이유 |
