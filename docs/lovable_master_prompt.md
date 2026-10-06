@@ -313,6 +313,10 @@ and Success states.
   topic (required if prompt empty, ≤500), prompt (optional, ≤4000 — "비우면 AI가 만들어요"),
   negative prompt (optional), variants 1-4, platform (default instagram), priority
   (낮음 1 / 보통 5 / 높음 8 / 긴급 10), workflow (optional, defaults to persona's).
+  Input images: show only when the chosen workflow's comfy_workflows.inputs has slots. For each
+  slot offer its allowed sources ('asset' = one of this persona's assets, 'persona_asset' = a
+  reference image of this persona, filtered by asset_types when given); required slots must be
+  filled. Send input_images = { <slot>: { asset_id } | { persona_asset_id } } (TECH 13.6).
   Send null for every empty optional field (never "").
   Submit → create_content_job → navigate to the detail page.
   There is NO AI prompt preview, NO "improve with AI" button, NO schedule field.

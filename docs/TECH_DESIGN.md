@@ -558,7 +558,7 @@ Persona
 | priority | smallint | 우선순위 |
 | status | text ⚙️ | 5.15 상태: `draft` / `queued` / `generating` / `ready` / `published` / `failed` / `cancelled` |
 | run_number | smallint, default 1 ⚙️ | 재시도·재생성 회차. `idempotency_key`에 붙인다 (예: `prompt:{id}:{run_number}`, 14.17) |
-| scheduled_at | timestamptz | 예약 시간 |
+| scheduled_at | timestamptz | 생성 예약 시각 (V1, 46.3. MVP에서는 쓰지 않는다. 게시 시각은 Post의 `scheduled_at`) |
 | metadata | jsonb | 추가 정보 |
 | created_at | timestamptz | 생성일 |
 | updated_at | timestamptz | 수정일 |
@@ -1380,7 +1380,7 @@ Bridge API의 오류 본문:
 
 | RPC | 입력 | 전환 | 오류 |
 |---|---|---|---|
-| `create_content_job` | `p_persona_id`, `p_content_type`, `p_topic`, `p_prompt`, `p_workflow`, `p_params`, `p_input_images`, `p_variants`, `p_priority`, `p_submit boolean default true` | 생성 → `draft` (`p_submit`이면 바로 `queued`) | `NOT_FOUND`(Persona), `VALIDATION_FAILED` |
+| `create_content_job` | `p_persona_id`, `p_content_type`, `p_topic`, `p_prompt`, `p_workflow`, `p_params`, `p_input_images`, `p_variants`, `p_priority`, `p_submit boolean default true`. (V1) `p_scheduled_at` (46.3) | 생성 → `draft` (`p_submit`이면 바로 `queued`) | `NOT_FOUND`(Persona), `VALIDATION_FAILED` |
 | `submit_content_job` | `p_content_job_id` | `draft → queued` | `INVALID_TRANSITION`, `VALIDATION_FAILED`(topic·prompt 둘 다 없음) |
 | `cancel_content_job` | `p_content_job_id`, `p_reason` | `draft·queued·generating·ready·failed → cancelled` | `INVALID_TRANSITION` (`ready`인데 게시된 Post가 있으면) |
 | `retry_content_job` | `p_content_job_id` | `failed → queued` | `INVALID_TRANSITION` |
@@ -1420,7 +1420,7 @@ Bridge API의 오류 본문:
 
 | RPC | 입력 | 출력 | 설명 |
 |---|---|---|---|
-| `claim_content_job` | `p_content_job_id` | `content_jobs` 행 또는 빈 결과 | `queued → generating` |
+| `claim_content_job` | `p_content_job_id` | `content_jobs` 행 또는 빈 결과 | `queued → generating` (V1: 예약 시각 조건, 46.3) |
 | `create_automation_job` | `p_job_type`, `p_persona_id`, `p_content_job_id`, `p_post_id`, `p_worker`, `p_payload`, `p_priority`, `p_max_attempts`, `p_idempotency_key` | `automation_jobs` 행 | 같은 `idempotency_key`가 이미 있으면 **기존 행을 그대로 돌려줌** (오류 아님, 14.17) |
 | `claim_automation_job` | `p_job_id`, `p_worker` | 행 또는 빈 결과 | `pending → processing`. `attempts + 1`, `locked_at`·`heartbeat_at` 기록 |
 | `claim_next_automation_job` | `p_job_type`, `p_worker` | 행 또는 빈 결과 | 우선순위 순 1건 (`FOR UPDATE SKIP LOCKED`) |
@@ -2306,6 +2306,8 @@ Trigger (DB Webhook: content_jobs UPDATE → queued, 또는 안전망 Schedule)
      └─ 있음 → generation Job 생성 → WF-003이 감지
  → execution_logs 기록
 ```
+
+> ⚙️ V1 생성 예약(46.3): 예약 시각 전이면 `claim_content_job`이 0행이라 끝나고, 시각이 되면 1분 안전망이 선점한다 (안전망 쿼리에 같은 조건).
 
 Automation Job 생성 예:
 
@@ -3716,7 +3718,7 @@ GPU 작업은 정확한 진행률을 알 수 없다. **가짜 %를 만들지 않
 | 후보 수 | MVP | 1~4 |
 | 우선순위 | MVP | 낮음(1) / 보통(5) / 높음(8) / 긴급(10) |
 | 플랫폼 | MVP | Caption 초안용 |
-| 예약 | V1 | |
+| 예약 | V1 | 생성 시각 예약 (46.3). 게시 시각은 Post에서 정한다 |
 
 원안의 "Approval: Required/Optional" 선택은 넣지 않는다 ⚙️. V1의 모든 게시물은 승인이 필수이고(PRD 2번), 선택권은 V2 자동 승인 정책에서 다룬다.
 
@@ -5955,7 +5957,7 @@ Phase는 22.22 빌드 순서를 따른다. Phase 1~3은 n8n·브릿지 없이 �
 | 형태 | 설계 문서 안에 프롬프트 본문 | 별도 파일 `lovable_master_prompt.md`, 이 장은 설명만 | 복사해 쓰기 쉽고, 본문이 두 곳에 있어 어긋나는 일을 막음 |
 | 첫 메시지 | Master Prompt 후 바로 구현 시작 가능 | "코드를 만들지 말고 규칙만 요약하라" | 첫 메시지에서 전체를 만들어 버리는 것을 막음 |
 | 상태 값 | 대문자 (`PENDING`, `GENERATED`, `CLAIMED`, `RETRY_WAIT`, `DEAD`, `READY` …) | DB 소문자 값, `status.ts` 한 곳 | 원안 그대로면 DB와 하나도 맞지 않는다 (21.6) |
-| Content Job 칼럼 | `retry_count`, `max_retries`, `scheduled_at` | 실제 칼럼 (`run_number`, `variants`, `workflow`, `params` …) | 없는 칼럼을 Lovable이 만들려 함 |
+| Content Job 칼럼 | `retry_count`, `max_retries` | 실제 칼럼 (`run_number`, `variants`, `workflow`, `params` …). `scheduled_at`은 칸이 있다 (동작은 V1, 46.3) | 없는 칼럼을 Lovable이 만들려 함 |
 | 만들기 | `status = PENDING` INSERT, AI 프롬프트 제안·미리보기, 예약 시각 | `create_content_job` RPC, AI 버튼·예약 없음 | 11.12, 17.25, V1 |
 | 스키마 변경 | "필요하면 가장 작은 마이그레이션" | 금지. 필요하면 멈추고 알림 | 스키마 정본은 저장소 (21.3) |
 | 사용하지 않는 테이블 | `performance_metrics`, `conversations`, `ai_decisions` 등을 핵심 테이블로 나열 | "아직 없음, 조회·생성 금지"로 명시 | 없는 테이블을 만들려는 것을 막음 |
@@ -11559,7 +11561,7 @@ Lovable 앱 코드는 Lovable 프로젝트(그리고 그것이 연결한 GitHub 
 원안 40.62의 Phase 1~10(44단계)는 16장 마일스톤과 같은 방향이다. 범위의 정본은 16장이고, **실행 순서(Sprint)·관문·사람과 도구별 작업 분리는 44장**이다 ⚙️. 지금 위치는 README의 진행 상황이다.
 
 ```text
-[완료]  PRD 1~8, 기술 설계 9~45
+[완료]  PRD 1~8, 기술 설계 9~46
 [완료]  M1 DB (로컬 테스트), M2 브릿지 (로컬 테스트), M3 n8n Workflow 작성
 [다음]  M0 환경 (Supabase·n8n 서버·Cloudflare·Lovable 계정 = 직접 작업)
         → 24장 Supabase 적용 → 25장 PC 연결 → 26장 n8n 배포
@@ -12604,7 +12606,7 @@ DB 복원 뒤의 대조(38장 `reconcile_after_restore`)도 이 확인 실행과
 **지금 위치** (2026-10-06)
 
 ```text
-[완료]  PRD 1~8, 기술 설계 9~45
+[완료]  PRD 1~8, 기술 설계 9~46
 [완료]  M1 DB · M2 브릿지 (로컬 테스트 107개 통과), M3 n8n Workflow 작성
 [다음]  Sprint 1: M0 환경 → DB 적용 → [PC → n8n] ∥ [Lovable] → M5 (27장 E2E)
 ```
@@ -12693,7 +12695,7 @@ G1의 복원 시험 ⚙️: 38.13은 복원 검증·훈련을 V1에서 시작한
 
 | # | 단계 | 사람 | Claude Code | 통과 |
 |---|---|---|---|---|
-| 0 | 코드 | – | `pytest tests -q` 확인 (2026-10-06: 107개 통과). **36.12 MVP 수정**을 첫 `db push` 전에 한다 ⚙️: 브릿지의 `content_job.persona_id == job.persona_id` 검사, `automation_jobs`·`posts`의 Persona 일치 트리거(`persona_isolation` 마이그레이션), 격리 테스트, Foundation 보강 테스트(45.6) | 전부 통과, 36.12 격리 테스트의 MVP 행 |
+| 0 | 코드 | – | `pytest tests -q` 확인 (2026-10-06: 107개 통과). **36.12 MVP 수정**을 첫 `db push` 전에 한다 ⚙️: 브릿지의 `content_job.persona_id == job.persona_id` 검사, `automation_jobs`·`posts`의 Persona 일치 트리거(`persona_isolation` 마이그레이션), 격리 테스트, Foundation 보강 테스트(45.6), Content Job 보강 테스트(46.7) | 전부 통과, 36.12 격리 테스트의 MVP 행 |
 | 1 | **M0 + DB 적용** | Supabase 프로젝트, Google OAuth Client(Google Cloud), 이메일 로그인 끔(새 사용자 가입 허용은 켬), `supabase link`·`db push`, 허용 목록 → **Lovable 프로젝트를 만들어 Supabase에 연결하고 빈 화면에서 Google 로그인**(또는 임시 페이지) → admin 지정, secret key 분리 (24.3) | 순서 안내, `verify_production.sql` 결과 해석 | `verify_production.sql` 1~14 |
 | 2 | PC (트랙 A) | 드라이버, ComfyUI(`127.0.0.1`), 체크포인트·LoRA, venv, `.env` 채우기 (25.3) | 설치 오류 분석 | `/v1/health` `ok` |
 | 3 | 첫 생성 (n8n 없이) | 25.6의 SQL·호출 실행 | 결과 확인, 실패 분석 | Content Job `ready`, Asset 1행 |
@@ -12755,7 +12757,7 @@ G1의 복원 시험 ⚙️: 38.13은 복원 검증·훈련을 V1에서 시작한
 | M8 감시 | 외부 업타임 감시 가입 | 37-A 테이블, `evaluate_health`·`sample_metrics`, WF-010을 Incident 단위 알림(37.6)으로 확장, `expire_approvals` | Phase M (`/monitoring` 개요·서비스·Incident·추이·백업·복구 탭) |
 | M8 백업·사용량 | 오프사이트 저장소 계정 (Object Lock) | `backup.sh` V1판(6시간, age 암호화, 오프사이트, Storage 증분), `verify.sh`, `backup_runs`, Asset `sha256`·`file_size` 기록(38.13 V1), `monitoring_usage`·`cost_rates` 기록 (비용 화면은 V2b, 37-A.5), WF-018 Storage Cleanup (45.7) | – |
 | V1 Persona 운영 | – | 36.12 V1: Persona 생성 차단기, pHash 기록과 게시 전 검사 10번, 준비도 RPC | `/personas` 운영 칸 |
-| M8 생성 확장 | – | Video Generation·Upscale Workflow (16.11) | – |
+| M8 생성 확장 | – | Video Generation·Upscale Workflow (16.11), 생성 예약 (46.3) | Create Content의 예약 칸 |
 | M7b 후반: Instagram Reels | – | `[PA] SNS - Instagram - Publish`에 Reels (41.5), `platform_specs.instagram`에 영상 형식 추가, 영상 지표 칸 결정 (29.3) | – |
 | M7b 후반: X | API 이용 등급·요금 확인, 앱 등록 | `[PA] SNS - X - {Connect, Publish}`, 43.15의 X 경우 | 배지 |
 | M7b 후반: 브라우저 게시 (조건부) | 약관 확인 후 `browser_publishing` 켜기, 보이는 브라우저에서 로그인 (41.7) | `app/publisher/`, `tests/publisher/`, 선택자 설정, 43.15의 브라우저 경우, 수동 게시 알림(WF-010 확장, 41.7) | Settings의 브라우저 자동화 켜기 (admin, 약관 확인, 41.12) |
@@ -12846,7 +12848,7 @@ WF-011 분석 (performance_insight.v1) → WF-012 결정 (ai_decision.v1) → re
 | `social_accounts` (0010) | 2 ① | `oauth_states`, Vault 함수(`upsert_social_account`, `get_social_account_token`), `create_oauth_state`·`consume_oauth_state` |
 | `publishing` (0011) | 2 ② | `approvals`, `posts (platform, external_post_id)` Unique, 28.14의 Operator·Worker RPC(`record_metrics`·`expire_approvals` 제외), `transcode` job_type, `check_publish_ready`(1~10번), 43.10 게시 RPC 변경, R8 확장, `generation_enabled`·`emergency_stop_all`, Realtime에 `approvals` |
 | `scheduler` (0012) | 2 ③ | 41.12 DB (업로드 Asset, `posts.origin`·`late_policy`, Likey·Fantrie, `media-uploads`, 42.4 RPC, `publisher` Worker, `platform_specs`·`platform_controls`), `check_publish_ready` 11·12번, `claim_next_automation_job(p_channel)`, `personas.timezone`, Realtime에 `social_accounts` |
-| `analytics_monitoring` (0013) | 3 | `performance_metrics`, `app_settings.analytics`, `record_metrics`, `complete_publish`의 수집 Job 생성, 29장 함수, `expire_approvals`, 37-A 테이블, 36.12 V1(생성 차단기·pHash), Realtime에 `personas`, `monitoring_usage`·`cost_rates`, `backup_runs`·`recovery_runs`, `list_storage_deletions`·`mark_storage_deleted`·`assets.file_deleted_at`(45.7) |
+| `analytics_monitoring` (0013) | 3 | `performance_metrics`, `app_settings.analytics`, `record_metrics`, `complete_publish`의 수집 Job 생성, 29장 함수, `expire_approvals`, 37-A 테이블, 36.12 V1(생성 차단기·pHash), Realtime에 `personas`, `monitoring_usage`·`cost_rates`, `backup_runs`·`recovery_runs`, `list_storage_deletions`·`mark_storage_deleted`·`assets.file_deleted_at`(45.7), 생성 예약(`claim_content_job` 조건, `create_content_job(p_scheduled_at)`, 46.3) |
 | `ai_decisions` (0014) | 4 | `ai_decisions`, `agent_policy_versions`, `performance_analyses`, `agent_permission_level`, 39.12 V2 한도 |
 | `fan` (0015) | 5 | `conversations`, `messages`, `fan_memories`, `fan_reply_level` |
 | 이후 | 6~ | `strategy_versions`, `experiments` 등 |
@@ -13029,7 +13031,7 @@ F0 코드 보강 → F1 Supabase·Google → F2 Lovable 연결·Shell → F3 Per
 
 | # | 단계 | 사람 | Claude Code | Lovable | 통과 |
 |---|---|---|---|---|---|
-| F0 | 코드 보강 | – | 36.12 MVP 수정(브릿지 Persona 일치 검사, `persona_isolation` 마이그레이션, 44.5 0번), Foundation 보강 테스트(45.6). 마이그레이션이 하나 늘므로 `verify_production.sql` 1번·24.3 2번·24.4 1번의 기대값을 0001~0009로 고친다 (44.12 규칙 4) | – | `pytest tests -q` 전부 통과 |
+| F0 | 코드 보강 | – | 36.12 MVP 수정(브릿지 Persona 일치 검사, `persona_isolation` 마이그레이션, 44.5 0번), Foundation 보강 테스트(45.6), Content Job 보강 테스트(46.7). 마이그레이션이 하나 늘므로 `verify_production.sql` 1번·24.3 2번·24.4 1번의 기대값을 0001~0009로 고친다 (44.12 규칙 4) | – | `pytest tests -q` 전부 통과 |
 | F1 | Supabase·Google | 프로젝트(Seoul), `supabase link`·`db push`, pg_cron 확인, Auth는 Google만, Google OAuth Client·동의 화면, 허용 목록 입력, secret key 분리, Advisors (24.3 1~5, 7, 9~11번) | 순서 안내, 점검 SQL 해석 | – | `verify_production.sql` 1~8, 10~14, Advisors 경고 0 (또는 이유 기록) |
 | F2 | Lovable 연결·Shell | Lovable 프로젝트 → 기존 Supabase 연결(publishable key) → Site URL·Redirect URLs 설정(24.3 6번) → §1 Master Prompt, Phase 1 보내기 → 첫 로그인 → `admin` 지정 (24.3 8번) → `supabase gen types` | Phase 1 코드 리뷰 (45.5) | Phase 1 | `verify_production.sql` 9, Phase 1 확인 항목 |
 | F3 | Persona | Phase 2 보내기 | Phase 2 코드 리뷰 (45.5) | Phase 2 | Phase 2 확인 항목 |
@@ -13224,3 +13226,164 @@ F2·F3의 Phase가 끝날 때마다, 그리고 F4에서 한 번 더 한다. **�
 | Lovable 첫 프롬프트 | 45.54 | Master Prompt §1 + Phase 1·2 | DB와 대조된 프롬프트 (23.4) |
 | Claude 프롬프트 | 45.55 (GPT 포함) | F0 코드·테스트, Phase 리뷰, 보안 검색 | DB 부분은 M1에서 끝남, 운영 LLM은 Claude API |
 | 다음 단계 | 46~54번 새 명세 | Sprint 1 나머지 실행 (44.5) | 그 장들은 이미 설계·대부분 구현됨 |
+
+---
+
+## 46. Content Job System — 원안 대응과 실행 ✅
+
+> 원안 46의 Content Job(스키마, 상태, RLS, 선점, 재시도, 화면)은 **이미 설계·구현되어 있다.** 데이터는 10.7(원안과 같은 칸을 이미 조정했다), 상태는 11.3, RPC는 12.4, 선점과 WF-001은 14.5·14.6, 화면은 17.9·18.7·18.11, 구현은 마이그레이션 0001~0005와 `tests/db`, Lovable 프롬프트는 Phase 3이다. 이 장은 원안 대응, 새로 찾은 빈틈 두 가지(생성 예약 `scheduled_at`의 동작, 재시도·재생성 테스트), Sprint 1에서의 실행을 정한다. **원안 46.30의 Lovable 프롬프트는 보내지 않는다** (46.6). 원안과 다른 곳은 ⚙️로 표시하고 46.9에 모았다.
+
+### 46.1 Content Job과 Post의 경계 (원안 46.1~46.3)
+
+원안의 원칙(Content Job → Automation Job → 실행, 생성 실패와 게시 실패의 분리, Lovable은 실행자를 부르지 않음)은 같다. 다만 원안 상태 10개 중 **검토·승인·예약·게시는 Content Job의 상태가 아니다.** Asset·Post·Approval의 상태다 (10.7, 11.3, 40.18에서 이미 바로잡았다). Asset 하나를 여러 Post로 게시할 수 있고(10.10), 게시가 실패해도 생성 결과는 그대로여야 하기 때문이다. 원안 46.3의 "생성 실패와 게시 실패를 분리한다"를 상태에서도 지키는 셈이다.
+
+| 원안 | 여기 |
+|---|---|
+| `DRAFT` | Content Job `draft` |
+| `PENDING` | `queued` |
+| `GENERATING` | `generating` |
+| `GENERATED` | `ready` |
+| `REVIEW` | Post `pending_approval` (Approval `pending`). 그 앞 단계인 Asset 검토는 `review_asset` (V1, 44.7) |
+| `APPROVED` | Asset `approved`, Post `approved` |
+| `SCHEDULED`, `PUBLISHING` | Post `scheduled`, `publishing` |
+| `PUBLISHED` | `published` (이 Job의 Post가 하나라도 게시되면 트리거 R4) |
+| `FAILED → PENDING` | `failed → queued` (`retry_content_job`, `run_number` + 1) 또는 실패한 단계만 (`retry_automation_job`, 이때 Content Job은 `failed → generating`) |
+| `CANCELLED` (`DRAFT`·`PENDING`·`SCHEDULED`에서) | `cancelled` (`draft`·`queued`·`generating`·`ready`·`failed`에서. `ready`는 게시된 Post가 없을 때) |
+
+### 46.2 스키마 (원안 46.4~46.7, 46.21)
+
+| 원안 칸 | 0001 | 비고 |
+|---|---|---|
+| `user_id` | 없음 ⚙️ | 소유는 `persona_id → personas.user_id`로 확인한다 (21.10의 RLS 패턴). 만든 사람은 `created_by`(기본값 `auth.uid()`) |
+| `created_by` | 있음 | Agent·일정이 만들면 null, 출처는 `source`(`operator`/`schedule`/`agent`) |
+| `content_type` | `image`·`video`·`carousel`·`story`·`text` | 원안 대문자 4종 ⚙️. MVP 화면은 `image`만 (17.9) |
+| `platform` | `instagram`·`tiktok`·`x` | 캡션 초안의 대상이다. 원안처럼 Content Job이 SNS를 부르지 않는다 |
+| `priority` | 1~10, 기본 5 | 원안과 같다. 대기열 정렬 `priority desc, created_at` |
+| `status` | 7개 | 46.1 |
+| `scheduled_at` | 있음, **동작 없음** | 46.3 ⚙️ |
+| `retry_count`, `max_retries`, `last_error` | 없음 | 10.7에서 이미 뺐다. 재시도와 오류는 실행 단위인 `automation_jobs`(`attempts`·`max_attempts`·`error_code`·`error_message`)와 `system_errors`에 있다. 상세 화면의 "재시도 횟수·마지막 오류"는 그 Job들에서 보여준다 (18.7 `useContentJob`) |
+| `metadata` | 있음 | 원안 46.21과 같은 용도. 원안 예시의 `source`·`ai_decision_id`는 이미 칸이다. `generation_workflow`·`requested_resolution`은 `workflow`·`params` 칸이다. 실험 표시는 Long-term의 `metadata.experiment` (34장) |
+| (원안에 없음) | `prompt_parts`, `workflow`, `params`, `input_images`, `variants`, `run_number` | LLM 구조화 프롬프트, Registry Workflow, 입력 이미지, 후보 수, 재시도 회차 (10.7) |
+
+**인덱스** (원안 46.31): `persona_id`, `created_by`, 대기열 부분 인덱스 `(priority desc, created_at) where status = 'queued'`가 있다. 원안의 `user_id`·`status`·`priority`·`scheduled_at` 단독 인덱스는 두지 않는다. 목록은 Persona 단위라 `persona_id`로 좁혀지고, 대기열은 부분 인덱스가 맡는다. **트리거**: `updated_at`(0001), 상태 전이 강제·전이 기록·Rollup(0002), 입력 검증 `content_jobs_validate`(0003: 활성 Persona, `input_images`가 그 Persona의 것인지 → `PT422`)가 있다.
+
+### 46.3 생성 예약 (`scheduled_at`) ⚙️
+
+`content_jobs.scheduled_at` 칸이 있고 Operator가 직접 INSERT로 쓸 수 있다(0005 GRANT). 그런데 `claim_content_job`과 WF-001은 이 값을 보지 않는다. 미래 시각을 넣어도 제출하면 바로 생성된다. MVP에서는 화면에 이 칸이 없고(Master Prompt "NO schedule field") `create_content_job`에도 인자가 없어서 드러나지 않았다. 17.9가 화면의 "예약"을 V1로 둔 것에 맞춰, **V1에서 생성 예약을 열 때의 규칙**을 정한다.
+
+| 대상 | 규칙 |
+|---|---|
+| `claim_content_job` | `status = 'queued' and (scheduled_at is null or scheduled_at <= now())`일 때만 선점한다 |
+| WF-001 | 제출 직후 DB Webhook으로 선점을 시도하고, 예약 시각 전이면 0행이라 조용히 끝난다. 1분 안전망 쿼리에 같은 조건을 더해, 시각이 되면 선점한다 |
+| `create_content_job` | `p_scheduled_at` 인자를 더한다 (지금 + 2분 이후). 인자를 더하면 PostgreSQL에서는 **다른 함수**가 된다. 옛 시그니처를 지우고(`drop function`), 새 함수에 `authenticated` 실행 권한을 다시 준다 (새 함수는 기본으로 닫혀 있다, 21.10). 옛 함수가 남으면 PostgREST 호출이 모호해진다 (24.2와 같은 문제) |
+| 직접 쓰기 | 같은 마이그레이션에서 `scheduled_at`의 칼럼 INSERT·UPDATE 권한을 회수한다. 예약은 RPC로만 해서 "지금 + 2분 이후" 검사를 우회하지 못하게 한다. Master Prompt의 쓰기 칸 목록에서도 뺀다 |
+| 화면 | Create Content의 "예약"(17.9), 목록·상세에 "예약됨 · 18:00 생성" |
+| 테스트 | 예약 시각 전 `claim_content_job`은 0행, 시각 뒤에는 1행. 안전망 쿼리가 미래 시각 Job을 고르지 않음 (미래 Job 10건이 앞자리를 막지 않게) |
+| 배포 순서 | WF-001의 안전망 필터는 마이그레이션과 함께 바꾼다. 그 뒤 `verify_production.sql`·`supabase gen types`를 갱신한다 (44.12 규칙 4) |
+
+- **게시 예약과 다르다.** 게시 시각은 Post의 `scheduled_at`이다 (11.8, 41장). 생성 예약은 GPU가 한가한 밤에 미리 만들어 두는 용도다.
+- 단계: V1 (Sprint 3, M8의 생성 확장과 함께, DB는 `analytics_monitoring` 마이그레이션). 그 전에 직접 INSERT로 값을 넣어도 무시되고 바로 생성된다. 해는 없다.
+
+### 46.4 선점, 재시도, 멱등 (원안 46.16~46.20)
+
+**선점** ⚙️: 원안의 `claim_pending_content_job()`(다음 1건) 대신 `claim_content_job(p_content_job_id)`와 WF-001을 쓴다 (14.5·14.6).
+- 제출하면 DB Webhook이 바로 그 Job을 선점한다.
+- 1분 안전망은 `priority desc, created_at asc`로 최대 10건을 골라 하나씩 선점한다.
+- 선점은 `UPDATE … WHERE id = ? AND status = 'queued' RETURNING`이다. 두 실행이 같은 Job을 잡으면 하나만 1행을 받는다 (`test_claim_content_job_only_once`). ID로 선점하므로 `FOR UPDATE SKIP LOCKED`가 필요 없다.
+- "다음 1건"을 고르는 선점은 실행 단위에서 쓴다 (`claim_next_automation_job`, 브릿지·게시 Worker).
+
+**순서와 기아** (원안 46.7의 queue aging): 두지 않는다. 예약이 없거나 예약 시각이 된 Content Job은 바로 선점되어 대기열에 오래 남지 않고, GPU 대기 순서는 generation Job의 우선순위로 정해진다. Persona 사이의 공정 선점은 V2다 (36.12).
+
+**재시도** (원안 46.20): 실행 단위(`automation_jobs`)에서 DB가 정한다. 기본 `max_attempts` 3이라 30초, 2분을 기다린 뒤 최종 실패다 (20.11). 원안의 "30초·2분·5분 뒤 재시도"(네 번 시도)와 다르다 ⚙️. 최종 실패하면 Content Job이 `failed`가 되고(R2), Operator가 처음부터(`retry_content_job`) 또는 실패한 단계만(`retry_automation_job`) 다시 실행한다.
+
+| 원안 오류 | 코드 (13.12·20.11) | 재시도 |
+|---|---|---|
+| `NETWORK_ERROR` | `NETWORK_ERROR`(n8n·LLM 경로), `COMFY_UNREACHABLE`(브릿지 → ComfyUI) | ✅ |
+| `COMFYUI_UNAVAILABLE` | `COMFY_UNREACHABLE` | ✅ |
+| `TIMEOUT` | `TIMEOUT` | ✅ |
+| `TEMPORARY_STORAGE_ERROR` | `FILE_ERROR` | ✅ |
+| `CUDA_OOM` | `OUT_OF_MEMORY`(2차는 해상도 축소), `CUDA_ERROR` | ✅ |
+| `INVALID_PROMPT` | `PROMPT_MISSING` (프롬프트도 `prompt_parts`도 없음) | ❌ |
+| (LLM 단계의 잘못된 출력) | `LLM_OUTPUT_INVALID` | ✅ 1회 (14.7, 20.11) |
+| `MODEL_NOT_FOUND`, `LORA_NOT_FOUND` | 같음 | ❌ |
+| `INVALID_JOB` | `INPUT_NOT_FOUND`, `WORKFLOW_INVALID`, `WORKFLOW_PARAM_INVALID` | ❌ |
+| `PERMISSION_ERROR` | Operator 권한 문제는 Job 오류가 아니다 (RPC·RLS가 요청 단계에서 `PT404`·`42501`로 막는다). 서비스 자격 증명 오류는 `INVALID_AUTH` | ❌ (`INVALID_AUTH`) |
+| `POLICY_ERROR` | `POLICY_ERROR` | ❌ |
+
+**멱등** (원안 46.19) ⚙️: 원안의 `generation:{automation_job_id}` 대신 `generation:{content_job_id}:{run_number}`다 (16.8). 이 키는 "이 회차의 generation Job은 하나"를 보장하고, 같은 Job이 브릿지에 두 번 전달되면 브릿지 선점이 두 번째를 `409`로 막는다 (16.13). 원안의 `content-job:{persona_id}:{request_hash}`는 두지 않는다. Operator가 같은 주제로 여러 번 만드는 것은 정상이고, 폭주는 시간당 Content Job 한도와 하루 생성 한도(15.18)가, AI가 만든 중복은 Decision의 중복·냉각 검사(30.8)가 막는다.
+
+### 46.5 RLS와 API (원안 46.8·46.9, 46.27·46.28)
+
+- **RLS** ⚙️: 원안의 `user_id` 정책 4개 대신 0005다. 조회는 Persona 소유로 거른다. 직접 INSERT는 소유한 활성 Persona에 `draft`로만 된다. 직접 UPDATE는 `draft`일 때 허용 칸만 된다. DELETE는 없다 (취소로 대신하고, Automation Job·Asset이 FK `restrict`로 참조한다). 상태 변경은 RPC다 (12.4).
+- 원안 46.9("Frontend가 `user_id`를 정하지 않는다")는 칸이 없어서 자동으로 지켜진다. `created_by`도 쓰기 권한이 없고 기본값이 `auth.uid()`다.
+- 남의 `persona_id`로 만들면 RPC는 `PT404`(기존 테스트 있음), 직접 INSERT는 RLS의 WITH CHECK에 걸려 `42501`이다(테스트 없음 → 46.7에 추가). 남의 Asset을 `input_images`에 넣으면 `PT422`다 (기존 테스트 있음).
+- **API**: 원안의 REST 7개는 RPC(`create_content_job`, `submit_content_job`, `cancel_content_job`, `retry_content_job`, `regenerate_content_job`)와 테이블 조회다. 원안의 `PATCH`는 `draft`의 직접 UPDATE다. 원안의 `/jobs/generate`는 브릿지의 `POST /v1/jobs`다 (40.14). 원안 46.28의 금지 목록은 22.3과 같다.
+
+### 46.6 화면과 Lovable 프롬프트 (원안 46.11~46.15, 46.23~46.26, 46.30)
+
+**원안 46.30을 Lovable에 보내지 않는다.** 그 프롬프트는 Lovable에게 `content_jobs` 테이블·RLS·상태 머신·DB 타입을 만들라고 한다. 테이블은 이미 있다(0001~0005). Lovable이 스키마를 만들면 22.3 금지 4를 어기고, 같은 이름의 테이블·정책이 두 벌 생기거나 마이그레이션 정본과 어긋난다. 대신 `lovable_master_prompt.md`의 **Phase 3**을 Phase 1·2 다음에 보낸다.
+
+| 원안 | 정본 | 조정 |
+|---|---|---|
+| 경로 `/content`, `/content/new`, `/content/:id` | `/content-jobs`, `/content-jobs/new`, `/content-jobs/:id` (18.3) | 이름만 다르다 |
+| 생성 폼 (46.11) | 17.9·Master Prompt: Persona, 종류(MVP `image`만), 주제, 프롬프트(비우면 AI), Negative, Workflow, 입력 이미지, 후보 수 1~4, 플랫폼, 우선순위(1·5·8·10) | 원안의 Schedule은 V1 (46.3). ⚙️ 입력 이미지 칸은 17.9의 MVP 칸인데 Master Prompt에 빠져 있어서 더했다 (Workflow의 `comfy_workflows.inputs`에 자리가 있을 때만, 13.6) |
+| Save Draft / Create Job / Create & Run (46.11·46.12) | [만들기] = `create_content_job` → 바로 `queued` | 초안 저장은 MVP 화면에 두지 않는다. RPC는 이미 `p_submit = false`로 지원한다 |
+| 목록·필터 (46.13) | 표와 칸반(17.9), 상태 필터는 URL에 | 원안의 Review·Completed 탭은 칸반의 "완료"(`ready`). "재시도 횟수"는 Automation Job의 `attempts` |
+| 상세 (46.14) | 17.9·Master Prompt: 단계 진행, 내용, 결과 Asset, 캡션 초안, 타임라인, 실패 패널, 버튼 | 같음 |
+| 상태별 버튼 (46.15) | 18.11 `src/lib/actions.ts` | 원안의 `DRAFT` [Delete]는 [취소]다. `GENERATED`·`REVIEW`의 승인·반려는 Asset 검토(V1 `review_asset`), `APPROVED`의 예약·게시는 Post다 (V1) |
+| Repository, Hooks (46.23·46.24) | 18.7: Hook + RPC | Repository 층을 두지 않는다 (45.4와 같은 결정) |
+| Realtime (46.25) | `content_jobs`는 publication에 있다 (0001), `useRealtime`이 쿼리를 무효화한다 (18.8) | 같음 |
+| Dashboard (46.26) | `get_dashboard_summary` (22.8) | 원안의 `status = 'pending'`은 `queued` |
+
+### 46.7 테스트 (원안 46.29·46.32)
+
+| 원안 테스트 | 있는 테스트 | 할 일 |
+|---|---|---|
+| Creation → `DRAFT` | `test_draft_is_editable_only_while_draft` | – |
+| Start `DRAFT → PENDING` | `test_draft_is_editable_only_while_draft`(submit 실행), `test_create_content_job_submits_and_records_transition`(만들면서 바로 `queued`) | **추가**: `submit_content_job`의 `draft → queued` 전이 기록(`operator:submit`) 확인 |
+| Ownership | `test_operator_cannot_see_other_operators_data` (RPC는 `PT404`) | 45.6의 보강 + **추가**: 남의 Persona로 직접 INSERT하면 `42501` |
+| State `PENDING → GENERATING → GENERATED` | `test_happy_path_reaches_ready_with_audit_trail` | – |
+| Cancel | `test_cancel_cascades_and_discards_late_results` | – |
+| Retry `FAILED → PENDING` | **없음** | **추가**: `retry_content_job`이 `failed → queued`, `run_number` + 1. `failed`가 아닌 Job이면 `INVALID_TRANSITION` |
+| (원안에 없음) 재생성 | **없음** | **추가**: `regenerate_content_job`이 `ready → queued`, `run_number` + 1. 시간당 Content Job 한도(`max_content_jobs_per_hour`, 15.18)를 1로 낮추면 `RATE_LIMITED`(`PT429`) |
+| (원안에 없음) 종료 상태 | 일부 | **추가**: `cancelled`에서 `retry_content_job`·`submit_content_job` 거부 |
+| Realtime | – | Phase 3 확인 항목 (SQL로 상태를 바꾸면 화면이 바뀜) |
+| Duplicate execution | `test_idempotent_job_creation_and_single_claim`, `test_claim_content_job_only_once` | – |
+| Invalid transition | `test_disallowed_transition_is_rejected_even_for_service_role` | – |
+
+추가 테스트는 44.5 0번(F0)에서 Foundation 보강 테스트와 함께 쓴다. 지금 마이그레이션 그대로 통과해야 한다.
+
+### 46.8 Sprint 1에서의 실행 (원안의 "지금 바로 할 순서")
+
+| 원안 순서 | 여기 |
+|---|---|
+| ① Lovable에 46번 프롬프트 | **Phase 3 프롬프트** (46.30 아님). Foundation 체크포인트(45.3 F5) 다음 |
+| ② Supabase 마이그레이션·RLS 적용 | 이미 있다. 45.3 F1의 `db push`에서 함께 적용된다 |
+| ③ CRUD 테스트 | Phase 3 확인 항목 + 다른 계정으로 격리 확인 (45.6 F4와 같은 방법) |
+| ④ Realtime 확인 | SQL Editor에서 상태를 바꿔 목록·상세가 새로고침 없이 바뀌는지 (22.22) |
+| ⑤ Claude Code 보안·선점 검증 | `tests/db`의 선점·멱등·전이 테스트 (`pytest tests -q` 107개 통과, 그중 `tests/db` 45개) + 46.7 추가 테스트 + Phase 3 코드 리뷰 (45.5 검색) |
+| ⑥ 47번 Python Execution | 브릿지는 M2에서 구현됐다. 다음 실행은 44.5 2·3번(PC 설치, 25.6 첫 생성)이다 |
+
+Phase 3은 n8n·브릿지 없이 만든다 (22.22). 화면에서 만든 Job이 실제로 생성되는 것은 트랙 A가 연결된 뒤(44.5 6번 이후)다.
+
+### 46.9 원안 조정
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 이 장의 성격 | 새 구현 명세 | 이미 있는 설계·구현의 대응과 실행 | 10.7·11.3·12.4·14장·17.9, 0001~0005 |
+| 상태 | 10개 (`REVIEW`·`APPROVED`·`SCHEDULED`·`PUBLISHING` 포함) | 7개, 검토·승인·예약·게시는 Asset·Post·Approval | 40.18, Asset 하나를 여러 Post로 |
+| `user_id` | 칸 + 정책 4개 | 없음, Persona 소유로 RLS | 21.10 |
+| `retry_count` 등 | Content Job 칸 | `automation_jobs`의 `attempts`·`error_*` | 10.7 (단계별 재시도) |
+| `content_type` | 대문자 4종 | 소문자 5종 | 10.7 (DB CHECK 값을 화면에서도 그대로) |
+| `scheduled_at` | Now / Schedule | V1 생성 예약 규칙(선점 조건·안전망·RPC 인자), MVP 화면에는 없음 | 칸만 있고 동작이 없었다 |
+| 선점 | `claim_pending_content_job()` 다음 1건 | `claim_content_job(id)` + WF-001 (Webhook + 1분 안전망) | 14.5, 제출 즉시 선점 |
+| Queue aging | 향후 | 두지 않음, Persona 공정 선점은 V2 | 예약이 없거나 시각이 된 Job은 바로 선점됨 |
+| 재시도 | 30초·2분·5분 (4번 시도) | 30초·2분 (`max_attempts` 3) | 20.11 |
+| 오류 코드 | 자체 이름 | 13.12·20.11 코드 (`LLM_OUTPUT_INVALID`는 재시도 1회) | 한 벌 |
+| 멱등 키 | `generation:{automation_job_id}`, 요청 해시 | `generation:{content_job_id}:{run_number}`, 요청 해시 없음 | 16.8, 15.18, 30.8 |
+| DELETE | 정책 | 없음 (취소) | FK `restrict`, 기록 보존 |
+| 경로 | `/content` | `/content-jobs` | 18.3 |
+| Repository 층 | Page → Hook → Repository | Hook + RPC | 18.7, 45.4 |
+| Lovable 프롬프트 | 46.30 (테이블·RLS 생성 포함) | Phase 3 | 22.3 금지 4 |
+| Claude 프롬프트 | 46.31 (스키마·RLS·선점·인덱스 구현) | 대부분 M1에서 끝남. 46.7 추가 테스트, Phase 3 리뷰 | 0001~0005, `tests/db` |
+| 다음 단계 | 47 Python Execution 구현 | 44.5 2·3번 실행 (브릿지는 구현됨) | M2 |
