@@ -1020,7 +1020,7 @@ pending / processing ──┴──▶ cancelled
 | pending | processing | `status = 'pending' AND run_after <= now()`인 행을 원자적으로 선점. `attempts + 1`, `locked_at`, `heartbeat_at` 기록 | Worker (n8n, Python) |
 | processing | done | job_type별 성공 조건 충족 (아래 표) | Worker |
 | processing | pending | 재시도 가능 오류이고 `attempts < max_attempts`. `run_after = now() + 백오프` | Worker, 또는 Timeout Recovery (11.6) |
-| processing | failed | 재시도 불가 오류, 또는 `attempts >= max_attempts` | Worker, 또는 Timeout Recovery |
+| processing | failed | 재시도 불가 오류, 또는 `attempts >= max_attempts` (⚙️ `publish`의 `verify_only` 확인 실행은 `attempts` 대신 `verify_attempts` 상한, 43.8) | Worker, 또는 Timeout Recovery |
 | pending | cancelled | 상위 Content Job이나 Post가 취소됨 | DB 트리거 (11.9 R5) |
 | processing | cancelled | 상위 객체가 취소됨. Worker는 결과를 쓰기 전에 상태를 다시 확인하고, `cancelled`면 결과를 버린다 | DB 트리거 |
 | failed | pending | Operator가 이 단계만 다시 실행. `attempts = 0`, `run_after = now()` | Operator |
@@ -1065,6 +1065,8 @@ Worker가 Job을 선점한 뒤 PC가 꺼지거나 네트워크가 끊기면 Job�
 | prompt, caption | 2분 |
 | generation | 3분 (Heartbeat가 30초마다 오므로 충분한 여유) |
 | publish, analytics | 5분 |
+
+> ⚙️ `publish` Job에 `result.checkpoint.submitted_at`이 있으면(게시 호출을 이미 보냄) `attempts`와 상관없이 `pending` + `payload.verify_only = true`로 되돌린다. 다시 게시하지 않고 게시됐는지부터 확인한다 (43.8).
 
 > Worker가 늦게 살아나서 이미 회수된 Job의 결과를 쓰려고 하면, `UPDATE … WHERE id = ? AND status = 'processing' AND locked_at = ?` 조건에 걸려 0행이 된다. 그래서 회수된 Job의 결과는 반영되지 않는다.
 
@@ -1125,7 +1127,7 @@ draft ──▶ pending_approval ──▶ approved ──▶ scheduled ──�
 | approved | publishing | 즉시 게시. `publish` Job 선점 | n8n |
 | scheduled | publishing | `scheduled_at <= now()`. `publish` Job 선점 | n8n |
 | publishing | published | **`external_post_id IS NOT NULL`**, `published_at` 기록 | n8n |
-| publishing | failed | `publish` Job이 최종 `failed` | DB 트리거 |
+| approved, scheduled, publishing | failed | `publish` Job이 최종 `failed` (⚙️ 선점 직후 게시 전 검사에서 실패하면 Post는 아직 `scheduled`다, 43.2) | DB 트리거 |
 | failed | scheduled / publishing | 운영자 재시도 | Operator |
 | approved, scheduled | pending_approval | 승인 뒤 caption·Asset이 바뀜 (다시 승인 필요) | DB 트리거 |
 | published 제외 모든 상태 | cancelled | – | Operator |
@@ -1145,7 +1147,7 @@ draft ──▶ pending_approval ──▶ approved ──▶ scheduled ──�
 | R5 | Content Job 또는 Post → `cancelled` | 연결된 `pending`·`processing` Automation Job → `cancelled`, `pending` Approval → `cancelled` |
 | R6 | Approval → `approved` / `rejected` | Post `pending_approval → approved` / `rejected` |
 | R7 | Approval → `expired` | Post `pending_approval → draft` |
-| R8 | `publish` Job → `failed` | Post `publishing → failed` |
+| R8 | `publish` Job → `failed` | Post `approved`·`scheduled`·`publishing` → `failed` ⚙️ (43.2) |
 
 ### 11.10 Approval State (V1)
 
@@ -1449,7 +1451,9 @@ Bridge API의 오류 본문:
 | `create_post_draft` | n8n (WF-005) | `p_asset_id`, `p_platform`, `p_caption`, `p_hashtags` | `posts` 행 생성 (`draft`), Job `result.post_id`에 기록. 잠금을 잃으면 빈 결과 |
 | `sync_workflow_registry` | Python (시작 시) | `p_workflows jsonb` | `comfy_workflows` 갱신 (아래) |
 | `mark_post_publishing` | n8n (V1) | `p_post_id` | `approved·scheduled → publishing` |
-| `complete_publish` | n8n (V1) | `p_external_post_id`, `p_permalink`, `p_published_at` | Post `publishing → published` + Job `done` |
+| `save_publish_checkpoint` ⚙️ | n8n·게시 Worker (V1) | `p_checkpoint jsonb` | `result.checkpoint`에 병합. 되돌릴 수 없는 게시 호출 직전에 부르고, `false`면 호출하지 않는다 (43.8) |
+| `resolve_publish_verification` ⚙️ | n8n·게시 Worker (V1) | `p_outcome` (`not_published`) | 확인 실행에서 "게시되지 않음"이 확실할 때(Instagram 컨테이너 `FINISHED`·`EXPIRED`) `submitted_at`·`verify_only`를 지운다 (43.8) |
+| `complete_publish` | n8n·게시 Worker (V1) | `p_external_post_id`, `p_permalink`, `p_published_at`, `p_platform_response` ⚙️ (43.10) | Post `publishing → published` + Job `done` |
 | `record_metrics` | n8n (V1) | `p_post_id`, `p_snapshot_hours`, `p_metrics jsonb` | `performance_metrics` 행 + Job `done` |
 | `get_social_account_token` | n8n (V1) | `p_social_account_id` | Vault에서 토큰을 꺼내 반환 (서브 워크플로우 안에서만 사용) |
 
@@ -1615,6 +1619,7 @@ n8n이 받는 Webhook이다. 경로는 `/webhook/pa/…`로 통일한다.
   "platform": "instagram",
   "social_account_id": "…",
   "automation_job_id": "…",
+  "locked_at": "…",
   "idempotency_key": "publish:{post_id}",
   "checkpoint": { },
   "data": { }
@@ -1641,7 +1646,7 @@ n8n이 받는 Webhook이다. 경로는 `/webhook/pa/…`로 통일한다.
 }
 ```
 
-- `checkpoint`: 중간 결과. 상위 Workflow가 `automation_jobs.result`에 저장하고, 재시도 때 다시 넘긴다. 게시가 두 번 되는 것을 막는다 (14.15).
+- `checkpoint`: 중간 결과. 재시도 때 다시 넘긴다. 게시가 두 번 되는 것을 막는다 (14.15). ⚙️ 되돌릴 수 없는 호출 직전의 checkpoint는 하위 Workflow가 `automation_job_id`·`locked_at`으로 `save_publish_checkpoint`를 **직접** 불러 저장한다. 출력으로만 돌려주면 호출 도중 죽었을 때 남는 것이 없다 (43.8).
 - 토큰은 서브 워크플로우가 `get_social_account_token`으로 직접 꺼낸다. 상위 Workflow의 입력·출력·로그에 토큰이 나타나지 않는다.
 
 | operation | 단계 | data (입력) | data (출력) |
@@ -1660,6 +1665,7 @@ n8n이 받는 Webhook이다. 경로는 `/webhook/pa/…`로 통일한다.
 | `RATE_LIMIT` | api | ✅ (`retry_after_seconds` 포함) |
 | `TEMPORARY_API_ERROR` | api | ✅ |
 | `NETWORK_ERROR` | transient | ✅ |
+| `TIMEOUT` | timeout | ✅ (게시 호출을 보낸 뒤면 확인 실행, 43.8) |
 | `MEDIA_PROCESSING` | api | ✅ (플랫폼이 미디어를 아직 처리 중) |
 | `TOKEN_EXPIRED` | authentication | ❌ |
 | `INVALID_AUTH` | authentication | ❌ |
@@ -4930,6 +4936,8 @@ fail_automation_job(job_id, locked_at, error_type, error_code, message, retryabl
 
 **Backoff:** `app_settings.retry_backoff_seconds` = `[30, 120, 300, 900]` (n번째 실패 후 n번째 값). `max_attempts` 기본 3이므로 보통 30초, 2분 두 번 기다린다. 원안과 같다. `retry_after_seconds`를 주면 그 값을 쓴다 (SNS `Retry-After`, 생성 한도).
 
+> ⚙️ `publish` Job의 `verify_only` 확인 실행(게시 호출을 이미 보낸 Job)은 `attempts`가 아니라 `verify_attempts`로 끝낸다 (43.8).
+
 **재시도 분류** (13.12 코드 기준, 원안 코드 대응)
 
 | 재시도 | 재시도 안 함 |
@@ -6769,13 +6777,15 @@ claim_automation_job(publish) → CLAIM 기록
 | 1 | `publishing_enabled = true` | 게시 안 함, Job은 `pending`으로 1시간 뒤 (`PUBLISHING_DISABLED`, 재시도) |
 | 2 | Persona `active` | `POLICY_ERROR` (재시도 없음) |
 | 3 | Social Account `active`, 같은 Persona 소유, 토큰 만료 전 | `TOKEN_EXPIRED` / `INVALID_AUTH` |
-| 4 | Post가 `approved` 또는 `scheduled`, 연결된 Approval `approved` | 게시 안 함 (경합. Job `cancelled`) |
+| 4 | Post가 `approved` 또는 `scheduled`, 연결된 Approval `approved`. ⚙️ 재시도 Job이면 **그 Job이 선점한** `publishing`도 통과 (43.4) | 게시 안 함 (경합. Job `cancelled`) |
 | 5 | Asset이 `archived`·`rejected`가 아님 ⚙️ (원안: `APPROVED` 또는 자동 게시면 `READY`) | `INVALID_MEDIA` |
 | 6 | 플랫폼 미디어 규격 (28.9) | `INVALID_MEDIA` |
 | 7 | 캡션 규칙: 2,200자, 해시태그 30개, Persona `forbidden_expressions`·`content_rules.forbidden_topics` 단어 포함 여부, `is_sponsored`면 광고 표기 | `POLICY_ERROR` (Post는 `failed`, 사람이 고침) |
 | 8 | 하루 게시 한도 `limits.daily_publish_limit` (Persona별, 15.18) | `RATE_LIMITED` (다음 날 재시도) |
 | 9 | 이미 `external_post_id`가 있음 | 게시하지 않고 완료 처리 (중복 방지) |
 | 10 ⚙️ | 같은 User의 다른 Persona가 최근 30일 안에 거의 같은 이미지·캡션을 게시함 (36.6, Persona 2개 이상일 때) | 게시는 막지 않고 승인 화면에 `DUPLICATE_RISK` 경고 |
+| 11 ⚙️ | `late_policy = skip_after`이고 예약 시각보다 기준 이상 늦음 (41.6). Job이 PC를 기다리며 오래 `pending`일 수 있어 실행 직전에 본다 (43.4) | `MISSED_WINDOW` (재시도 없음) |
+| 12 ⚙️ | 브라우저 플랫폼 계정의 하루 게시 수·게시 사이 최소 간격 (41.7 조건 7) | `RATE_LIMIT` (`retry_after` = 다음 가능 시각) |
 
 원안의 `POST_BLOCKED` 상태는 만들지 않는다 ⚙️. 검사 실패는 Job `failed` + Post `failed` + `system_errors`로 남고, 사람이 고친 뒤 다시 실행한다. 원안의 "Approval Required?" 단계는 V1에서는 항상 필요하므로 4번에 포함된다.
 
@@ -11386,6 +11396,9 @@ half_open ──(15분 동안 시간당 속도가 기준 아래)──▶ closed
 | 016 System Health Monitor | pg_cron `evaluate_health` (1분), `sample_metrics` (5분) | n8n도 감시 대상 (37.6) |
 | 017 Backup & Verification, 019 Restore Verification | 서버 systemd timer `deploy/backup/backup.sh`, `verify.sh` | n8n은 셸 명령을 막음 (38.3) |
 | 018 Disaster Recovery | 사람이 따르는 절차 | 판단이 필요 (38.8) |
+| 022 Scheduled Media Publisher | WF-008 → WF-007 + PC 게시 Worker | 41.13 |
+| 023 Retry Handler, 024 Failure Handler | `fail_automation_job` + 트리거 R8 + 41.11 알림 | 43.9 |
+| 025 Recovery Monitor | pg_cron `recover_stale_jobs` + 확인 실행 (`verify_only`) | 43.8 |
 | 021 Resource & Budget Controller | DB 세 지점 (만들 때, LLM 직전, GPU 선점) | 우회 불가 (39.4) |
 
 **pg_cron** (Supabase): `recover_stale_jobs` 1분, `expire_approvals` 5분, `evaluate_health` 1분, `sample_metrics` 5분, `evaluate_ai_decisions` 매일 07:00, 보존 정리(Context 30일, 대화 1년, `execution_logs` 출력 90일, 지표 30일, 이벤트 1년), Asset 정리(`generated` 60일 → 보관, 보관 30일 → 파일 삭제), Long-term: `advance_experiments`, `advance_optimizations`.
@@ -11730,7 +11743,7 @@ python -m app.publisher   (GPU 브릿지와 다른 프로세스, 같은 PC)
 ```
 
 - 인증: 브릿지처럼 **전용 Supabase secret key**를 쓴다 (15.6: 인스턴스마다 다른 키). 그 키로는 Worker RPC만 부른다.
-- Heartbeat·회수: 기존 `heartbeat_automation_job`, `recover_stale_jobs`(11.6). 단 **게시 버튼을 누른 뒤에 멈춘 Job은 회수해서 다시 돌리지 않는다** (41.9).
+- Heartbeat·회수: 기존 `heartbeat_automation_job`, `recover_stale_jobs`(11.6). 단 **게시 버튼을 누른 뒤에 멈춘 Job은 회수하되 다시 게시하지 않고, 게시됐는지 확인만 한다** (41.9, 43.8).
 - PC가 꺼져 있으면 브라우저 플랫폼의 `publish` Job은 `pending`으로 기다리고, 41.6의 `late_policy`를 따른다. 감시 규칙(41.11)이 미리 알린다.
 
 ### 41.9 게시 성공 확인과 중복 방지
@@ -11801,7 +11814,7 @@ python -m app.publisher   (GPU 브릿지와 다른 프로세스, 같은 PC)
 | 영역 | 작업 |
 |---|---|
 | DB | `assets.origin`·`content_job_id` nullable·CHECK, `posts.origin`·`late_policy`·`scheduled_timezone`, 플랫폼 CHECK에 `likey`·`fantrie`, `create_media_upload`·`register_uploaded_media`·`schedule_own_media`·`duplicate_post`·`mark_post_published_manually`, `check_publish_ready`(28.8에서 옮김), Storage 정책(uploads/ 경로), `media` 버킷 형식·크기, `worker_status.kind`에 `publisher`, `platform_controls`·`platform_specs`·`retry_backoff_by_channel`, 오류 코드 |
-| n8n | WF-007이 `check_publish_ready` 사용, `late_policy` 확인(WF-008), `[PA] SNS - Instagram - Publish`에 Reels, `[PA] SNS - X - {Connect, Publish}`, 수동 게시 알림(WF-010) |
+| n8n | WF-007이 `check_publish_ready` 사용 (`late_policy`는 그 11번 검사, 43.4), Job 생성 때 `payload.channel`(43.4), `[PA] SNS - Instagram - Publish`에 Reels, `[PA] SNS - X - {Connect, Publish}`, 수동 게시 알림(WF-010) |
 | PC | `app/publisher/` (claim 루프, `login` 명령, Adapter 2개, 선택자 설정, checkpoint, 화면 캡처 정리), 작업 스케줄러 자동 시작(25.4와 같은 방식) |
 | Lovable | `/scheduler` 4개 화면, 업로드(브라우저 JPEG 변환), 캡션 검사 표시, 달력, 브라우저 자동화 켜기(admin, 약관 확인) |
 
@@ -12030,10 +12043,10 @@ Lovable은 테이블·칼럼·정책을 만들지 않는다 (22.3 금지 4). 위
 | 상태 | 버튼 (18.11 방식: `src/lib/actions.ts`에 정의) |
 |---|---|
 | `scheduled` (2분 전까지) | [수정] [취소] [복제] |
-| `scheduled` (2분 이내) | [복제] (수정·취소 없음: 곧 실행) |
+| `scheduled` (2분 이내) | [복제] (수정·취소 없음: 곧 실행). 예약 시각이 지났는데 Job이 아직 `pending`(PC 꺼짐 등)이면 [취소]도 보인다 (43.2) |
 | `publishing` | [복제] |
 | `published` | [게시물 보기] [복제] |
-| `failed` | [다시 시도] (지금 / 시각 정하기) [수정] [취소] [복제]. `UNCONFIRMED`면 맨 앞에 [게시됨으로 표시] |
+| `failed` | [다시 시도] (지금 / 시각 정하기) [수정] [취소] [복제]. `UNCONFIRMED`면 맨 앞에 [게시됨으로 표시], [다시 시도]는 "플랫폼에 올라가지 않은 것을 확인했나요? 올라가 있으면 두 번 게시됩니다"를 확인받은 뒤 (43.8) |
 | `cancelled` | [복제] |
 
 **오류 표시** (원안 42.25): 오류 코드를 17.12 방식으로 한국어 문장 + 할 일로 바꾼다 (`src/lib/errors.ts`에 41.9의 코드 추가: `SESSION_EXPIRED`, `CHALLENGE_REQUIRED`, `ADAPTER_BROKEN`, `UNCONFIRMED`, `MISSED_WINDOW`, `TOKEN_EXPIRED`, `INVALID_MEDIA`, `POLICY_ERROR`, `RATE_LIMIT`). 원래 코드는 "기술 정보 보기"를 펼쳤을 때만 보인다.
@@ -12102,3 +12115,462 @@ Lovable은 테이블·칼럼·정책을 만들지 않는다 (22.3 금지 4). 위
 | 시간대 변환 | 언급 | `date-fns-tz` 추가 | 임의 시간대 → UTC 정확 변환 |
 | 검색 | MVP는 캡션만 | 캡션·파일 이름·게시물 주소 | 칸이 이미 있음 |
 | 프롬프트 | 42.43 | lovable_master_prompt.md V1 Phase S (Post 상태·RPC·비공개 버킷·한국어) | 원안 프롬프트는 없는 테이블·상태를 만들게 함 |
+
+---
+
+## 43. Scheduler Backend & Execution 통합 명세 ✅
+
+> 41장의 예약 게시와 42장의 화면을 실제로 돌리는 Backend 계약이다. 원안은 `scheduled_posts` + `claim_due_scheduled_posts` + `[PA] 022~025` + n8n → `127.0.0.1:8001` 구조인데, 41장(2026-10-06 확정)대로 **정본은 `posts`이고 실행 단위는 `publish` Job**이다. 원안이 요구하는 원자적 선점·Lease·재시도·장애 복구·중복 방지는 `automation_jobs`의 기존 장치(11.5, 11.6, 14.17)로 대응시키고, 빠져 있던 것을 이 장에서 정한다: **되돌릴 수 없는 호출 직전의 checkpoint RPC, 회수된 `publish` Job의 "확인 먼저" 실행, 늦은 게시 검사 위치, 게시 Worker의 미디어 검증과 준비 상태 보고.** **아직 구현되지 않았다.** ⚙️ 표시는 원안을 조정한 부분이다 (43.16).
+
+### 43.1 책임과 정본 (원안 43.1·43.2)
+
+```text
+Lovable ──RPC──▶ posts (scheduled) ◀── 정본: 무엇을 언제 게시하나
+                    │
+        WF-008 (1분) │ create_automation_job(publish:{post_id})
+                    ▼
+             automation_jobs (publish) ◀── 정본: 실행 상태·Lease·시도·checkpoint
+              │ channel = api            │ channel = browser
+              ▼                          ▼
+        WF-007 (n8n, 클라우드)       python -m app.publisher (PC, DB에서 가져감)
+              │                          │
+       [PA] SNS - {p} - Publish     Adapter(likey, fantrie) + Playwright
+              └──────────┬───────────────┘
+                         ▼
+          complete_publish / fail_automation_job ──▶ posts·automation_jobs ──Realtime──▶ Lovable
+```
+
+| 구성 | 하는 일 | 하지 않는 일 |
+|---|---|---|
+| Lovable | 예약 RPC 호출, 상태 표시 (42장) | 상태 칸 직접 변경, n8n·PC 호출 |
+| Supabase | 상태·전이 규칙, 선점, 재시도 결정, 회수, 게시 전 검사 | 외부 호출 |
+| n8n | API 플랫폼 게시 실행, 알림 | 예약 데이터 저장·캐시, 재시도 판단 |
+| PC 게시 Worker | 브라우저 플랫폼 게시 실행 | 예약 판단, 들어오는 요청 받기 |
+
+원안 43.2의 원칙("n8n은 실행 상태를 캐시하지 않는다")은 그대로다. n8n과 Worker는 매번 선점한 Job 행과 `check_publish_ready` 결과만 믿는다.
+
+### 43.2 상태 대응 (원안 43.3)
+
+원안의 한 줄짜리 상태를 **Post 상태(무엇이 보이나) + Job 상태(실행이 어디까지 왔나)** 두 칸으로 나눈다. 둘 다 이미 있는 값이다 (11.8, 11.4).
+
+| 원안 | Post | `publish` Job | 비고 |
+|---|---|---|---|
+| `DRAFT` | – | – | `self_scheduled`는 한 트랜잭션에서 `scheduled`까지 간다 (41.3) |
+| `PENDING` | `scheduled` | 없음 → 예약 시각에 `pending` | WF-008이 Job을 만든다 |
+| `PROCESSING` | `publishing` | `processing` | `check_publish_ready` 통과 후 `mark_post_publishing` |
+| (재시도 대기) | `publishing` | `pending` (`run_after` 미래) | 원안의 `FAILED → PENDING` |
+| `COMPLETED` | `published` | `done` | `external_post_id` 필수 (11.8 CHECK) |
+| `FAILED` | `failed` | `failed` | 최종 실패만. 선점 직후 검사에서 실패해 Post가 아직 `scheduled`여도 `failed`로 간다 (11.9 R8을 넓힘 ⚙️. 원래는 `publishing → failed`만 있어서 `MISSED_WINDOW` 같은 검사 실패 뒤 Post가 "예약됨"으로 남았다) |
+| `CANCELLED` | `cancelled` | `cancelled` | `cancel_post`가 대기 중 Job도 함께 취소 |
+
+**수정 금지** (원안 43.3): `publishing`·`published`는 41.6대로 수정 불가. 추가 ⚙️: 예약 시각이 지났는데 Job이 아직 `pending`(PC 꺼짐 등)이면 수정은 막지만 **[취소]는 허용**한다. `cancel_post`는 `UPDATE automation_jobs SET status = 'cancelled' WHERE … AND status = 'pending'`이 1행일 때만 Post를 `cancelled`로 바꾸고, 0행(그 사이 선점됨)이면 `CONFLICT`를 돌려준다 (42.9 표에 반영).
+
+### 43.3 선점과 Lease (원안 43.4~43.8)
+
+**원안의 Lease 칸은 이미 있다.** 새 칸을 만들지 않는다 ⚙️.
+
+| 원안 칸 | 기존 칸 (`automation_jobs`, 0001) | 비고 |
+|---|---|---|
+| `worker_id` | `claimed_by` | `n8n`, `python:publisher-{pc}` |
+| `processing_started_at` | `locked_at` (선점마다), `started_at` (첫 선점) | `locked_at`은 잠금 토큰이기도 하다 (11.6) |
+| `locked_until` | `heartbeat_at` + job_type 제한 시간 (`publish` 5분, 11.6) | 저장하지 않고 계산. Heartbeat가 오면 자동으로 늘어난다 |
+| `attempt_count` | `attempts` / `max_attempts` | 선점 때 +1 |
+| `next_retry_at` | `run_after` | `fail_automation_job`이 정한다 |
+
+**원안의 `claim_due_scheduled_posts(p_batch_size)`는 만들지 않는다** ⚙️. 이유 두 가지.
+
+1. 이미 두 단계로 나뉘어 있다: WF-008이 예약 시각이 된 Post를 Job으로 바꾸고(멱등 키 `publish:{post_id}`라 몇 번 돌아도 1개), 실행자는 Job을 선점한다. 원안이 걱정한 "두 Worker가 같은 pending을 읽음"은 `claim_*`의 `UPDATE … WHERE status = 'pending' … RETURNING` + `FOR UPDATE SKIP LOCKED`가 이미 막는다 (11.5).
+2. **10개를 한 번에 선점하면 Lease가 틀어진다.** 하나씩 처리하는 동안 뒤의 9개는 아무도 Heartbeat를 보내지 않는 `processing`이 되고, 5분이 지나면 회수된다. 선점은 **실행 직전에 1건씩** 한다 (원안 43.13의 concurrency 1과 같은 효과).
+
+**Lease 유지 규칙**
+
+| 실행자 | Heartbeat | 이유 |
+|---|---|---|
+| WF-007 (API) | 보내지 않음 | API 호출 하나가 60초 이내(14.18)라 5분 제한 안에 끝난다. Reels 컨테이너 처리처럼 오래 걸리는 대기는 Lease를 쥐고 기다리지 않고 `MEDIA_PROCESSING`으로 Job을 돌려보낸다 (28.9) |
+| 브라우저 Worker | 30초마다 `heartbeat_automation_job` | 큰 영상 업로드가 5분을 넘을 수 있다 |
+
+Heartbeat가 `false`(잠금을 잃음)면 Worker는 **그 자리에서 멈추고, 게시 버튼은 누르지 않는다.** 버튼 직전의 checkpoint 저장(43.8)도 잠금을 확인하므로, 잠금을 잃은 Worker가 버튼까지 가는 경로는 없다. `save_publish_checkpoint` 호출이 예외(네트워크 오류)로 끝나도 `false`와 같이 보고 멈춘다. `submitted_at`을 쓴 뒤에도 성공 신호를 볼 때까지 Heartbeat를 계속 보낸다 (그 사이에 회수되면 확인 실행이 아직 끝나지 않은 게시를 "없음"으로 볼 수 있다).
+
+### 43.4 실행 흐름 (원안 43.9~43.15, 43.51)
+
+**채널은 Job을 만들 때 정한다** ⚙️ (원안 43.15의 n8n Switch → Local Uploader 대신). WF-008이 `platform_specs.{platform}.channel`과 `platform_controls`를 보고 정한다.
+
+| `payload.channel` | `worker` | 실행자 | 플랫폼 |
+|---|---|---|---|
+| `api` | `n8n` | WF-007 | Instagram, X |
+| `browser` | `python` | PC 게시 Worker | Likey, Fantrie (`browser_publishing = true`) |
+| (Job 없음) | – | WF-010 수동 게시 알림 | Likey, Fantrie (`browser_publishing = false`, 41.7) |
+
+WF-007 안의 플랫폼 Switch는 API 하위 Workflow(`[PA] SNS - instagram|x - Publish`)를 고르는 것만 한다. 플랫폼 CHECK(41.5) 때문에 지원하지 않는 플랫폼의 Post는 만들어질 수 없다. 그래도 Switch의 기본 가지는 `WORKFLOW_INVALID`(재시도 없음)로 끝낸다.
+
+**API 채널** (WF-008 → WF-007, 28.8을 이 장 기준으로)
+
+```text
+1. claim_automation_job(job_id, 'n8n')                     0행이면 조용히 끝 (14.5)
+2. payload.verify_only면 → 43.8 확인 실행 (3·4를 건너뜀)
+3. check_publish_ready(post_id)                            실패 → 그 결과의 코드로 fail_automation_job
+4. mark_post_publishing(job_id, locked_at, post_id)        scheduled → publishing (재시도라 이미 publishing이면 그대로)
+5. [PA] SNS - {p} - Publish (checkpoint 전달)
+     하위 Workflow가 되돌릴 수 없는 호출 직전에 save_publish_checkpoint(submitted_at)
+6. ok   → complete_publish(job_id, locked_at, external_post_id, permalink, published_at, platform_response)
+   실패 → save_publish_checkpoint(checkpoint) → fail_automation_job(code, retryable, retry_after)
+```
+
+**브라우저 채널** (41.8 루프를 이 장 기준으로)
+
+```text
+loop 15초:
+  claim_next_automation_job('publish', 'python', 'browser')
+  verify_only면 → 43.8 (아래 검사·전이를 건너뜀)
+  check_publish_ready → mark_post_publishing
+  미디어 받기·검증 (43.6)
+  Adapter.publish: 로그인 확인 → 업로드 → 캡션 → 미리보기
+     → save_publish_checkpoint(submitted_at)  false면 중단
+     → 게시 버튼 → 성공 신호 (41.9)
+  complete_publish / fail_automation_job
+  임시 파일 삭제 (finally)
+```
+
+브라우저 Worker는 **한 번에 Job 하나**만 처리한다 (브라우저 하나, 원안 43.13). 같은 계정의 하루 게시 수·게시 간격(41.7 조건 7)은 `check_publish_ready` 12번이 본다.
+
+**재시도 Job과 Post 상태** ⚙️: 재시도를 기다리는 Job의 Post는 이미 `publishing`이다 (43.2). 그런데 28.8 4번은 `approved`·`scheduled`만, `mark_post_publishing`은 `approved·scheduled → publishing`만 허용해서, 지금 정의대로면 재시도 Job이 4번에서 경합으로 취소되고 Post가 `publishing`에 영원히 남는다. 그래서 4번은 **그 Job이 선점한** `publishing` Post도 통과시키고, `mark_post_publishing`은 이미 `publishing`이면 성공으로 돌려준다(멱등).
+
+**게시 직전 검증** (원안 43.14): 원안의 항목은 `check_publish_ready`(28.8의 10개)에 이미 있다. id·미디어·플랫폼 존재 = 4·5번, 상태 = 4번, 중복 = 9번. `attempt_count < max_attempts`는 선점과 `fail_automation_job`이 보장한다. **두 개를 더한다** ⚙️:
+
+| # | 검사 | 실패 시 |
+|---|---|---|
+| 11 | `late_policy = skip_after`이고 `now() − scheduled_at > skip_after` (41.6) | `MISSED_WINDOW` (재시도 없음) |
+| 12 | 브라우저 계정의 하루 게시 수·게시 사이 최소 간격 (41.7 조건 7. 28.8 8번은 Persona 단위라 계정 단위 검사가 없었다) | `RATE_LIMIT` (`retry_after` = 다음 가능 시각) |
+
+41.12는 이 검사를 WF-008에 두었는데, WF-008은 예약 시각에 제때 Job을 만들고 **그 Job이 PC가 꺼진 동안 몇 시간 `pending`으로 기다릴 수 있다.** 그래서 늦었는지는 Job을 만들 때가 아니라 **실행 직전**에 봐야 한다. 두 채널이 같은 함수를 쓰므로 한 곳에만 둔다.
+
+### 43.5 Adapter 계약 (원안 43.16~43.18, 43.26)
+
+원안의 `{ success, external_post_id, platform, published_at, message }` 대신 **12.8 공통 형식**(`{ ok, data, checkpoint, error }`)을 쓴다 ⚙️. 브라우저 Adapter(Python)도 같은 모양의 `PublishResult`를 돌려준다. 그래야 `complete_publish`·`fail_automation_job`를 부르는 코드가 채널과 상관없이 같다.
+
+| 원안 | 12.8 |
+|---|---|
+| `success` | `ok` |
+| `external_post_id`, `published_at` | `data.external_post_id`, `data.permalink`, `data.published_at` |
+| `platform` | 입력의 `platform` (출력에 다시 싣지 않음) |
+| `message` | `error.code` + `error.message` + `error.retryable` |
+| – | `checkpoint` (중복 방지, 43.8) |
+
+**`platform_response`** (원안 43.27): 플랫폼 응답 원문은 저장하지 않는다. 확인에 필요한 칸만(`id`, `status`, `permalink`, `timestamp`, 브라우저는 성공 신호 종류와 최종 URL) 4KB 이하로 골라 `automation_jobs.result.platform_response`에 둔다. 헤더·토큰·쿠키는 넣지 않는다 (15.21).
+
+**토큰** (원안 43.16·43.19): API 토큰은 Vault에 있고 하위 Workflow가 `get_social_account_token`으로 꺼낸다 (28.6). 원안의 "n8n Credential에 SNS 토큰"과 "Python Webhook Token"은 두지 않는다. 앞의 것은 계정마다 다른 토큰이라 Vault가 맞고, 뒤의 것은 PC에 들어오는 요청이 없어서 필요 없다 (43.7).
+
+### 43.6 미디어 전달 (원안 43.20~43.22)
+
+| 채널 | 방법 | 유효 시간 |
+|---|---|---|
+| Instagram | n8n이 서명 URL을 만들어 `image_url`·`video_url`로 넘긴다 (Meta가 가져감) | **6시간** (42.3. 원안의 5~15분은 Reels 처리 중 URL이 만료될 수 있다) |
+| X | n8n이 Storage에서 파일을 **직접 받아** 미디어 업로드 API로 올린다 ⚙️. 외부에 URL을 넘기지 않는다 | – |
+| 브라우저 | Worker가 전용 secret key로 Storage에서 **직접 받는다** (42.3). 서명 URL을 만들지 않는다 | – |
+| AI Asset (공개 `media`) | 공개 URL 그대로 (15.13) | – |
+
+**브라우저 Worker의 내려받기와 검증** (원안 43.21·43.22를 Windows PC 기준으로)
+
+```text
+경로: %LOCALAPPDATA%\pa-publisher\tmp\{job_id}\{asset_id}.{ext}   (원안의 /tmp 대신. 41.7 조건 6과 같은 폴더 권한)
+받기: httpx 스트리밍, 받는 동안 sha256 계산
+```
+
+| 검사 | 기준 | 실패 |
+|---|---|---|
+| 크기 | `= assets.file_size` (원안의 `size > 0`보다 강함) | `INVALID_MEDIA` |
+| 체크섬 | `= assets.sha256` (41.2) | `INVALID_MEDIA` |
+| 형식 | 파일 앞 바이트(magic number)로 본 형식 `= assets.mime_type` (확장자만 믿지 않음) | `INVALID_MEDIA` |
+| 열림 | 이미지: Pillow `verify()`. 영상: MP4·MOV 컨테이너 헤더(`ftyp`) 확인. 길이는 예약 때 이미 검사함 (42.7) | `INVALID_MEDIA` |
+| 최대 크기 | `platform_specs.{p}.video_max_mb` 등 (원안의 고정 500MB 대신 플랫폼 값) | `INVALID_MEDIA` |
+| 받기 실패 | 네트워크·Storage 5xx | `NETWORK_ERROR` (재시도) |
+
+- 임시 폴더는 Job이 어떻게 끝나든 `finally`에서 지운다. Worker 시작 때 24시간 지난 남은 폴더도 지운다.
+- Worker는 URL을 입력으로 받지 않는다. Asset ID → `storage_bucket`·`storage_path`만 쓴다 (41.2의 SSRF 방지).
+
+### 43.7 PC 게시 Worker의 연결과 준비 상태 (원안 43.17·43.19·43.38~43.40)
+
+원안은 n8n이 `127.0.0.1:8001`에 HTTP로 요청하고 Bearer 토큰으로 막는 구조다. 41.8에서 정한 대로 **PC에 들어오는 포트가 없다** ⚙️. 그래서 원안의 `/health`·`/ready` 엔드포인트와 Webhook 토큰 대신 아래를 쓴다.
+
+| 원안 | 대신 |
+|---|---|
+| `POST /webhook/post` | Worker가 `claim_next_automation_job`으로 가져감 |
+| `Authorization: Bearer` (n8n Credential) | Worker 전용 Supabase secret key (15.6). Worker RPC만 부를 수 있음 |
+| `GET /health` | `report_worker_status(kind = 'publisher')` 30초. `last_seen_at` 90초 이내면 살아 있음 |
+| `GET /ready` | 같은 보고의 `ready` 칸 (아래) |
+| n8n이 게시 전 `/ready` 확인 | 필요 없음. Worker가 꺼져 있으면 아무도 Job을 선점하지 않는다 |
+
+```json
+{ "kind": "publisher", "version": "1.0.0",
+  "ready": {
+    "playwright": true, "browser_launch": true,
+    "adapters": { "likey": { "enabled": true, "selectors_version": "2026-10-01" },
+                  "fantrie": { "enabled": false, "selectors_version": "2026-10-01" } },
+    "sessions": { "<social_account_id>": { "state": "valid", "checked_at": "…" } } } }
+```
+
+- **세션 확인 시점**: Worker 시작 때와 Job 실행 직전(41.9 1번)에만 한다. 주기적으로 페이지를 열어 확인하지 않는다 (41.7 조건 3: 게시 외 동작 없음). 확인 결과는 다음 보고에 실린다.
+- `get_scheduler_targets`(42.5)는 이 보고로 `connected` / `publisher_offline` / `reconnect_required`를 계산한다.
+- **원안의 `PUBLISH_DEFERRED`** ⚙️: Worker가 꺼져 있으면 Job은 상태를 바꾸지 않고 `pending`으로 기다린다. 화면에 "대기"를 보이도록 `evaluate_health`(1분, 37.6)가 예약 시각이 지난 브라우저 `publish` Job에 `result.deferred = { "reason": "publisher_offline", "since": … }`를 쓰고, Worker가 돌아오면 지운다 (42.8의 "예약됨 · 대기"). 오래 기다린 Job은 43.4의 11번 검사가 처리한다.
+- **하나만 실행**: 같은 PC에서 두 번 켜지면 두 번째는 시작하지 않는다 (`%LOCALAPPDATA%\pa-publisher\publisher.lock`). 선점이 원자적이라 둘이 떠도 중복 게시는 없지만, 같은 세션 폴더를 두 브라우저가 열면 Playwright Persistent Context가 깨진다.
+- **Worker가 죽으면**: Heartbeat가 끊기고 5분 뒤 `recover_stale_jobs`가 회수한다. 버튼을 누른 뒤였는지에 따라 43.8로 간다.
+
+### 43.8 장애 복구와 게시 확인 (원안 43.34~43.37, 43.52)
+
+원안 43.36의 문제(게시는 됐는데 결과를 쓰기 전에 죽음 → `processing`만 남음 → 다시 게시)가 이 장의 핵심이다. 28.9(Instagram `container_id`)와 41.9(브라우저 `submitted_at`)가 따로 다루던 것을 **두 채널 공통 규칙**으로 묶는다 ⚙️.
+
+**규칙 1: 되돌릴 수 없는 호출 직전에 checkpoint를 DB에 쓴다.**
+
+| 채널 | 되돌릴 수 없는 호출 | 그 직전 checkpoint |
+|---|---|---|
+| Instagram | `POST /media_publish` | `container_id` (컨테이너 생성 직후) + `submitted_at` |
+| X | `POST /2/tweets` | `media_ids` (미디어 업로드 직후) + `submitted_at` |
+| 브라우저 | 게시 버튼 | `submitted_at` (41.9 3번) |
+
+새 Worker RPC **`save_publish_checkpoint(p_job_id, p_locked_at, p_checkpoint jsonb) → boolean`**: `result.checkpoint`에 병합한다. 잠금이 맞지 않으면 `false`이고, 실행자는 **호출하지 않고 멈춘다.** 지금까지 checkpoint는 실패 때 `fail_automation_job` 직전에만 저장했는데(28.8), 그러면 호출 중에 죽었을 때 남는 것이 없다.
+
+**규칙 2: `submitted_at`이 있는 Job은 다시 게시하지 않고 먼저 확인한다.** 아래는 모두 DB 함수(`recover_stale_jobs`, `fail_automation_job`)가 정한다. 실행자가 잘못 보고해도 일반 재시도가 되는 경로가 없다.
+
+| 상황 | 처리 |
+|---|---|
+| 회수, `submitted_at` 없음 | 지금과 같음 (`attempts < max_attempts`면 `pending` + 백오프, 아니면 `failed`) |
+| 회수, `submitted_at` 있음 | `attempts`와 상관없이 `pending` + `payload.verify_only = true`. 확인은 게시 시도가 아니다 |
+| 게시 실행 중 실패 보고, `submitted_at` 있음 | **`retryable` 값과 상관없이** `verify_only`. `ADAPTER_BROKEN`·`SESSION_EXPIRED`처럼 재시도 불가 코드여도 이미 게시됐을 수 있으므로 일반 `failed`로 두지 않는다 (그러면 Operator가 [다시 시도]로 두 번 게시한다). 원래 코드는 `result.last_error`에 남기고, 41.11 알림은 그대로 보낸다 |
+| 확인 실행 중 일시 실패 (API 오류, 회수) | `verify_only` 유지, `result.verify_attempts + 1`, 백오프. **`verify_attempts`가 `app_settings.publish_verify_max_attempts`(기본 5)에 닿으면 DB가 `UNCONFIRMED`로 `failed`** |
+| 확인 실행 중 재시도 불가 오류 (`SESSION_EXPIRED`, `CHALLENGE_REQUIRED`, `TOKEN_EXPIRED`) | 바로 `UNCONFIRMED` (원래 코드는 `result.last_error`) |
+
+11.4의 `attempts < max_attempts` 조건과 20.11의 "`attempts >= max_attempts`면 `failed`"는 `verify_only` Job에 적용하지 않는다. 확인 실행의 상한은 `verify_attempts`다 (11.4·20.11에 반영). 그래서 확인이 끝없이 돌지도, 확인 도중에 일반 실패로 끝나지도 않는다.
+
+**확인 실행** (원안 43.37의 `VERIFY_EXTERNAL_POST`)
+
+`verify_only` Job은 **`check_publish_ready`와 `mark_post_publishing`을 건너뛴다** ⚙️. 확인은 읽기만 하므로 긴급 정지(1번)·한도(8·12번)·늦은 게시(11번)로 막을 이유가 없고, 막으면 오히려 해롭다. 예를 들어 PC가 게시 직후 죽고 3시간 뒤에 켜지면 11번이 `MISSED_WINDOW`를 낸다. 그러면 Operator는 게시되지 않은 줄 알고 다시 게시한다. 확인 실행이 보는 것은 `external_post_id`가 이미 있는지(9번)뿐이다.
+
+```text
+verify_only Job 선점
+        ↓
+external_post_id 있음? ── 예 → 완료 처리
+        ↓ 아니오
+플랫폼에서 게시 여부 확인
+   ┌────────────┼──────────────────┐
+ FOUND       NOT FOUND           확인 실패
+   │            │                    │
+complete_    채널별 (아래)       verify_attempts + 1, 백오프
+publish                          상한이면 UNCONFIRMED
+```
+
+| 채널 | 확인 방법 | NOT FOUND일 때 |
+|---|---|---|
+| Instagram | `GET /{container_id}?fields=status_code`. `PUBLISHED`면 계정 최근 미디어에서 그 게시물 id를 찾아 완료 | `FINISHED`면 아직 게시되지 않은 것이 확실하다. `resolve_publish_verification(…, 'not_published')`로 `submitted_at`·`verify_only`를 지우고 **같은 실행에서 `media_publish`를 다시 부른다** (컨테이너 재사용, 규칙 1부터 다시). `EXPIRED`·`ERROR`면 같은 RPC로 지우고 `container_id`도 비운 뒤 일반 재시도 |
+| X | 계정 최근 게시물(`submitted_at − 1분` 이후)에서 같은 본문 | **`UNCONFIRMED`** (X API에는 중복 방지 키가 없다. 같은 본문 거부 동작이 있는지는 구현 시 확인하되, 그것에 기대지 않는다) |
+| 브라우저 | "내 게시물 목록"에서 같은 캡션의 최근 게시물 (41.9) | **`UNCONFIRMED`** |
+
+`resolve_publish_verification`의 `not_published`는 `platform_specs.{p}.verifiable = true`인 플랫폼(Instagram)에서만 받는다. 다른 플랫폼에서 부르면 거부한다.
+
+`UNCONFIRMED`는 Post `failed` + `publish_unconfirmed` 알림(41.11)이고, Operator가 플랫폼을 보고 [게시됨으로 표시] 또는 [다시 시도]를 누른다 (42.9). **사람이 확인하기 전에는 자동으로 두 번째 게시를 하지 않는다.** Instagram만 플랫폼이 "게시됐는지"를 확실히 알려주므로 자동으로 이어 간다.
+
+**사람의 재시도와 checkpoint 수명**: `UNCONFIRMED` 뒤의 [다시 시도](`retry_scheduled_post`, 42.4)는 "플랫폼에 올라가지 않은 것을 확인했다"는 Operator의 판단이다. 화면이 그 확인을 받는다 (42.9). **그때만** `result.checkpoint`(`submitted_at` 포함)·`payload.verify_only`·`result.verify_attempts`를 지운다. 지우지 않으면 같은 확인 → NOT FOUND → `UNCONFIRMED`가 반복되어 다시 게시할 수 없다. 이 값들을 지우는 경로는 이 RPC와 `resolve_publish_verification` 둘뿐이다.
+
+**중복 방지 장치 정리** (원안 43.34·43.35)
+
+| 장치 | 막는 것 |
+|---|---|
+| `publish:{post_id}` Unique (14.17) | 같은 Post에 Job 두 개 |
+| 원자적 선점 (11.5) | 같은 Job을 두 실행자가 |
+| 잠금 토큰 `locked_at` (11.6) | 회수된 Job의 늦은 결과 반영, 잠금을 잃은 실행자의 게시 (규칙 1) |
+| `check_publish_ready` 9번 | `external_post_id`가 이미 있는 Post를 다시 게시 |
+| `posts (platform, external_post_id)` Unique (28.14) | 같은 외부 게시물을 두 Post에 |
+| 규칙 2 | 결과를 잃은 게시를 다시 게시 |
+
+DB 복원 뒤의 대조(38장 `reconcile_after_restore`)도 이 확인 실행과 같은 방법을 쓴다.
+
+### 43.9 오류 분류와 재시도 (원안 43.29~43.33)
+
+원안의 분류를 12.8 정규화 코드로 바꾼다. 재시도 여부는 코드가 정하고, 결정은 `fail_automation_job`이 한다.
+
+| 원안 | 12.8 코드 | 재시도 |
+|---|---|---|
+| `NETWORK_ERROR` | `NETWORK_ERROR` | ✅ |
+| `TIMEOUT` | `TIMEOUT` (`submitted_at` 이후면 확인 실행, 43.8) | ✅ |
+| `TEMPORARY_PLATFORM_ERROR` | `TEMPORARY_API_ERROR` | ✅ |
+| `RATE_LIMIT` | `RATE_LIMIT` (`p_retry_after_seconds`) | ✅ |
+| `LOCAL_UPLOADER_TEMPORARY_ERROR` | 브라우저 쪽 원인별 `TIMEOUT`·`NETWORK_ERROR`·`TEMPORARY_API_ERROR` | ✅ |
+| `AUTH_ERROR` | `TOKEN_EXPIRED`·`INVALID_AUTH` (API), `SESSION_EXPIRED` (브라우저). 계정 `inactive` | ❌ |
+| `INVALID_MEDIA` | `INVALID_MEDIA` | ❌ |
+| `ACCOUNT_DISABLED` | `POLICY_ERROR` + 계정 `inactive` | ❌ |
+| `UNSUPPORTED_PLATFORM`, `INVALID_CONFIGURATION` | `WORKFLOW_INVALID` | ❌ |
+| `POLICY_ERROR` | `POLICY_ERROR`, 브라우저 보안 확인은 `CHALLENGE_REQUIRED` | ❌ |
+| `PUBLISH_FAILED` | 쓰지 않음. 구체적인 코드로 (28.10) | – |
+| `PUBLISH_DEFERRED` | 오류가 아님. `pending` 대기 (43.7) | – |
+| – | `UNCONFIRMED`, `MISSED_WINDOW`, `ADAPTER_BROKEN` (41.9) | ❌ |
+
+**재시도 간격**: API 30초 → 2분 → 5분 (20.11), 브라우저 5분 → 15분 → 60분 (41.9, 원안 43.30과 같음). Jitter는 `fail_automation_job`이 ±10%를 더한다 ⚙️ (여러 Job이 같은 장애로 한꺼번에 실패해도 같은 시각에 다시 몰리지 않게).
+
+**원안의 `[PA] 023 Retry Handler`·`[PA] 024 Failure Handler`는 만들지 않는다** ⚙️ (14.3과 같은 이유). 재시도 결정·`run_after`는 `fail_automation_job`, 최종 실패 → Post `failed`는 DB 트리거(11.9 R8), 기록은 `system_errors`(`fail_automation_job`이 남김), 알림은 41.11 규칙 → WF-010이다. Workflow로 두면 n8n이 멈췄을 때 재시도·실패 처리도 같이 멈춘다.
+
+**기록** (원안 43.33): `system_errors`에 `job_id`, `error_type`, `error_code`, 메시지, `retryable`. 메시지에는 토큰·쿠키·세션 경로·서명 URL을 넣지 않는다 (15.21). 서명 URL은 쿼리 문자열을 지우고 기록한다.
+
+### 43.10 Worker RPC 정리 (원안 43.28, 43.49·43.50)
+
+원안의 내부 REST(`/internal/scheduled-posts/{claim,complete,fail,recover}`)는 만들지 않고 Worker RPC로 둔다 (12장 방식). Operator RPC(42.4)는 `authenticated`, Worker RPC는 `service_role`만 `EXECUTE`할 수 있다 (12.5). 원안 43.49의 "사용자 API와 분리"가 이 권한 분리다.
+
+| RPC | 호출자 | 잠금 확인 | 이 장의 변경 |
+|---|---|---|---|
+| `create_automation_job` | WF-008 | – | `payload.channel` 설정 (43.4) |
+| `claim_automation_job` | WF-007 | – | – |
+| `claim_next_automation_job` | 게시 Worker | – | **`p_channel default null`** 추가 ⚙️: `payload->>'channel' = p_channel`인 것만. 같은 `publish`·`python` 조합에 다른 채널이 생겨도 Worker가 잘못 집지 않게 |
+| `check_publish_ready` | 둘 다 | – | 11번 `late_policy`, 12번 계정 한도, 4번에 이 Job의 `publishing` 허용 (43.4). `verify_only`면 부르지 않음 |
+| `mark_post_publishing` | 둘 다 | ✅ (12.5) | 이미 `publishing`이면 성공 (멱등, 43.4) |
+| `heartbeat_automation_job` | 게시 Worker | ✅ | – |
+| `save_publish_checkpoint` | 둘 다 | ✅ | **새로** (43.8) |
+| `complete_publish` | 둘 다 | ✅ | **`p_platform_response` 추가** ⚙️. 잠금 확인은 12.5 머리말대로(`p_job_id`·`p_locked_at`) 이미 있고, 표의 입력 칸에 빠져 있던 것을 원안 43.28의 "worker_id 일치"에 맞춰 명시한다 |
+| `fail_automation_job` | 둘 다 | ✅ | `submitted_at` 이후 실패는 `retryable`과 상관없이 `verify_only`, 확인 실행은 `verify_attempts` 상한 뒤 `UNCONFIRMED` (43.8), jitter (43.9) |
+| `resolve_publish_verification` | 둘 다 | ✅ | **새로**: 확인 결과 "게시되지 않음"이 확실할 때만(Instagram) checkpoint·`verify_only`를 지움 (43.8) |
+| `recover_stale_jobs` | pg_cron 1분 | – | `publish`의 `submitted_at` 처리 (43.8) |
+| `report_worker_status` | 게시 Worker | – | `ready` 칸 (43.7) |
+| `mark_post_published_manually` | Operator | – | (41.7, 42.4) |
+| `retry_scheduled_post` | Operator | – | `UNCONFIRMED`에서 부르면 checkpoint·`verify_only`·`verify_attempts`를 지움 (43.8) |
+
+### 43.11 감시 지표 (원안 43.41~43.43)
+
+41.11에 더한다. 새 테이블 없이 `automation_jobs`·`posts`·`monitoring_metrics`(37-A)에서 계산한다.
+
+| 지표 | 계산 |
+|---|---|
+| 예약·게시 중·완료·실패 수 | Post 상태별 count (42.6 요약 카드와 같은 쿼리) |
+| 대기 수 | `result.deferred`가 있는 `publish` Job |
+| 재시도율 | `attempts > 1`인 `publish` Job 비율, 플랫폼·채널별 |
+| 게시 소요 시간 | `published_at − started_at` (첫 선점부터 완료까지), P50·P95 |
+| 예약 지연 | `published_at − scheduled_at` (41.11, 원안 43.42) |
+| 플랫폼별 성공률·실패율 | 최근 7일 `publish` Job `done` / (`done` + `failed`) |
+| 게시 Worker 가용률 | `sample_metrics`(5분)에 `publisher_up` (0/1) 측정값을 더하고, 그 평균. 브라우저 예약이 있는 시간대만 따로도 계산 |
+| 확인 실행 수 | `verify_only` Job 수와 결과 (FOUND / NOT FOUND / UNCONFIRMED) |
+
+화면은 37장 Monitoring의 서비스 표에 "게시 Worker" 행, `/scheduler` 요약 아래 "최근 7일 성공률·평균 지연" 한 줄 (V1).
+
+### 43.12 보안 경계 (원안 43.44~43.47)
+
+| 구성 | 갖는 것 | 갖지 않는 것 |
+|---|---|---|
+| Lovable | 사용자 세션 (Google 로그인) | service key, SNS 토큰, 브라우저 세션 |
+| Supabase | DB·Auth·Storage, SNS 토큰(Vault, 28.6) | – |
+| n8n | n8n 전용 secret key | SNS 토큰 원본 저장 (Vault에서 그때그때 꺼냄), 브라우저 세션 |
+| PC 게시 Worker | Worker 전용 secret key, 브라우저 세션 (`%LOCALAPPDATA%`, 41.7 조건 6) | SNS API 토큰, 비밀번호 |
+| LLM | 없음 | 위 전부 (원안 43.45와 같음) |
+
+- 원안 43.44의 "외부에서 Python :8001에 닿지 않게"는 포트가 아예 없어서 성립한다 (43.7).
+- RLS(원안 43.46): `posts`·`assets`·`automation_jobs`는 이미 `persona_id` → `personas.user_id = auth.uid()`로 거른다 (40.5). 예약 게시를 위한 새 정책은 `media-uploads` 버킷뿐이다 (42.3).
+- service key를 Lovable에 주지 않는다 (원안 43.47, 22.3 금지 2).
+
+### 43.13 `posts`와의 관계 (원안 43.55~43.57)
+
+원안은 `scheduled_posts`에서 `posts`로 결과를 옮겨 적는데, 여기서는 처음부터 `posts`라 옮길 것이 없다 (42.11). 원안의 `source_type`은 이미 있는 두 칸으로 나뉜다.
+
+| 원안 `source_type` | 여기 |
+|---|---|
+| `AI_GENERATED` | `assets.origin = 'generated'` |
+| `EXISTING_MEDIA` | `assets.origin = 'uploaded'` |
+| (원안에 없음) 누가 예약했나 | `posts.origin = 'pipeline'` / `'self_scheduled'` (41.3) |
+
+미디어의 출처와 예약 경로는 다른 질문이라 칸도 둘이다 (AI가 만든 Asset을 Operator가 직접 예약할 수 있다). 원안 43.57의 "AI 생성 vs 기존 미디어 성과 비교"는 29장 차원 분석에 `asset_origin` 차원을 더해서 한다 (V1, Instagram·X만, 41.5).
+
+### 43.14 Workflow 번호 (원안 43.53·43.54)
+
+원안 43.54의 001~025 번호는 14.3의 WF 번호와 다르다. 40.7의 대응표에 이어 예약 관련만 정리한다.
+
+| 원안 | 여기 | 이유 |
+|---|---|---|
+| 007 Scheduled Post Dispatcher | WF-008 Scheduled Publisher | 같음 |
+| 022 Scheduled Media Publisher | WF-008 → WF-007 (API) + PC 게시 Worker (브라우저) | 41.13 |
+| 023 Scheduled Post Retry Handler | `fail_automation_job` | 43.9 |
+| 024 Scheduled Post Failure Handler | `fail_automation_job` + 트리거 R8 + 41.11 알림 | 43.9 |
+| 025 Scheduled Post Recovery Monitor | pg_cron `recover_stale_jobs` + 확인 실행 | 43.8. DB 안에서 돌아야 n8n이 멈춰도 복구된다 |
+
+### 43.15 구현 순서와 완료 기준 (원안 43.58~43.60)
+
+**순서** (원안 43.58을 16.11 Milestone에 맞춤)
+
+| 원안 STEP | 여기 | Milestone |
+|---|---|---|
+| 1 Schema, 2 RLS | 41.12 DB 항목 + 이 장의 RPC 변경 (43.10) | M7b |
+| 3 Claim RPC | 기존 `claim_*` + `p_channel`, `save_publish_checkpoint`, `complete_publish` 잠금 | M7 (게시 파이프라인과 함께) |
+| 4 Lovable UI | 42장 Phase S | M7b |
+| 5 n8n Publisher | WF-008·007 (28.8), `check_publish_ready` 사용 | M7 |
+| 6 Local Uploader | `app/publisher/` (41.8, 43.6·43.7) | M7b |
+| 7 Official API Adapter | Instagram (M7), X (M7b) | M7·M7b |
+| 8 Retry | `fail_automation_job` (이미 있음) + 채널별 간격·jitter | M7 |
+| 9 Recovery | `recover_stale_jobs` 변경 + 확인 실행 | M7 (Instagram) · M7b (브라우저·X) |
+| 10 Monitoring | 41.11 규칙 + 43.11 지표 | M7b |
+| 11 E2E | 아래 | M7b |
+
+**완료 기준** (원안 43.60의 항목 → 보장하는 곳)
+
+| 원안 항목 | 보장 |
+|---|---|
+| Atomic Claim | `claim_*` (11.5) |
+| Duplicate Prevention | 43.8 장치 표 |
+| Processing Lease | `locked_at`·`heartbeat_at`·`recover_stale_jobs` (43.3) |
+| Retry, Failure Classification | `fail_automation_job` + 12.8 코드 (43.9) |
+| Crash Recovery, External Publish Verification | 43.8 규칙 1·2, 확인 실행 |
+| Supabase RLS, Internal API Separation | 43.12, Worker RPC `service_role`만 (43.10) |
+| Credential Isolation | 43.12 표 |
+| Signed Media URL | Instagram 6시간, 화면 1시간 (42.3, 43.6) |
+| Local Uploader Authentication | Worker 전용 secret key, 들어오는 포트 없음 (43.7) |
+| Official API Adapter, Local Playwright Adapter | Instagram·X 하위 Workflow, `app/publisher/adapters/` |
+| Success Verification, External Post ID | 성공 신호 확인 (41.9), `published`는 `external_post_id` 필수 (11.8) |
+| Lovable UI·Calendar·Realtime·Cancel·Retry·Duplicate | 42.13 완료 기준 |
+| Monitoring, Error Logging, Schedule Delay, Platform Success Rate | 41.11, 43.11 |
+| E2E Test | 41.12 MVP 완료 조건 + 아래 |
+
+**테스트** (41.12 표에 더함. 실제 DB + 가짜 Adapter로 `tests/publisher/`에서)
+
+| 경우 | 기대 |
+|---|---|
+| WF-007 두 실행이 같은 `publish` Job을 선점 | 한쪽만 1행, 다른 쪽 0행 |
+| `media_publish` 응답 직전에 n8n이 죽음 | 5분 뒤 회수 → `verify_only` → 컨테이너 `PUBLISHED` → 그 id로 완료, 게시 1번 |
+| 컨테이너 생성 후, `media_publish` 전에 죽음 | 회수 → 확인 → `FINISHED` → `media_publish` 1번 |
+| X 게시 호출 중 타임아웃, 최근 게시물에 없음 | `UNCONFIRMED`, 자동 재게시 없음 |
+| 브라우저 Worker가 버튼 직후 강제 종료 | 회수 → `verify_only` → 목록에서 찾으면 완료, 없으면 `UNCONFIRMED` |
+| Heartbeat가 `false`인데 업로드는 끝남 | `save_publish_checkpoint`가 `false` → 버튼 안 누름 |
+| 회수된 Job에 원래 Worker가 늦게 `complete_publish` | 잠금 불일치로 0행, Post 변화 없음 |
+| `submitted_at` 이후 실패를 Worker가 `retryable = true`로 보고 | DB가 `verify_only`로 바꿈 |
+| `attempts = max_attempts`인데 `submitted_at` 상태로 회수 | `failed`가 아니라 `verify_only` |
+| 브라우저 게시 직후 PC가 죽고 3시간 뒤 켜짐 (`skip_after` 2시간) | 확인 실행은 11번을 건너뜀 → 목록에서 찾아 완료. `MISSED_WINDOW` 아님 |
+| 확인 실행이 계속 API 오류 | `verify_attempts` 5번째에 `UNCONFIRMED`, 무한 반복 없음 |
+| `submitted_at` 이후 `ADAPTER_BROKEN` | 일반 `failed`가 아니라 `verify_only` (+ `browser_adapter_broken` 알림) |
+| `UNCONFIRMED` 뒤 [다시 시도] (확인 동의) | checkpoint·`verify_only` 지워짐 → 새로 게시 |
+| 재시도 대기 Job(Post `publishing`)을 다시 선점 | 4번 통과, `mark_post_publishing` 멱등, 정상 게시 |
+| 선점 직후 검사 실패 (`MISSED_WINDOW`, `INVALID_MEDIA`) | Job `failed` + Post `scheduled → failed` (R8) |
+| PC가 3시간 꺼진 동안 Job `pending` | `result.deferred` 표시 → 켜진 뒤 11번 검사에서 `MISSED_WINDOW` |
+| 예약 시각이 지나 Job이 `pending`인 Post를 [취소] | Job `cancelled` + Post `cancelled`. 그 사이 선점됐으면 `CONFLICT` |
+| 내려받은 파일 sha256이 다름 | `INVALID_MEDIA`, 임시 파일 삭제 |
+| 같은 PC에서 Worker를 두 번 실행 | 두 번째는 lock 파일 때문에 시작하지 않음 |
+| 실패 기록·로그 | 토큰·쿠키·서명 URL 쿼리 없음 |
+
+### 43.16 원안 조정
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 정본 | `scheduled_posts` | `posts` (무엇) + `publish` Job (실행) | 41장 확정 |
+| 상태 | 한 줄 6개 | Post 상태 + Job 상태 두 칸 | 둘 다 이미 있음, 보이는 것과 실행을 분리 |
+| 선점 | `claim_due_scheduled_posts(10)` 일괄 | 기존 `claim_*`로 실행 직전 1건씩 | 일괄 선점은 뒤의 Job Lease가 만료됨 |
+| Lease 칸 | `worker_id`·`locked_until` 등 5개 새 칸 | `claimed_by`·`locked_at`·`heartbeat_at`·`attempts`·`run_after` | 같은 칸이 있음 |
+| 라우팅 | n8n Switch → Local Uploader | Job 생성 때 `payload.channel`, 브라우저는 PC가 가져감 | 원격 n8n은 PC localhost에 닿지 못함 (41.8) |
+| Polling | 5분 | WF-008 1분 (브라우저 Worker 15초) | 14.4 |
+| Adapter 응답 | `success`·`message` | 12.8 `ok`·`data`·`checkpoint`·`error` | 채널 공통 처리 |
+| `platform_response` | 저장 | 확인용 칸만 4KB, 헤더·토큰 없음 | 15.21 |
+| Complete RPC | `worker_id` 일치 | `complete_publish`의 잠금 토큰(12.5 머리말)을 입력 칸에 명시 + `p_platform_response` | 같은 기능, 표의 누락을 메움 |
+| 게시 직전 검증 | n8n 노드 | `check_publish_ready` + 11번 `late_policy` | 늦은 게시는 실행 직전에 봐야 함 |
+| 서명 URL | 5~15분 | Instagram 6시간, X·브라우저는 URL 없이 직접 받음 | Reels 처리 시간, 외부에 URL을 덜 넘김 |
+| 임시 파일 | `/tmp/scheduled-post-{uuid}` | `%LOCALAPPDATA%\pa-publisher\tmp\{job_id}\` | Windows PC, 41.7 폴더 권한 |
+| 파일 검증 | 존재·크기>0·MIME·확장자·열림·500MB | 크기·sha256 일치, magic number, 열림, 플랫폼별 최대 | 업로드 때 남긴 값과 대조 |
+| `/health`·`/ready` | HTTP 엔드포인트 | `report_worker_status` + `ready` 칸 | 들어오는 포트 없음 |
+| Bearer 토큰 | n8n Credential | 필요 없음 (Worker 전용 secret key) | 같음 |
+| `PUBLISH_DEFERRED` | 상태·오류 | `pending` 대기 + `result.deferred` 표시 | 상태를 늘리지 않음 |
+| Crash Recovery | 확인 후 완료/재시도 | checkpoint RPC(규칙 1) + `verify_only`(규칙 2, 검사 생략·`verify_attempts` 상한), Instagram만 자동 이어 가기, 사람의 재시도 때만 checkpoint 초기화 | 확실히 확인 가능한 플랫폼만 자동, 무한 확인·확인 막힘 방지 |
+| Post 실패 전이 | 언급 없음 | R8을 `scheduled`·`approved → failed`까지 넓힘 | 검사 실패 뒤 Post가 "예약됨"으로 남음 |
+| 오류 코드 | 자체 11개 | 12.8 정규화 코드 | 한 벌 |
+| 재시도 간격 | 5·15·60분 또는 jitter | API·브라우저 채널별 간격 + ±10% jitter | 41.9, 몰림 방지 |
+| Workflow | `[PA] 022~025` | WF-008·007 + PC Worker + DB 함수 + pg_cron | 14.3, n8n이 멈춰도 복구 |
+| 내부 API | REST 4개 | Worker RPC (`service_role`만) | 12장 |
+| `source_type` | `posts`에 새 칸 | `assets.origin` + `posts.origin` | 이미 있음, 출처와 예약 경로는 다른 질문 |
+| Workflow 번호 | 001~025 | 14.3 WF 번호 (40.7·43.14 대응표) | 기존 번호 유지 |

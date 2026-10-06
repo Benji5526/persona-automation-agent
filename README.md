@@ -37,7 +37,7 @@ docs/                  PRD, 기술 설계, 가이드
 | Milestone | 상태 |
 |---|---|
 | PRD v1.0 (1~8) | ✅ |
-| 기술 설계 v1.0 (9~42) | ✅ (17 UI/UX, 18 Frontend, 19 Python 실행 계층, 20 n8n 구현, 21 Supabase 구현, 22 Lovable 빌드 명세, 23 Lovable 프롬프트, 24 Supabase 적용 절차, 25 로컬 PC 운영, 26 n8n 서버 운영, 27 MVP E2E 테스트, 28 SNS 연동 V1 설계, 29 Analytics 설계, 30 AI Decision Engine 설계, 31 Fan Interaction & Memory 설계, 32 Autonomous Operation Loop 설계, 33 AI Permission·Safety 설계, 34 Experimentation 설계, 35 Self-Optimization 설계, 36 Multi-Persona 설계, 37 Monitoring·Observability 설계(37-A 데이터 모델 포함), 38 Backup·DR 설계, 39 Cost·Resource 설계, 40 최종 통합 명세, 41 예약 게시 모듈, 42 Scheduler 프론트엔드 명세 포함) |
+| 기술 설계 v1.0 (9~43) | ✅ (17 UI/UX, 18 Frontend, 19 Python 실행 계층, 20 n8n 구현, 21 Supabase 구현, 22 Lovable 빌드 명세, 23 Lovable 프롬프트, 24 Supabase 적용 절차, 25 로컬 PC 운영, 26 n8n 서버 운영, 27 MVP E2E 테스트, 28 SNS 연동 V1 설계, 29 Analytics 설계, 30 AI Decision Engine 설계, 31 Fan Interaction & Memory 설계, 32 Autonomous Operation Loop 설계, 33 AI Permission·Safety 설계, 34 Experimentation 설계, 35 Self-Optimization 설계, 36 Multi-Persona 설계, 37 Monitoring·Observability 설계(37-A 데이터 모델 포함), 38 Backup·DR 설계, 39 Cost·Resource 설계, 40 최종 통합 명세, 41 예약 게시 모듈, 42 Scheduler 프론트엔드 명세, 43 Scheduler 실행 통합 명세 포함) |
 | M0 Environment (Supabase, Cloudflare Tunnel, n8n 서버, Lovable) | 대기 (계정·결제가 필요한 직접 작업) |
 | M1 Database Foundation | ✅ 로컬 테스트 통과 · 실제 Supabase 적용 전 |
 | M2 Python Bridge v1 | ✅ 로컬 테스트 통과 · 실제 ComfyUI·Supabase 연결 전 (첫 실제 생성 절차: TECH_DESIGN 25.6) |
