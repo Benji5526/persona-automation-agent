@@ -114,7 +114,7 @@ Python은 로컬 PC에서 실행되는 Execution Layer다. Python은 AI의 "두�
 
 **주요 역할:** ComfyUI API 통신, Workflow 실행, Generation 상태 확인, 결과 파일 다운로드, 파일 검증, Supabase Storage Upload, Local filesystem 관리, 로컬 자원이 필요한 외부 API 연동, 필요 시 Playwright 기반 브라우저 자동화
 
-> ⚠️ **Playwright 사용 범위:** SNS 게시·댓글·DM을 브라우저 자동화로 처리하면 대부분 플랫폼의 이용약관 위반이고 계정 정지 위험이 크다. SNS 작업은 **공식 API만** 쓰고, Playwright는 공식 API가 없는 비(非) SNS 작업에만 쓴다. (15. Security에서 다시 다룬다.)
+> ⚠️ **Playwright 사용 범위:** SNS 게시·댓글·DM을 브라우저 자동화로 처리하면 대부분 플랫폼의 이용약관 위반이고 계정 정지 위험이 크다. SNS 작업은 **공식 API만** 쓰고, Playwright는 공식 API가 없는 비(非) SNS 작업에만 쓴다. (15. Security에서 다시 다룬다.) ⚙️ 예외: 공식 게시 API가 없는 Likey·Fantrie의 게시만, 41.7 조건으로 허용한다 (2026-10-06).
 
 현재 구현: [`src/comfy_bridge.py`](../src/comfy_bridge.py) (FastAPI, `POST /jobs`, `GET /health`)
 
@@ -396,7 +396,7 @@ n8n → (HTTPS 터널) → Python Bridge (토큰 인증, 요청 검증) → Comf
 | SNS Adapter 위치 | **n8n 서브 워크플로우** | 로컬 PC가 꺼져도 예약 게시·지표 수집이 계속됨. Instagram Graph API는 HTTP 호출만으로 충분함 |
 | Prompt 생성 위치 | **n8n → LLM** (Python 아님) | GPU가 필요 없는 작업은 클라우드에서 처리하고, 로컬 Python은 GPU 생성만 맡음 |
 | 상태 이름 | **PRD 5.15 상태 모델** | `PENDING/CLAIMED/RUNNING/COMPLETED/DEAD` 대신 객체별 소문자 상태 사용 |
-| SNS 자동화 방식 | **공식 API만** | 브라우저 자동화는 이용약관 위반·계정 정지 위험 |
+| SNS 자동화 방식 | **공식 API만** (예외: Likey·Fantrie 게시, 41.7 조건부, 2026-10-06) ⚙️ | 브라우저 자동화는 이용약관 위반·계정 정지 위험 |
 
 ---
 
@@ -569,6 +569,8 @@ Persona
 > ⚙️ 원안 상태 중 `REVIEW`, `APPROVED`, `SCHEDULED`는 Post의 상태다 (5.15). `CLAIMED`, `PROCESSING`은 `generating`, `GENERATED`는 `ready`, `PENDING`은 `queued`에 대응한다.
 
 ### 10.8 assets
+
+> ⚙️ 41.2: `origin`(`generated`/`uploaded`) 칸이 더해지고, 업로드 Asset은 `content_job_id`가 없다 (CHECK로 강제).
 
 실제로 생성된 이미지나 영상이다. 하나의 Content Job이 여러 Variant를 만들 수 있다 (`content_jobs 1 ─── N assets`).
 
@@ -1664,6 +1666,8 @@ n8n이 받는 Webhook이다. 경로는 `/webhook/pa/…`로 통일한다.
 | `POLICY_ERROR` | policy | ❌ |
 | `INVALID_MEDIA` | validation | ❌ |
 | `MESSAGING_WINDOW_CLOSED` | validation | ❌ (팬 응답 창이 닫힘, 31.3) |
+| `SESSION_EXPIRED`, `CHALLENGE_REQUIRED`, `ADAPTER_BROKEN`, `UNCONFIRMED` | authentication / policy / validation / api | ❌ (브라우저 게시, 41.9) |
+| `MISSED_WINDOW` | validation | ❌ (예약 시각에서 너무 늦음, 41.6) |
 
 ### 12.9 LLM Output Schema (F)
 
@@ -2795,7 +2799,7 @@ n8n을 원격 서버에 직접 설치하므로(14.21) 서버 보안은 직접 �
 | 리스크 | 규칙 |
 |---|---|
 | **AI 생성물 표기** | 실사처럼 보이는 AI 생성 이미지·영상은 플랫폼 정책에 따라 AI 생성임을 표기한다 (플랫폼이 제공하는 AI 라벨 + 프로필에 버추얼 인플루언서임을 명시). 정책이 바뀔 수 있으므로 V1 게시 기능을 만들 때 각 플랫폼의 최신 정책을 확인한다 |
-| **공식 API만 사용** | 게시·댓글·DM은 공식 API로만 한다. 브라우저 자동화(Playwright 등)로 SNS를 조작하지 않는다 (9.22). 자동 팔로우·좋아요 같은 활동 조작도 하지 않는다 |
+| **공식 API만 사용** | 게시·댓글·DM은 공식 API로만 한다. 브라우저 자동화(Playwright 등)로 SNS를 조작하지 않는다 (9.22). 자동 팔로우·좋아요 같은 활동 조작도 하지 않는다 ⚙️ **예외:** 공식 게시 API가 없는 Likey·Fantrie에 한해, 기본 꺼짐·약관 확인·게시만·우회 금지 등 41.7의 조건으로 브라우저 게시를 허용한다 (2026-10-06 확정) |
 | **API 이용 한도** | 플랫폼 Rate Limit을 지키고, `RATE_LIMIT`을 받으면 `Retry-After`만큼 기다린다 (14.11) |
 | **실존 인물** | 실존 인물의 얼굴·이름·신체를 생성하거나 합성하지 않는다. **FaceSwap의 원본 얼굴은 해당 Persona의 `face_ref`만** 허용한다 (13.10 검증에 추가). 대상 이미지도 시스템이 만든 Asset이나 사용 권한이 있는 이미지만 |
 | **미성년자·성적 콘텐츠** | Persona는 성인으로 설정한다. 성적·폭력적·혐오 콘텐츠는 `content_rules`의 금지 항목과 기본 Negative Prompt에 넣고, V1부터 사람 승인으로 한 번 더 걸러낸다 |
@@ -3291,6 +3295,7 @@ Lovable에는 secret key·service_role key를 절대 넣지 않는다. 브릿지
 | **M6 SNS Account** | Meta 앱 등록·심사, Instagram 비즈니스 계정 OAuth 연결 화면, 토큰 Vault 저장, `get_social_account_token`, 토큰 만료 전 갱신 | 10.9, 12.5 |
 | **M7 Approval & Publishing** | V1 Operator RPC 7개, Approval 화면, WF-007·WF-008, `[PA] SNS - Instagram - Publish` 서브 워크플로우(checkpoint로 중복 게시 방지), 긴급 게시 정지, `generation_enabled`·`emergency_stop_all`(32.6), AI 생성 표기·광고 표기, 일일 게시 한도 | 11.8, 12.4, 12.8, 14.15, 15.11, 32.6 |
 | **M8 Performance & Notification** | WF-009 (1h·6h·24h·48h·7d), `[PA] SNS - Instagram - Metrics`, WF-010 알림, `expire_approvals` cron, Video Generation·Upscale Workflow, Analytics 집계·`/analytics` (29) | 14.15, 13.4, 29 |
+| **M7b Scheduler** ⚙️ | 업로드 미디어 예약 게시 (41장): 업로드 Asset, `schedule_own_media`, `check_publish_ready`, `/scheduler`, X Adapter, Instagram Reels, PC 브라우저 게시 Worker(Likey·Fantrie, 조건부) | 41 |
 | **M9 AI Analysis & Decision** | `performance_insight.v1`, `ai_decision.v1`, WF-011·WF-012, `ai_decisions` 테이블, Agent 권한 수준, Agent 실행 예산, `performance_analyses`, Decision 검증·평가 (30) | 12.9, 29, 30, 14.16, 15.18, 15.19 |
 | **M10 Fan Interaction & Memory** | conversations·messages·fan_memories, WF-013·WF-014·WF-017, 프롬프트 인젝션 대응, 개인정보 보관 기한·삭제 요청 | 15.12, 15.20, 31 |
 | **V2b (M10 이후)** | 예약 제안(`schedule_post`), 전략 제안(`propose_strategy`), `pause_content`, Agent Level 3, 팬 자동 응답(`fan_reply_level` 2~3)·팬 지표·`fan_signals`, Strategy 저장(35.2~35.4, 수동·승인 적용), `content_need`, 자율 운영 지표·비용 추정(32.12·32.13), 이미지 안전 점수 기록 | 30.2, 31.2, 32, 33.9, 35.2 |
@@ -4018,6 +4023,7 @@ Frontend가 아는 값은 `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY` �
 | `/safety` ⚙️ | 33.14 (admin) | V2 |
 | `/experiments`, `/experiments/:id` ⚙️ | 34.14 | Long-term |
 | `/optimization` ⚙️ | 35.14 | V2b (전략 보기·수정), Long-term (롤아웃) |
+| `/scheduler`, `/scheduler/new`, `/scheduler/calendar`, `/scheduler/:id` ⚙️ | 41.10 | V1 (M7b) |
 | `/monitoring` ⚙️ | 37.12 | V1 |
 
 필터·탭·보기 방식은 URL Query에 둔다. 새로고침하거나 링크를 공유해도 같은 화면이 열린다.
@@ -6752,6 +6758,8 @@ claim_automation_job(publish) → CLAIM 기록
 ```
 
 **게시 전 검사** (원안 28.33 Safety Gate)
+
+> ⚙️ 41.6에서 이 검사를 DB 함수 `check_publish_ready(p_post_id)`로 옮겼다. WF-007과 PC 브라우저 게시 Worker가 같은 함수를 쓴다. 10번(Persona 간 중복 경고)은 36.6.
 
 | # | 검사 | 실패 시 |
 |---|---|---|
@@ -10470,6 +10478,7 @@ create index monitoring_alerts_status on public.monitoring_alerts (status, sever
 | `SECURITY_EVENT` | `security_spike`: `API_AUTH_FAILED` 1시간 50건 초과 (15.22에 이미 정한 알림을 이 규칙으로 옮김) |
 | (38장) | `backup_failed`, `backup_stale`, `backup_unverified`, `verify_failed`, `recovery_in_progress` (38.11) |
 | (39장) | `budget_state`, `quota_storage`, `budget_forecast`, `llm_cost_circuit`, `jobs_deferred` (39.11) |
+| (41장) | `publisher_offline`, `browser_session_expired`, `browser_challenge`, `browser_adapter_broken`, `publish_unconfirmed`, `publish_delay` (41.11) |
 
 **중복 제거** (원안 37-A.12): `dedupe_key = rule:service:resource_id[:persona_id]` (예: `error_spike:comfyui:OUT_OF_MEMORY`, `token_expiry:sns:instagram:{persona_id}`). 같은 키의 Alert가 열려 있으면 새로 만들지 않고 `occurrences`·`last_seen_at`·`observed`만 갱신한다. 원안의 `metadata.count`를 칸으로 올렸다. 같은 Alert가 더 높은 수준으로 걸리면 `severity`를 올린다 (내리지 않음).
 
@@ -11500,13 +11509,14 @@ Lovable 앱 코드는 Lovable 프로젝트(그리고 그것이 연결한 GitHub 
 | 버킷 | 경로 | 공개 |
 |---|---|---|
 | `media` | `persona/{persona_id}/assets/{asset_id}.{ext}`, 게시용 `{asset_id}_publish.jpg` | 공개 (추측할 수 없는 uuid, 목록 조회 정책 없음) |
+| `media` (업로드) | `persona/{persona_id}/uploads/{asset_id}.{ext}` (41.2) | 공개 |
 | `persona-private` | `persona/{persona_id}/refs/…` (Face·Style·Character Reference, LoRA 원본) | 비공개 (Signed URL) |
 
 원안의 `{user_id}/{persona_id}/{content_job_id}/image_001.png`는 쓰지 않는다. 파일명에 순서·주제를 넣지 않고 Asset ID만 쓴다 (15.5).
 
 ### 40.15 화면 경로 정본
 
-18.3이 정본이다. MVP: `/login`, `/dashboard`, `/personas`, `/personas/:id`, `/content-jobs`(`/new`, `/:id`), `/assets`(`/:id`), `/automation`, `/automation/errors`, `/settings`. V1: `/social`, `/posts`(`/:id`), `/approvals`, `/analytics`, `/monitoring`(개요·서비스·Incident·추이·백업·복구·비용 탭). V2: `/ai-decisions`, `/ai-activity`, `/conversations`(`/:id`), `/strategy`, `/safety`. V2b: `/optimization`(보기·수정). Long-term: `/experiments`(`/:id`), `/optimization` 롤아웃.
+18.3이 정본이다. MVP: `/login`, `/dashboard`, `/personas`, `/personas/:id`, `/content-jobs`(`/new`, `/:id`), `/assets`(`/:id`), `/automation`, `/automation/errors`, `/settings`. V1: `/social`, `/posts`(`/:id`), `/approvals`, `/analytics`, `/monitoring`(개요·서비스·Incident·추이·백업·복구·비용 탭). V2: `/ai-decisions`, `/ai-activity`, `/conversations`(`/:id`), `/strategy`, `/safety`. V1(M7b): `/scheduler`(`/new`, `/calendar`, `/:id`, 41.10). V2b: `/optimization`(보기·수정). Long-term: `/experiments`(`/:id`), `/optimization` 롤아웃.
 
 ### 40.16 Production 준비 체크리스트
 
@@ -11560,3 +11570,277 @@ Lovable 앱 코드는 Lovable 프로젝트(그리고 그것이 연결한 GitHub 
 | Storage 경로 `{user_id}/{persona_id}/{content_job_id}/image_001.png` | `persona/{persona_id}/assets/{asset_id}.{ext}` | 15.5 |
 | 비용 Context에 남은 금액 | 예산 상태·비율 | 39.8 |
 | Monitoring = n8n + Supabase, Backup = Supabase + n8n | 감시는 pg_cron, 백업은 서버 timer (n8n 아님) | 37.6, 38.3 |
+
+---
+
+## 41. Existing Media Scheduled Publisher ✅
+
+> 이미 가지고 있는 이미지·영상을 원하는 시각에 SNS에 자동 게시하는 모듈이다. AI 생성(LLM, ComfyUI, Content Job, AI Decision)을 하나도 거치지 않는다. 설계 원칙(2026-10-06 확정): **① V1의 게시 파이프라인(`posts`, WF-008·007, 게시 전 검사, 중복 방지, 성과 수집)을 그대로 쓴다. ② 공식 게시 API가 없는 Likey·Fantrie는 15.11의 "공식 API만" 원칙에 조건부 예외를 두고 PC의 브라우저 게시 Worker로 올린다 (41.7).** **아직 구현되지 않았다.** ⚙️ 표시는 원안을 조정한 부분이다 (41.13).
+
+### 41.1 목적과 경계
+
+```text
+AI 콘텐츠:  AI Decision / Operator → Content Job → 프롬프트(LLM) → 생성(ComfyUI) → Asset ─┐
+                                                                                      ├→ Post → 예약 → 게시 → 성과
+예약 게시:  Operator가 미디어 업로드 → Asset(origin = uploaded) ─────────────────────────┘
+```
+
+두 흐름은 **Asset에서 만난다.** 그 뒤의 게시 경로(WF-008 → `publish` Job → 게시 전 검사 → Adapter)는 원래부터 LLM·GPU를 쓰지 않는다. 그래서 원안 41.52의 장애 격리가 별도 테이블 없이 성립한다.
+
+| 멈춘 것 | 예약 게시 | 근거 |
+|---|---|---|
+| LLM (Claude API) | **계속** (캡션은 사람이 쓴다) | 41.4 |
+| ComfyUI·GPU | **계속** (업로드 미디어는 생성이 필요 없다) | – |
+| AI Decision·WF-012 | **계속** | – |
+| PC 전체 | 공식 API 플랫폼(Instagram·X)은 **계속**, 브라우저 플랫폼(Likey·Fantrie)만 지연 (41.8) | 9.22: Adapter는 클라우드 n8n |
+| n8n | 모두 지연. 재시작 뒤 지난 예약 처리 (늦은 정도에 따라, 41.6) | 37.8 |
+| 예약 게시 모듈의 문제 | AI 생성은 영향 없음 (원안 41.52 "반대로") | 생성은 Post 이전 단계 |
+
+**원안과 다른 큰 결정** ⚙️: 원안의 별도 `scheduled_posts` 테이블·상태 머신·`[PA] 022~024` Workflow는 만들지 않는다. 그것들이 하는 일(원자적 선점, 재시도, 실패 상태, 중복 방지, Realtime, 감시)은 V1 게시 파이프라인이 이미 정한 것과 같다 (28장, 14.15, 11.8). 두 벌을 두면 게시 전 검사·긴급 정지·중복 방지·성과 수집을 두 곳에서 따로 고쳐야 한다. 원안 41.52의 최종 그림도 두 흐름이 "SNS / Performance → Shared Analytics"에서 합쳐진다.
+
+### 41.2 업로드 미디어 = Asset
+
+**`assets` 변경** (V1 마이그레이션)
+
+| 변경 | 내용 |
+|---|---|
+| `origin` | 새 칸 `text`: `generated` / `uploaded` |
+| `content_job_id` | `not null` → nullable. CHECK: `origin = 'generated'`이면 필수, `uploaded`면 null |
+| 상태 | 업로드 Asset은 만들 때부터 `approved` (Operator 자신의 미디어) |
+| 경로 | `media/persona/{persona_id}/uploads/{asset_id}.{ext}` (15.5 규칙: 추측할 수 없는 uuid, 파일명에 원래 이름·주제를 넣지 않음. 원래 파일명은 `generation_metadata.original_name`) |
+| 체크섬 | `sha256`, `file_size` (38.6) |
+
+**업로드 순서** (원안 41.8 Option A)
+
+```text
+Lovable [미디어 올리기]
+ → RPC create_media_upload(p_persona_id, p_mime, p_size) : 형식·크기 확인 → asset_id·경로 발급, Asset 행(status = uploading 대신 아직 없음)
+ → Storage 업로드 (Storage 정책: 자기 Persona의 uploads/ 경로에만 insert, 15.5에 추가)
+ → RPC register_uploaded_media(p_asset_id, p_width, p_height, p_duration, p_sha256)
+     : Storage에 실제 파일이 있는지·크기가 같은지 확인 → assets 행 생성 (origin = uploaded, approved)
+```
+
+- **원안 41.8 Option B**("기존 Storage에서 고르기")는 Asset Library(17.10)에서 `approved` Asset을 고르는 것이다. AI가 만든 Asset과 업로드 Asset은 `origin`으로 구분해 배지로 보여준다 (원안과 같음).
+- **외부 URL로 미디어를 받지 않는다** ⚙️ (원안 41.26의 `media_url` + allowlist). 모든 미디어는 먼저 Storage에 올라온 Asset이고, 게시는 Asset ID로만 한다. 임의 URL을 내려받는 경로는 SSRF 위험이 있다 (15.8).
+- **형식과 크기** (원안 41.9): 버킷 허용 형식에 `video/quicktime`(.mov)을 더한다 (0005는 png·jpeg·webp·mp4). 영상 때문에 `media` 버킷 파일 크기 한도(지금 50MB)를 올려야 하는데, Supabase의 전역 업로드 한도는 요금제에 따라 다르다 (구현 시 확인). 플랫폼별 최종 허용 형식·크기는 41.5 표다.
+- **Instagram 이미지는 JPEG만** 받는다 (28.9). PNG·WEBP를 Instagram에 예약하면 Lovable이 **브라우저에서 JPEG로 변환**해 올린다(Canvas, 품질 92). PC의 `transcode` Job(28.9)을 기다리지 않아서 PC가 꺼져 있어도 된다 ⚙️. 비율(4:5 ~ 1.91:1)은 자르지 않고 예약 단계에서 막는다 (28.9와 같은 이유).
+- **업로드 Asset에 대한 검사**: 이미지 안전 점수(33.9)는 브릿지가 생성 때 계산하는 값이라 업로드 Asset에는 없다. 업로드 미디어는 Operator 자신의 것이고 Operator가 직접 예약하므로 사람 확인이 이미 있다. 그래서 AI 자동 게시(Level 4, 33.8)는 업로드 Asset을 대상으로 하지 않는다.
+
+### 41.3 직접 예약 = 승인
+
+V1에서는 모든 게시를 사람이 승인한다 (11.8: 승인 없이는 게시 경로가 없음). 예약 게시에서는 **Operator가 직접 미디어를 고르고 시각을 정하는 것 자체가 승인**이다. 승인 화면을 한 번 더 거치게 하지 않는다 ⚙️.
+
+**`schedule_own_media(p_asset_id, p_social_account_id, p_caption, p_hashtags, p_scheduled_at, p_timezone, p_late_policy)`** (Operator RPC, 한 트랜잭션)
+
+```text
+검사: 소유 Persona, Asset approved, 계정 active·같은 Persona, scheduled_at ≥ now() + 2분, 플랫폼 규격(41.5), 캡션 규칙(28.8 7번)
+ → posts 행 (draft)
+ → approvals 행 (approval_type = publish, status = approved, user_id = 본인, comment = 'self_scheduled')
+ → draft → pending_approval → approved → scheduled  (state_transitions에 reason = self_scheduled로 남긴다)
+```
+
+- 11.8의 상태 경로를 우회하지 않는다. 같은 경로를 한 번에 지나갈 뿐이고, "승인 없이는 게시 경로가 없다"는 불변식이 그대로다.
+- AI가 만든 Asset도 이 RPC로 예약할 수 있다 (Operator가 직접 고른 경우). AI가 이 RPC를 부르는 경로는 없다. AI의 예약 제안은 `schedule_post` Decision이고 게시 승인은 따로 받는다 (30.3, 원안 41.46).
+- `posts`에 `origin` 칸을 더한다: `pipeline`(Content Job에서 만든 초안) / `self_scheduled`. 화면 필터와 수정 정책(41.6)에 쓴다.
+
+### 41.4 캡션
+
+원안 41.10대로 Operator가 직접 쓴다. LLM을 부르지 않는다. 그래도 **캡션 규칙 검사**(28.8 7번: 길이, 해시태그 수, Persona 금지 표현·금지 주제, 광고 표기)는 같은 함수로 거친다. 금지 표현은 Persona의 정체성 규칙이라 사람이 쓴 캡션에도 적용한다. 원안 41.10의 선택 기능 [AI 캡션 생성]은 V2에 둔다. 누르면 Caption Agent(33.2)가 초안을 채우고 사람이 고친다. 예약 경로는 바뀌지 않는다.
+
+### 41.5 플랫폼
+
+| 플랫폼 | 방식 | 이미지 | 영상 | 성과 수집 | 단계 |
+|---|---|---|---|---|---|
+| Instagram | 공식 Content Publishing API (28.9). n8n 하위 Workflow | JPEG, 4:5 ~ 1.91:1 (28.9) | **Reels** (`media_type = REELS`, `video_url`. 컨테이너 처리 대기 후 게시) | ✅ (29장) | 이미지 V1, Reels V1 후반 |
+| X | 공식 API v2 (OAuth 2.0 사용자 인증, 토큰은 Vault, 28.4·28.6과 같은 방식). 미디어 업로드 → 게시 | JPEG·PNG·WEBP | MP4 | 공식 API가 주는 범위 | V1 후반 |
+| Likey | **브라우저 게시 Worker** (41.7·41.8) | 플랫폼 기준 | 플랫폼 기준 | ❌ (API 없음) | V1 후반, 조건부 |
+| Fantrie | **브라우저 게시 Worker** | 플랫폼 기준 | 플랫폼 기준 | ❌ | V1 후반, 조건부 |
+| 기타 (원안 `Other`) | 만들지 않는다 ⚙️ | – | – | – | – |
+
+- 플랫폼별 형식·용량·영상 길이·API 이용 등급과 요금(특히 X API의 게시 권한 등급)은 **구현 시 각 플랫폼의 최신 문서로 확인**한다. 값은 `app_settings.platform_specs`에 두고 예약 검사·게시 전 검사가 함께 쓴다.
+- `posts.platform`·`social_accounts.platform` CHECK에 `likey`, `fantrie`를 더한다 (0001은 `instagram`·`tiktok`·`x`).
+- **원안의 `Other`**는 두지 않는다. 게시 방법이 없는 플랫폼에 예약을 받으면 "예약됨"으로 보이고 아무 일도 일어나지 않는다.
+- **성과가 없는 플랫폼**: Likey·Fantrie 게시물은 `performance_metrics`가 생기지 않으므로 기준선·차원 분석(29장)에서 빠진다. 화면에는 "이 플랫폼은 성과를 가져올 수 없음"으로 보인다. 실험(34장)·최적화(35장) 대상도 아니다.
+- **플랫폼 연결 상태** (원안 41.12): API 플랫폼은 `social_accounts` 상태(28.5), 브라우저 플랫폼은 계정 상태 + 게시 Worker가 켜져 있는지(`worker_status`, 41.8) + 세션 유효 여부. 연결 안 됨이면 예약 버튼을 막는다.
+
+### 41.6 예약, 수정, 취소, 늦은 게시
+
+**실행**: 기존 경로 그대로다. WF-008(1분 주기, 14.4)이 `scheduled_at`이 된 Post에 `publish` Job(`publish:{post_id}`)을 만든다. 원안 41.20의 5분 Polling(오차 ±5분)보다 정밀하다. 선점은 `claim_automation_job`의 원자적 선점이라 원안 41.17·41.18의 중복 게시 문제(두 실행이 같은 행을 집음)가 생기지 않는다. 원안이 제안한 `FOR UPDATE SKIP LOCKED` 선점이 이미 그것이다 (11.5).
+
+| `publish` Job 담당 | 플랫폼 |
+|---|---|
+| WF-007 (n8n, `worker = 'n8n'`) | Instagram, X |
+| 브라우저 게시 Worker (PC, `worker = 'python'`, `payload.channel = 'browser'`) | Likey, Fantrie |
+
+**게시 전 검사** (28.8의 10개)는 지금 WF-007 안에 있다. 브라우저 Worker도 같은 검사를 받아야 하므로 **DB 함수 `check_publish_ready(p_post_id)`로 옮긴다** ⚙️. WF-007과 브라우저 Worker가 선점 직후 같은 함수를 부른다. 검사 규칙이 한 곳에만 있게 된다.
+
+**늦은 게시** ⚙️ (원안에 없음): n8n이나 PC가 오래 멈췄다가 돌아오면 지난 예약이 한꺼번에 게시된다. 시간이 중요한 게시물(이벤트 공지 등)은 늦게 올라가면 오히려 해롭다. 그래서 Post마다 `late_policy`를 둔다.
+
+| `late_policy` | 예약 시각보다 늦어진 정도 | 처리 |
+|---|---|---|
+| `publish_anyway` | 상관없음 | 게시 |
+| `skip_after` (기본, 2시간) | 2시간 이내면 게시, 넘으면 | `failed` (`MISSED_WINDOW`, 재시도 없음) + 알림. Operator가 [새 시각으로 다시 예약] |
+
+**수정·취소·복제** (원안 41.36~41.38)
+
+| 상태 | 수정 | 취소 | 복제 |
+|---|---|---|---|
+| `scheduled` (예약 2분 전까지) | 미디어·캡션·계정·시각 수정 가능. `self_scheduled` Post는 **수정한 사람이 곧 승인자**라서 새 승인 행을 자동으로 만들고 `scheduled`를 유지한다 (28.7의 "승인 뒤 바뀌면 다시 승인 대기"를 `self_scheduled`에서는 이렇게 처리) ⚙️ | 가능 (`cancel_post`) | 가능 |
+| `publishing` | 불가 | 불가 (플랫폼 업로드 중) | 가능 |
+| `published` | 불가 (원본 기록 유지) | – | 가능 (`duplicate_post(p_post_id, p_scheduled_at)` → 새 Post) |
+| `failed` | 가능 | 가능 | 가능. [재시도]는 `failed → scheduled`(11.8에 이미 있는 전이) |
+
+**여러 개 예약** (원안 41.39): 원안의 CSV(`media_url, caption, platform, datetime`)는 외부 URL이라 받지 않는다. 대신 **여러 파일을 한 번에 올리고, 표에서 파일마다 플랫폼·캡션·시각을 채우거나 CSV(파일 이름 기준)를 붙여 넣는다.** 잘못된 행은 표시만 하고 나머지는 예약한다 (원안 권장과 같음). V2.
+
+### 41.7 브라우저 자동화 예외 (2026-10-06 확정) ⚙️
+
+15.11·9.22의 "SNS는 공식 API만"에 **Likey·Fantrie에 한한 조건부 예외**를 둔다. 공식 게시 API가 없는 플랫폼에서, Operator 자신의 계정에, Operator 자신의 미디어를 올리는 경우만이다. 약관 위반 여부와 계정 정지 위험은 **Operator가 확인하고 감수한다.** 시스템은 아래 조건 밖으로 나가지 않는다.
+
+| # | 조건 | 강제 방법 |
+|---|---|---|
+| 1 | **기본 꺼짐.** 플랫폼별로 admin이 켠다 | `app_settings.platform_controls.{likey,fantrie}.browser_publishing = false`. 켤 때 RPC가 "그 플랫폼의 이용약관을 확인했다"는 확인과 날짜를 받고 `security_events`에 남긴다. 확인 후 1년이 지나면 다시 확인을 요구한다 |
+| 2 | 한 Persona에 플랫폼당 계정 하나, Operator 본인 계정 | `social_accounts` Unique (Persona, 플랫폼) for browser 플랫폼 |
+| 3 | 게시만 한다 | 브라우저 Worker의 Adapter에는 "게시" 동작 하나만 있다. 댓글·DM·팔로우·좋아요·탐색·수집 같은 동작은 코드에 없다 (원안 41.29) |
+| 4 | **우회하지 않는다** | CAPTCHA·보안 확인·2단계 인증·"자동화 감지" 화면이 나오면 **즉시 멈춘다** (`CHALLENGE_REQUIRED`, 재시도 없음, 알림). 스텔스 플러그인, 지문 위장, 사람처럼 보이게 하는 조작, 프록시·IP 교체를 쓰지 않는다 (원안 41.29) |
+| 5 | 비밀번호를 저장하지 않는다 | 로그인은 Operator가 **눈에 보이는 브라우저 창**에서 직접 한다 (`python -m app.publisher login --account …`). 시스템은 그 뒤의 세션(Playwright Persistent Context)만 쓴다 (원안 41.28) |
+| 6 | 세션은 PC에만 | `%LOCALAPPDATA%\pa-publisher\{social_account_id}\` (Windows 사용자 권한만). Git·DB·Storage·로그·LLM에 넣지 않는다. 백업하지 않는다 (잃으면 다시 로그인) |
+| 7 | 횟수 제한 | 계정당 하루 게시 수(`platform_specs.{p}.daily_limit`, 기본 5)와 게시 사이 최소 간격(기본 30분). 15.18의 Persona 하루 게시 한도와 함께, 더 엄격한 쪽 |
+| 8 | 계속 실패하면 끈다 | 같은 플랫폼에서 `ADAPTER_BROKEN`(화면 구조 변경으로 요소를 못 찾음)이 3번 연속이면 그 플랫폼의 브라우저 게시를 자동으로 끄고 알린다 |
+| 9 | 미성년 관련 콘텐츠 금지 | 15.11 그대로. 업로드 미디어도 예외가 아니다 |
+
+조건 1·8로 꺼지면, 그 플랫폼의 예약은 게시 시각에 **수동 게시 알림**으로 바뀐다: WF-010이 미디어 링크·캡션·플랫폼 주소를 보내고, Operator가 직접 올린 뒤 [게시함](선택: 게시물 주소)을 누르면 `published`로 바뀐다. 자동화를 끄더라도 예약 기능은 계속 쓸 수 있다.
+
+### 41.8 브라우저 게시 Worker
+
+원안 41.25~41.27은 n8n이 로컬 업로더(`127.0.0.1:8001`, `POST /webhook/post`)를 HTTP로 부르는 구조다. 그런데 n8n은 원격 서버에 있어서 PC의 `127.0.0.1`에 닿지 못한다 (닿게 하려면 새 터널 경로가 필요하다). 그래서 **반대로 한다** ⚙️: PC의 Worker가 DB에서 Job을 **가져간다**. 브릿지가 생성 Job을 처리하는 것과 같은 방식이고, PC로 들어오는 포트가 하나도 없다.
+
+```text
+python -m app.publisher   (GPU 브릿지와 다른 프로세스, 같은 PC)
+  loop (15초):
+    claim_next_automation_job(job_type = 'publish', worker = 'python')   ← payload.channel = 'browser'
+    check_publish_ready(post_id)                                         ← 41.6
+    Asset을 Storage에서 받음 (Asset ID로, 체크섬 확인)
+    Adapter(platform).publish(media, caption)                           ← 41.9
+    성공 → complete_publish(external_post_id 또는 게시물 주소, published_at)
+    실패 → fail_automation_job(코드, retryable)
+  report_worker_status(kind = 'publisher', …)  30초                     ← 0007 kind CHECK에 'publisher' 추가
+```
+
+- 인증: 브릿지처럼 **전용 Supabase secret key**를 쓴다 (15.6: 인스턴스마다 다른 키). 그 키로는 Worker RPC만 부른다.
+- Heartbeat·회수: 기존 `heartbeat_automation_job`, `recover_stale_jobs`(11.6). 단 **게시 버튼을 누른 뒤에 멈춘 Job은 회수해서 다시 돌리지 않는다** (41.9).
+- PC가 꺼져 있으면 브라우저 플랫폼의 `publish` Job은 `pending`으로 기다리고, 41.6의 `late_policy`를 따른다. 감시 규칙(41.11)이 미리 알린다.
+
+### 41.9 게시 성공 확인과 중복 방지
+
+원안 41.30대로 **버튼을 눌렀다는 것은 성공이 아니다.** 그리고 브라우저 게시는 API처럼 "같은 요청을 다시 보내도 안전한지" 알 수 없다. 버튼을 누른 뒤 응답을 잃고 다시 시도하면 **두 번 게시된다.** 그래서 Job에 checkpoint를 남긴다 (28.9의 Instagram `container_id`와 같은 생각).
+
+```text
+1. 로그인 상태 확인 (게시 화면 진입). 로그인 화면이면 → SESSION_EXPIRED (재시도 없음, 계정 inactive, 알림)
+2. 미디어 업로드 → 캡션 입력 → 미리보기 확인
+3. checkpoint.submitted_at = now()  ← 게시 버튼을 누르기 직전에 DB에 기록
+4. 게시 버튼
+5. 성공 신호 확인 (플랫폼별: 완료 화면, URL 변화, 내 게시물 목록에 새 항목) → 게시물 주소·ID
+```
+
+| 실패 시점 | 처리 |
+|---|---|
+| 3번 전 (페이지 로딩 지연, 업로드 실패, 네트워크) | 재시도 가능 (`TIMEOUT`·`NETWORK_ERROR`·`TEMPORARY_API_ERROR`) |
+| 3번 후, 5번 성공 신호를 못 봄 | **자동 재시도 금지.** 먼저 "내 게시물 목록"에서 같은 캡션의 최근 게시물을 찾아본다. 있으면 그 주소로 `complete_publish`. 없거나 확인할 수 없으면 `UNCONFIRMED`(재시도 없음) → Post `failed` + 알림 → Operator가 플랫폼을 보고 [게시됨으로 표시] 또는 [다시 시도] |
+| 보안 확인 화면 | `CHALLENGE_REQUIRED` (41.7 조건 4) |
+| 요소를 못 찾음 | `ADAPTER_BROKEN` (41.7 조건 8) |
+
+- **Adapter 코드**: `app/publisher/adapters/{likey,fantrie}.py`. 화면 요소 선택자는 코드가 아니라 버전이 있는 설정 파일(`selectors.{platform}.json`)에 둔다. 플랫폼 화면이 바뀌면 그 파일만 고친다.
+- **기록**: 단계별로 `execution_logs`(`service = 'browser'`). 실패 때만 화면 캡처를 PC 로컬에 7일 둔다 (팬·개인정보가 찍힐 수 있으므로 Storage에 올리지 않는다).
+
+**재시도 간격** (원안 41.31): 원안의 5분 → 15분 → 60분을 브라우저 게시에 쓴다 (`retry_backoff_seconds`를 job별로 덮어쓰는 `app_settings.retry_backoff_by_channel.browser = [300, 900, 3600]`). API 게시는 기존 30초 → 2분 → 5분 (20.11). 재시도 가능·불가능 오류의 구분은 원안과 같고, 코드는 12.8 정규화 코드 + 위의 `SESSION_EXPIRED`·`UNCONFIRMED`·`CHALLENGE_REQUIRED`·`ADAPTER_BROKEN`·`MISSED_WINDOW`이다 (12.8 표에 추가).
+
+### 41.10 화면
+
+원안 41.5의 경로를 18.3에 더한다 (V1). 예약 게시의 정본 데이터는 `posts`이므로 **`/scheduler`는 Post를 시간 중심으로 보는 화면**이다. AI 콘텐츠에서 나온 예약도 함께 보인다 (필터 `origin`).
+
+| 경로 | 내용 (원안) |
+|---|---|
+| `/scheduler` | 요약(예약·오늘·완료·실패 수), 다가오는 예약 목록(시각, 플랫폼 배지, 썸네일, 상태). 필터: Persona, 플랫폼, 상태, `origin` (원안 41.6) |
+| `/scheduler/new` | ① 미디어(업로드 / Asset Library에서 선택, 미리보기) ② 계정(Persona → 플랫폼 계정, 연결 상태 41.5) ③ 캡션(글자 수·해시태그 수·금지 표현 실시간 표시) ④ 날짜·시각·시간대(기본: Persona 시간대 36.8) ⑤ 늦은 게시 정책 ⑥ [예약] (원안 41.7) |
+| `/scheduler/calendar` | 월·주·일 보기, 플랫폼 배지(IG·X·LK·FT), 끌어서 시각 변경(`scheduled`일 때만) (원안 41.34) |
+| `/scheduler/:id` | `/posts/:id`와 같은 상세 화면 (미리보기, 상태, 시도 횟수, 마지막 오류, 게시 시각, 게시물 주소, 실행 기록). [재시도] [수정] [취소] [복제] [게시됨으로 표시] (원안 41.33·41.35) |
+
+- 상태 표시는 Realtime(`posts`, `automation_jobs`, 18.19)으로 바뀐다: 예약됨 → 게시 중 → 완료 / 실패 (원안 41.40).
+- 실패 사유는 오류 코드를 사람 말로 바꿔 보여준다 (17.12): 예) `SESSION_EXPIRED` → "Likey 로그인이 만료됐어요. PC에서 다시 로그인해 주세요".
+
+### 41.11 감시와 비용
+
+**지표** (원안 41.41~41.43): 새 테이블 없이 계산한다.
+
+| 지표 | 계산 |
+|---|---|
+| 게시 지연 | `published_at − scheduled_at` (P50·P95, 플랫폼별). 원안의 `publish_delay_seconds` |
+| 성공률·실패율·재시도율 | `publish` Job (`origin`, 플랫폼별) |
+| 수동 처리 수 | `UNCONFIRMED`·`MISSED_WINDOW`·수동 게시 알림 |
+
+**알림 규칙** (37-A.4 규칙 표에 더함)
+
+| 규칙 | 조건 | 수준 |
+|---|---|---|
+| `publisher_offline` | 브라우저 플랫폼 예약이 30분 안에 있는데 게시 Worker 보고가 90초 넘게 없음 | high |
+| `browser_session_expired` | `SESSION_EXPIRED` | high |
+| `browser_challenge` | `CHALLENGE_REQUIRED` | high |
+| `browser_adapter_broken` | `ADAPTER_BROKEN` (3번이면 자동 꺼짐) | high |
+| `publish_unconfirmed` | `UNCONFIRMED` | high |
+| `publish_delay` | 최근 24시간 게시 지연 P95 > 5분 | warning |
+
+**비용** (원안 41.44): 예약 게시는 LLM·GPU를 쓰지 않는다. 사용량은 `sns_calls`(37-A.5)와 Storage(업로드 미디어 크기, Persona Storage 한도 39.6)뿐이다. 업로드 Asset은 39.6의 `generated` 60일 자동 보관 대상이 아니다 (`origin = uploaded`).
+
+### 41.12 작업 목록과 테스트
+
+**선행 조건**: M6(계정 연결)·M7(게시 파이프라인, 16.11). 예약 게시는 그 위에 얹는 기능이라 **M7 바로 다음(M7b)**에 둔다. 생성 파이프라인(MVP M2·M3)이 없어도 동작하므로, 필요하면 M0·M1·M6·M7의 게시 부분만으로 먼저 열 수 있다.
+
+| 영역 | 작업 |
+|---|---|
+| DB | `assets.origin`·`content_job_id` nullable·CHECK, `posts.origin`·`late_policy`·`scheduled_timezone`, 플랫폼 CHECK에 `likey`·`fantrie`, `create_media_upload`·`register_uploaded_media`·`schedule_own_media`·`duplicate_post`·`mark_post_published_manually`, `check_publish_ready`(28.8에서 옮김), Storage 정책(uploads/ 경로), `media` 버킷 형식·크기, `worker_status.kind`에 `publisher`, `platform_controls`·`platform_specs`·`retry_backoff_by_channel`, 오류 코드 |
+| n8n | WF-007이 `check_publish_ready` 사용, `late_policy` 확인(WF-008), `[PA] SNS - Instagram - Publish`에 Reels, `[PA] SNS - X - {Connect, Publish}`, 수동 게시 알림(WF-010) |
+| PC | `app/publisher/` (claim 루프, `login` 명령, Adapter 2개, 선택자 설정, checkpoint, 화면 캡처 정리), 작업 스케줄러 자동 시작(25.4와 같은 방식) |
+| Lovable | `/scheduler` 4개 화면, 업로드(브라우저 JPEG 변환), 캡션 검사 표시, 달력, 브라우저 자동화 켜기(admin, 약관 확인) |
+
+**MVP 완료 조건** (원안 41.51): 로그인 → `/scheduler/new` → 업로드 → 캡션 → 계정 → 시각 → 예약 → 1분 안에 Job → 게시 → `published`. **Instagram(공식 API) 1개 + 브라우저 플랫폼 1개**로 먼저 확인한다 (원안과 같음).
+
+| 경우 | 기대 |
+|---|---|
+| 같은 Post에 WF-008이 두 번 돎 | `publish` Job 1개 (멱등 키) |
+| 업로드 PNG를 Instagram에 예약 | 브라우저가 JPEG로 바꿔 올림, 9:16 이미지는 예약 단계에서 거부 |
+| LLM·ComfyUI가 모두 멈춤 | 예약 게시 정상 |
+| PC가 꺼짐 | Instagram·X 예약은 정상, Likey 예약은 대기 → 30분 전 `publisher_offline` |
+| PC가 3시간 꺼졌다 켜짐 (`skip_after` 2시간) | 지난 Likey 예약은 `MISSED_WINDOW`, 게시 안 됨 |
+| 게시 버튼 누른 직후 브라우저가 죽음 | 자동 재시도 없음. 목록에서 찾으면 완료, 못 찾으면 `UNCONFIRMED` |
+| 로그인 만료 | `SESSION_EXPIRED`, 계정 `inactive`, 알림 |
+| CAPTCHA 화면 | 즉시 멈춤, `CHALLENGE_REQUIRED`, 우회 시도 없음 |
+| `browser_publishing = false` | 예약 시각에 수동 게시 알림, [게시함]으로 완료 |
+| `scheduled` Post를 1분 전에 수정 | 거부 (2분 전까지만) |
+| `self_scheduled` Post 캡션 수정 | 새 승인 행 자동, `scheduled` 유지 |
+| 다른 Operator의 Asset으로 예약 시도 | `NOT_FOUND` |
+| 외부 URL로 미디어 지정 | 받는 칸이 없음 |
+| 전역 긴급 정지 | 예약 게시도 멈춤 (`publishing_enabled`), 브라우저 Worker도 `check_publish_ready`에서 멈춤 |
+
+### 41.13 원안 조정
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 데이터 구조 | 별도 `scheduled_posts` + 상태 머신 | 기존 `posts` + 업로드 Asset (`origin = uploaded`) | 2026-10-06 확정. 게시 전 검사·중복 방지·긴급 정지·성과 수집을 한 곳에 |
+| AI와의 분리 | 별도 테이블로 | Asset 이후 게시 경로는 원래 LLM·GPU를 쓰지 않음 | 같은 장애 격리, 두 벌 없이 |
+| Workflow | `[PA] 022~024` | WF-008·007 그대로 + PC 브라우저 Worker | 14.3, n8n은 판단·셸 없음 |
+| Polling | 5분 (±5분) | WF-008 1분 | 이미 1분 |
+| 선점 | `claim_due_scheduled_posts` RPC | 기존 `claim_automation_job` (원자적, 11.5) | 같은 기능이 있음 |
+| 승인 | 언급 없음 | Operator가 직접 예약 = 승인 (같은 트랜잭션에서 승인 행 생성) | 11.8 불변식 유지, 두 번 묻지 않음 |
+| 미디어 입력 | `media_url` + allowlist | Storage에 올린 Asset만, Asset ID로 | SSRF 방지 (15.8) |
+| Instagram 이미지 형식 | 언급 없음 | 브라우저에서 JPEG 변환, 비율은 막음 | 28.9 규격, PC 없이 |
+| 로컬 업로더 | n8n → `127.0.0.1:8001` Webhook | PC Worker가 DB에서 Job을 가져감, 들어오는 포트 없음 | 원격 n8n은 PC localhost에 닿지 못함 |
+| 브라우저 자동화 | Likey·Fantrie에 Playwright | 15.11의 조건부 예외 9개 조건 (기본 꺼짐, 약관 확인, 게시만, 우회 금지, 비밀번호 없음, 세션은 PC만, 횟수 제한, 자동 꺼짐, 미성년 금지) | 2026-10-06 확정 |
+| 성공 판단 | 성공 신호 확인 | + 버튼 직전 checkpoint, 그 뒤 실패는 자동 재시도 금지 (`UNCONFIRMED`) | 브라우저 게시는 중복 방지 키가 없음 |
+| 늦은 게시 | 언급 없음 | `late_policy` (기본 2시간 넘으면 건너뜀) | 장애 뒤 지난 예약이 한꺼번에 올라가는 것 방지 |
+| 플랫폼 `Other` | 지원 | 두지 않음 | 게시 방법 없음 |
+| 성과 수집 | 공통 Analytics | Instagram·X만, 브라우저 플랫폼은 없음 (29장 제외) | API 없음 |
+| CSV 일괄 예약 | `media_url` CSV | 여러 파일 업로드 + 파일 이름 기준 표·CSV (V2) | 외부 URL 받지 않음 |
+| 상태 | `DRAFT`~`CANCELLED` 6개 | Post 상태 (11.8) | 같은 상태 머신 |
+| 재시도 간격 | 5 → 15 → 60분 | 브라우저 게시에만 채택, API 게시는 기존 | 브라우저 쪽이 일시 장애가 김 |
+| API | REST 8개 + 내부 3개 | Operator RPC + 기존 Worker RPC | 12장 방식 |
+| [AI 캡션 생성] | 향후 | V2, Caption Agent | 33.2 |
