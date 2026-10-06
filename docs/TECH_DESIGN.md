@@ -3029,6 +3029,8 @@ Operator는 `security_events`를 읽기만 할 수 있다. `API_AUTH_FAILED`가 
 
 ### 15.23 백업과 복구 (보강)
 
+> ⚙️ 38장이 정본이다 (오프사이트·Object Lock, 6시간 덤프, 쓰이는 `media` 백업, 복원 검증, 과거 시점 복원 뒤 정합 맞추기, 재해별 절차). 아래는 MVP 기준이다.
+
 | 대상 | 방법 | 보관 |
 |---|---|---|
 | Supabase DB | Supabase 요금제의 자동 백업 + **n8n 서버에서 매일 `pg_dump`** (요금제에 따라 자동 백업이 없거나 짧을 수 있으므로 직접 백업을 기본으로 둔다) | 30일, 암호화해서 서버 밖에 저장 |
@@ -6330,6 +6332,8 @@ SSH 22: 관리자 IP만, 키 로그인만 (15.9)
 
 ### 26.4 백업과 업데이트
 
+> 백업 스크립트·오프사이트·검증은 38.3~38.6이다. n8n은 셸 명령을 막았으므로(15.9) 백업은 서버 systemd timer가 돌린다.
+
 | 대상 | 방법 | 보관 |
 |---|---|---|
 | n8n 볼륨 | 매일 `docker run --rm -v n8n_n8n_data:/data -v /backup:/backup alpine tar czf /backup/n8n-$(date +%F).tgz -C /data .` (볼륨 이름은 `docker volume ls`로 확인) | 7일 (15.9) |
@@ -8591,7 +8595,7 @@ content_need = 앞으로 7일 게시 계획 수 (Champion Strategy의 posts_per_
 |---|---|---|
 | LLM | 호출마다 입력·출력 토큰과 모델 | LLM 하위 Workflow가 `monitoring_usage`에 기록 (37-A.5. 처음에는 `execution_logs.output_data.usage`였으나 그 칸은 90일 뒤 비운다, 37.10) ⚙️ |
 | GPU | `generation` Job의 ComfyUI 실행 시간 | `execution_logs.duration_ms` |
-| Storage | Asset 파일 크기 합 | `assets` (V2b에 `file_size` 칸 추가) |
+| Storage | Asset 파일 크기 합 | `assets.file_size` (V1, 38.6) |
 | SNS API | 호출 수 | `execution_logs` (`service = 'sns'`) |
 
 - 단가는 `app_settings.cost_rates` (모델별 토큰 단가, GPU 시간당 전기·감가 추정, Storage GB 단가). 단가를 바꾸면 과거 추정치도 다시 계산된다 (저장하지 않고 계산).
@@ -8605,7 +8609,7 @@ content_need = 앞으로 7일 게시 계획 수 (Champion Strategy의 posts_per_
 
 | 영역 | V1 | V2b | Long-term |
 |---|---|---|---|
-| DB | `app_settings.generation_enabled`, `emergency_stop_all` | `personas.agent_paused`, `content_need`, 진동·쏠림 규칙(`record_ai_decisions`), `get_autonomy_summary`, `cost_rates`, `assets.file_size` | `detect_operation_events`, 승급 조건 확인·자동 강등 (실험 평가는 34.6) ⚙️ |
+| DB | `app_settings.generation_enabled`, `emergency_stop_all` | `personas.agent_paused`, `content_need`, 진동·쏠림 규칙(`record_ai_decisions`), `get_autonomy_summary`, `cost_rates` (`assets.file_size`는 V1, 38.6) | `detect_operation_events`, 승급 조건 확인·자동 강등 (실험 평가는 34.6) ⚙️ |
 | n8n | WF-001·브릿지가 `generation_enabled` 확인 | LLM 하위 Workflow `usage` 기록 | WF-015 ⚙️ |
 | Lovable | Header [모든 자동화 멈춤], 스위치별 상태 | `/strategy` 지표·비용, Persona [AI 일시정지], 운영 상태 표시 | 승급 화면 |
 
@@ -10348,7 +10352,7 @@ create index monitoring_metrics_persona_time on public.monitoring_metrics (perso
 | `host_disk_free_gb` | GB | 같음 (`dimensions.drive`) | Worker |
 | `queue_pending_count`, `queue_retry_wait_count`, `queue_running_count` | 개 | `automation_jobs` (`dimensions.job_type`) | 전체 |
 | `queue_oldest_wait_sec` | 초 | 가장 오래 기다린 `pending` Job | 전체, `job_type`별 |
-| `storage_bytes` | B | Asset 크기 합 (`assets.file_size`, 32.13) | Persona별 + 전체 |
+| `storage_bytes` | B | Asset 크기 합 (`assets.file_size`, V1, 38.6) | Persona별 + 전체 |
 | `system_status_level` | 0~4 | `get_system_status()` (0 = OPERATIONAL … 4 = EMERGENCY_STOP, `UNKNOWN`은 기록하지 않음) | 전체 |
 | `bridge_health_latency_ms` | ms | n8n이 `/v1/health`를 부를 때 잰 응답 시간 (`report_worker_status`의 n8n 보고에 포함) | Worker |
 
@@ -10462,6 +10466,7 @@ create index monitoring_alerts_status on public.monitoring_alerts (status, sever
 | `STORAGE_GROWTH_ANOMALY` | `storage_growth` |
 | `SAFETY_EVENT` | `fan_critical_pending` (V2) |
 | `SECURITY_EVENT` | `security_spike`: `API_AUTH_FAILED` 1시간 50건 초과 (15.22에 이미 정한 알림을 이 규칙으로 옮김) |
+| (38장) | `backup_failed`, `backup_stale`, `backup_unverified`, `verify_failed`, `recovery_in_progress` (38.11) |
 
 **중복 제거** (원안 37-A.12): `dedupe_key = rule:service:resource_id[:persona_id]` (예: `error_spike:comfyui:OUT_OF_MEMORY`, `token_expiry:sns:instagram:{persona_id}`). 같은 키의 Alert가 열려 있으면 새로 만들지 않고 `occurrences`·`last_seen_at`·`observed`만 갱신한다. 원안의 `metadata.count`를 칸으로 올렸다. 같은 Alert가 더 높은 수준으로 걸리면 `severity`를 올린다 (내리지 않음).
 
@@ -10616,3 +10621,312 @@ evaluate_health() (1분) 이 위를 읽는다
 | `monitoring_current_state` | V2 | 만들지 않음 | 계산 함수 |
 | API | REST | RPC, 확인·숨김·해결·사후 기록만 | 기존 방식, 상태 3개 |
 | Incident의 Persona 노출 | RLS | RPC가 자기 Persona만 남김 | 다른 Operator의 Persona ID 노출 방지 |
+
+---
+
+## 38. Backup & Disaster Recovery ✅
+
+> 데이터 손실, PC·GPU 장애, Storage 손상, 자격 증명 탈취, 설정 손실이 생겨도 시스템을 다시 살리는 체계다. 15.23(백업과 복구)·26.4(n8n 백업)·25장(로컬 PC)에 정한 기본을 정리하고, 원안에서 열려 있던 부분(어디에 어떻게 보관하나, 삭제·변조 방지, 과거 시점 복구 뒤 생기는 중복 실행, 오래된 Worker 차단, 복구 검증, 기록을 어디에 남기나)을 정한다. **아직 구현되지 않았다** (백업 스크립트도 저장소에 없다). ⚙️ 표시는 원안을 조정한 부분이다 (38.14).
+
+### 38.1 원칙
+
+원안의 원칙 5개를 따른다. 이 시스템에서의 뜻:
+
+| 원칙 | 이 시스템에서 |
+|---|---|
+| Backup ≠ Recovery | 백업은 **복원 검증(38.6)을 통과해야** "복구 가능"이다. 화면도 "마지막 백업"이 아니라 "마지막 **검증된** 백업"을 보여준다 |
+| Compute Plane은 바꿀 수 있다 | RTX 5080 PC에는 정본 데이터가 없다. 코드·Workflow 템플릿은 git, Persona·Job·Asset 기록은 Supabase, LoRA·참조 이미지는 `persona-private`와 백업에 있다. PC가 사라져도 새 PC를 만들면 된다 (38.8) |
+| 3-2-1 | 3벌: ① 운영 Supabase ② Supabase 자체 백업 ③ **다른 회사의 오프사이트 저장소**. 2종: Supabase / 오브젝트 저장소. 1 오프사이트: ③ (38.3) |
+| 변조 방지 (Immutable) | 오프사이트 버킷에 **Object Lock**(보존 기간 동안 아무도 지우거나 덮어쓸 수 없음)을 건다 (38.3) |
+| 최소 권한 | 서버는 백업을 **쓸 수만 있고 읽거나 지울 수 없다.** 복원에 필요한 키는 오프라인에만 있다 (38.4) |
+
+### 38.2 무엇을 백업하나 ⚙️
+
+원안 38.4의 13개 영역과 38.28의 등급을 **실제 위치** 기준으로 다시 묶는다. AI Decision, 실험, 최적화 상태, Monitoring·감사 기록(원안 38.24~38.27)은 따로 백업하지 않는다. **모두 DB 테이블이라 DB 백업에 들어 있다.**
+
+| 등급 | 대상 | 위치 | 방법 |
+|---|---|---|---|
+| **0 (필수)** | DB 전체: Persona, Job, Asset·Post 기록, 성과, 대화, Memory, AI Decision, 실험, Strategy 버전, Monitoring, `state_transitions`·`security_events` | Supabase | 38.3 |
+| **0** | Persona 정체성 파일: Face·Style Reference, LoRA 원본 | `persona-private` 버킷 + PC `models\loras` | 38.3 |
+| **0** | 복구용 비밀: `N8N_ENCRYPTION_KEY`, 백업 복호화 키, 오프사이트 읽기 키, DB 비밀번호 | **오프라인** (비밀번호 관리자 + 종이·USB 사본) | 사람이 보관 |
+| 1 | **쓰이는** 생성 결과물: `approved` Asset, 게시·예약된 Post의 Asset (게시용 JPEG 포함) | `media` 버킷 | 38.3 |
+| 1 | n8n: Workflow·Credential(암호화됨)·설정 | n8n 볼륨 + `n8n/pa_*.json`(git) | 26.4 |
+| 1 | 코드·Workflow 템플릿·Registry·설정 형식 | 이 저장소 (`app/`, `workflows/`, `n8n/`, `supabase/`, `deploy/`, `.env.example`) | git (GitHub + 로컬 사본) |
+| 2 (다시 만들 수 있음) | Base Model, Custom Node, ComfyUI 자체 | 인터넷 | **목록만** 백업 (38.8) |
+| 2 | 쓰이지 않은 생성 결과물(`generated` 상태로 남은 것), 썸네일, 임시 파일 | `media`, PC | 백업 안 함 |
+
+- 15.23은 `media`를 백업하지 않고 "필요하면 seed로 다시 생성"이라고 했다. 하지만 같은 seed로도 모델·드라이버·Custom Node 버전이 다르면 **같은 이미지가 나오지 않는다.** 그래서 이미 쓰인 Asset(승인·게시)은 백업한다 ⚙️. 쓰이지 않은 것은 15.23대로 백업하지 않는다 (대부분이고, 잃어도 손해가 없다).
+- 원안 38.14·38.17대로 **비밀값 자체는 백업 파일·저장소에 넣지 않는다**. `.env`, Credential 값, SNS 토큰은 백업 대상이 아니다. 예외는 n8n 볼륨인데, 그 안의 Credential은 `N8N_ENCRYPTION_KEY`로 암호화되어 있고 그 키는 오프라인에만 있다.
+
+### 38.3 보관 방식과 주기 ⚙️
+
+| 대상 | 주기 | 방법 | 보관 | 단계 |
+|---|---|---|---|---|
+| DB | **6시간마다** (15.23의 하루 1회에서 줄임) | n8n 서버의 `supabase db dump`(역할·스키마·데이터, `auth` 포함) → 압축 → **age 공개키로 암호화** → 오프사이트 | 6시간분 7일, 일별 30일, 월별 12개월 | MVP: 하루 1회 (15.23) / V1: 6시간 + 오프사이트 |
+| DB | 상시 | Supabase 자체 일일 백업 (요금제), PITR은 선택 (38.5) | 요금제 기준 | MVP |
+| `persona-private` | 하루 1회 | `rclone copy`(증분) → 오프사이트 | 삭제된 파일도 90일 (Object Lock) | V1 (15.23의 주 1회에서 줄임) |
+| `media` (쓰이는 것) | 하루 1회 | 위 대상 목록을 DB에서 뽑아 증분 복사 | 90일 Object Lock, 게시된 것은 이후에도 유지 | V1 |
+| n8n 볼륨 | 하루 1회 | 26.4의 `tar` → age 암호화 → 오프사이트 | 30일 (26.4의 7일 + 오프사이트) | MVP: 서버 로컬 7일 / V1: 오프사이트 |
+| n8n Workflow JSON | 바꿀 때마다 | export → git (26.5) | git 이력 | MVP |
+| 코드 | 커밋마다 | GitHub + 로컬 클론 | git 이력 | MVP |
+| LoRA·참조 원본 | 바꿀 때마다 | 외장 디스크 사본 (오프라인) | 영구 | MVP (15.23) |
+
+- **오프사이트 저장소:** Supabase와 다른 회사의 S3 호환 오브젝트 저장소(예: Backblaze B2, Cloudflare R2)에 백업 전용 버킷을 두고 **Object Lock(compliance 모드)**을 켠다. 보존 기간 동안은 그 계정의 관리자도 지울 수 없다. 랜섬웨어나 계정 탈취로 백업까지 지워지는 것을 막는다 (원안 38.62). Object Lock 지원 여부와 요금은 구현 시 확인한다.
+- **스토리지 버전 관리** (원안 38.10): Supabase Storage에는 버전 관리가 없다 (구현 시 확인). 오프사이트의 증분 복사 + 보존 기간이 그 역할을 한다. 실수로 지운 파일은 90일 안에 오프사이트에서 되찾는다.
+- **왜 n8n이 아니라 서버 cron인가** ⚙️: 원안 38.64의 `[PA] 017 - Backup & Verification`(017은 Fan Reply Sender)은 n8n에서 돌 수 없다. `pg_dump`·`tar`·`rclone`은 셸 명령인데, 15.9에서 n8n의 명령 실행 노드를 막았다(`NODES_EXCLUDE`). 그래서 백업은 **n8n 서버의 systemd timer가 실행하는 스크립트**(`deploy/backup/backup.sh`)가 한다. n8n이 멈춰도 백업은 돈다. 스크립트는 끝나면 Worker RPC `record_backup_run`으로 결과를 남긴다 (38.10).
+
+### 38.4 암호화와 접근 권한 ⚙️
+
+원안 38.60~38.62의 역할 4개(Operator, Backup Viewer, Backup Administrator, Recovery Administrator)는 1인 운영이라 두지 않는다. 대신 **키를 나눠서** 같은 효과를 낸다.
+
+| 키 | 어디에 | 할 수 있는 것 |
+|---|---|---|
+| age **공개키** | n8n 서버 | 백업을 암호화만. 서버가 털려도 지난 백업을 읽을 수 없다 |
+| age **개인키** | 오프라인만 | 백업 복호화 (복원할 때만 꺼낸다) |
+| 오프사이트 **쓰기 전용 키** | n8n 서버 | 새 파일 올리기만. 목록·읽기·삭제 권한 없음 |
+| 오프사이트 **읽기 키** | 오프라인만 | 복원·검증 때 다운로드 |
+| 오프사이트 계정 관리자 | 오프라인 (2단계 인증) | 버킷 설정. Object Lock 때문에 보존 중 파일은 이 계정도 못 지운다 |
+
+- 앱(`service_role`, Lovable)에는 오프사이트 접근 수단이 아예 없다. 원안의 "Application이 Backup 전체를 삭제할 수 없어야 한다"가 구조적으로 성립한다.
+- 백업에는 팬 대화·Memory가 들어간다 (31.13). 그래서 오프사이트 백업 보존 기간은 31.13의 대화 보관 기간(1년)을 넘지 않는다. **팬 삭제 요청**(31.13)은 운영 DB에서 바로 지우고, 백업에 남은 사본은 보존 기간이 끝나면 함께 사라진다. 그 사실을 데이터 처리 방침에 적는다. 그 전에 백업에서 복원하면, 복원 직후 `delete_fan_data` 기록(`security_events`, 팬 ID 해시)을 다시 적용한다 (38.7).
+
+### 38.5 목표 복구 시점·시간 (RPO·RTO) ⚙️
+
+원안 38.29·38.30의 예시 값 대신, **이 설계로 실제로 낼 수 있는 값**을 적는다. 원안대로 초기에는 목표보다 **실측**(38.9 훈련)이 중요하다.
+
+| 대상 | RPO (잃을 수 있는 최대) | RTO (복구까지) | 비고 |
+|---|---|---|---|
+| DB (V1) | 6시간 | 2시간 | 원안 예 "5~15분"은 **PITR**이 있어야 한다. Supabase PITR은 유료 추가 기능이라(구현 시 확인) 운영 규모가 커질 때 켠다. 켜면 RPO 수 분 |
+| DB (MVP) | 24시간 | 2시간 | 하루 1회 덤프 |
+| `persona-private` | 24시간 (외장 사본은 바꿀 때마다) | 1시간 | LoRA는 거의 바뀌지 않는다 |
+| 쓰이는 Asset | 24시간 | 4시간 | |
+| n8n | Workflow 0 (git), Credential 24시간 | 2시간 | 서버 재구성 + 볼륨 복원 |
+| 코드 | 0 | – | git |
+| 로컬 PC 전체 | 데이터 손실 없음 (정본이 없음) | 8시간 | 대부분 모델 다운로드 시간 |
+
+### 38.6 백업 검증 ⚙️
+
+원안 38.56·38.66의 `[PA] 019 - Restore Verification`도 셸이 필요해서 서버 스크립트다 (`deploy/backup/verify.sh`).
+
+| 검증 | 주기 | 내용 |
+|---|---|---|
+| 즉시 | 매 백업 | 파일 크기 > 0, 업로드 후 오프사이트 체크섬(SHA-256)이 로컬과 같음, Manifest(38.10) 기록 |
+| **복원 검증** | **매주** (V1) | 최신 DB 덤프를 서버의 **일회용 Postgres 컨테이너**에 복원 → 마이그레이션 버전 확인 → 주요 테이블 행 수가 Manifest와 같음 → FK·불변식 검사(`verify_production.sql`의 무결성 항목) → 컨테이너 삭제. 결과를 `record_backup_run(verified)` |
+| Asset 표본 | 매주 | 오프사이트의 Asset 20개를 무작위로 받아 `assets.sha256`과 비교 |
+| 전체 훈련 | 분기 (38.9) | 사람이 함 |
+
+- 복원 검증은 오프사이트 **읽기 키**가 필요하다. 그 키를 서버에 두면 38.4의 분리가 깨지므로, 주간 검증은 서버에 남아 있는 **로컬 사본**(업로드 직전 파일, 7일 보관)으로 하고, 오프사이트 파일과 로컬 사본이 같다는 것은 업로드 때의 체크섬으로 보장한다. 오프사이트에서 직접 내려받는 검증은 분기 훈련 때 사람이 한다.
+- **Asset 체크섬** (원안 38.9): 브릿지가 업로드할 때 SHA-256과 파일 크기를 계산해 `assets.sha256`, `assets.file_size`에 남긴다 (V1. 32.13·37-A.2가 V2b로 둔 `file_size`를 V1으로 당긴다). Persona 참조 파일도 같은 칸을 `persona_assets`에 둔다.
+
+### 38.7 과거 시점 복구 뒤 생기는 문제: 정합 맞추기 ⚙️
+
+원안 38.46·38.47은 "실행 중 Job을 대기로 되돌리고, 멱등 키를 유지한다"까지 말한다. 그런데 **DB를 과거 시점으로 되돌리면 멱등 키도 함께 되돌아간다.** 예: 10:30에 게시가 끝났는데 10:00 백업으로 복원하면, 그 `publish` Job은 다시 `pending`이고 `publish:{post_id}` 키도 "아직 안 함" 상태다. 그대로 재개하면 **같은 게시물이 두 번 올라간다.** 바깥 세계(SNS, 팬)에서 이미 일어난 일은 되돌릴 수 없으므로, 재개 전에 맞춰야 한다.
+
+복원 후 `reconcile_after_restore(p_restore_point timestamptz)`를 실행한다 (재개 전에 반드시. 38.8 순서).
+
+| 대상 | 위험 | 처리 |
+|---|---|---|
+| `processing` Job 전부 | 실행 중이던 Worker가 없다 | `pending`으로 (15.23과 같음, `recover_stale_jobs`보다 먼저) |
+| `publish` Job (`pending`·`processing`, 복원 시점 이후 활동 가능) | **중복 게시** | `publishing_enabled`를 끈 채로, 각 Post마다 Adapter `get_post`·계정 최근 미디어 조회로 이미 게시됐는지 확인 (28.9의 중복 확인과 같은 방법). 있으면 `complete_publish`로 `external_post_id`를 채운다. 확인이 끝난 뒤에만 게시를 켠다 |
+| `reply_send` Job | **팬에게 같은 말을 두 번** | 대화의 최근 메시지를 `get_messages`로 다시 가져와(31.14) 이미 보낸 것은 완료 처리, 그 사이 들어온 팬 메시지는 저장 |
+| 팬 메시지 | 복원 시점 이후 받은 메시지가 DB에서 사라짐 | 안전망 Polling(`get_messages`, 31.5)이 다시 가져온다. Webhook 재전송은 기대하지 않는다 |
+| `analytics` Job | 지표 행이 사라짐 | 그냥 다시 수집한다 (늦게 수집되면 `late` 표시, 29.4) |
+| `generation` Job | Storage에는 파일이 있는데 DB 행이 없음 (고아 파일) | 다시 생성한다 (GPU 시간 손해일 뿐). 고아 파일은 `media/persona/{id}/assets/`에서 DB에 없는 경로를 찾아 7일 뒤 지운다 |
+| `decision` Job, AI Decision | 사라진 결정 | 다시 실행해도 된다. 단 이미 만들어진 Content Job이 사라졌을 수 있으므로 그날의 매일 실행 멱등 키는 새로 받는다 |
+| `security_events`의 팬 삭제 요청 | 지운 팬 데이터가 되살아남 | 복원 시점 이후의 삭제 요청 기록(백업 밖의 `recovery_runs` 로그에서)을 다시 적용 (38.4) |
+| Strategy 롤아웃, 실험 | 단계 진행이 되돌아감 | 그대로 둔다. 다음 `advance_*` 실행이 현재 데이터로 다시 판정한다 |
+
+- 같은 프로젝트를 Supabase 백업으로 되돌리는 경우와 덤프를 새 프로젝트에 복원하는 경우 모두 적용한다.
+- **SNS 토큰** (원안 38.22·38.23): 같은 프로젝트로 복원하면 Vault가 그대로라 토큰도 쓸 수 있다. **새 프로젝트**에 덤프를 복원하면 Vault 암호문은 새 프로젝트의 키로 풀 수 없다. 이것은 원안이 원하는 동작("Backup에서 Credential을 무조건 복원하지 않는다")과 같다: 모든 계정을 다시 연결한다 (28.4 OAuth).
+
+### 38.8 재해별 절차
+
+**공통 순서** (원안 38.43·38.44·38.72와 같은 방향)
+
+```text
+1. 멈춤      emergency_stop_all() (32.6) + 쓰는 쪽 정지 (n8n 컨테이너, 브릿지)
+2. 기록 시작  recovery_runs 로그를 백업 밖(오프사이트 로그 폴더 + 로컬 파일)에 쓰기 시작 (38.10)
+3. 복원      대상별 (아래)
+4. 검증      38.9 체크 목록
+5. 정합      reconcile_after_restore (38.7)
+6. 시험      시험 Job (38.9)
+7. 재개      스위치를 하나씩 켬 (32.6): 생성 → 게시 → AI. 각 단계 사이에 확인
+8. 기록      recovery_runs를 DB에 넣고, 이 장애의 Incident(37-A.4)에 review를 남김
+```
+
+- 원안 38.70·38.71의 **RECOVERY_MODE**는 새 상태로 두지 않는다 ⚙️. 복구 중 막아야 하는 것(새 AI 결정, 생성, 게시, 팬 자동 응답, 실험, 최적화)은 전역 스위치 세 개(32.6·33.10)가 이미 막는다. 수집·감시는 원안처럼 계속된다. 복구 중이라는 사실은 `recovery_runs`의 진행 중 행이 나타낸다 (화면 배지).
+- **오래된 Worker 막기** (원안 38.45 Split-Brain) ⚙️: 복구 전 PC나 서버가 다시 켜져 같은 DB에 붙으면 둘이 동시에 Job을 가져간다. 선점은 원자적이라 같은 Job을 둘이 실행하지는 않지만, 감염됐거나 설정이 다른 옛 Worker가 일을 하게 된다. 그래서 **옛 인스턴스가 쓰던 Supabase secret key와 `BRIDGE_TOKEN`을 폐기하고 새 키를 발급한다** (15.6: n8n용·브릿지용 키가 따로 있다). 옛 Worker는 켜져도 DB에 접근할 수 없다. 원안의 "Old Workers → Disabled"를 키 폐기로 보장한다.
+
+| 재해 (원안) | 절차 |
+|---|---|
+| D01 DB 손상 | 공통 순서. 손상 시점 직전의 백업 선택 (Supabase 백업이 그 시점을 덮으면 그것, 아니면 오프사이트 덤프). 같은 프로젝트에 복원 |
+| D02 실수로 지움 | **전체를 되돌리지 않는다** (원안과 같음). 주요 FK가 `restrict`라 Persona·Job·Asset은 지울 수 없고 `inactive`·`archived`로만 정리된다 (21.17). 그래서 실제 위험은 잘못된 UPDATE와 Storage 파일 삭제다. 덤프를 일회용 Postgres에 복원해 필요한 행만 SQL로 되돌린다. 파일은 오프사이트에서 그 경로만 받는다 |
+| D03 Storage 손실 | 잃은 파일 목록 = `assets`·`persona_assets` 경로 중 Storage에 없는 것 → 오프사이트에서 받기 → SHA-256 비교 → 쓰이지 않던 Asset은 복구 대상이 아님(`archived`) |
+| D04 PC 고장, D10 로컬 전체 손실 | 아래 **새 PC 구성** |
+| D05 GPU 고장 | 생성만 불가. Job은 `pending`으로 남고 게시·수집·분석은 계속된다 (32.7, 원안과 같음). 차단기(37.7)가 큐를 지킨다. GPU 교체 후 25.6 첫 생성 확인 |
+| D06 악성 코드 | 15.14 사고 대응 + 공통 순서. **감염된 PC에서 아무것도 가져오지 않는다** (원안과 같음). 키 전부 교체(38.8 위 문단), 새 PC 구성, 모델은 목록(38.8)대로 공식 출처에서 다시 받는다 |
+| D07 자격 증명 탈취 | 15.14 + 원안 순서: 긴급 정지 → 폐기 → 교체 → SNS 재연결 → 확인 → 재개. 교체 대상: Supabase secret key(n8n용·브릿지용), SNS 토큰(플랫폼에서 앱 연결 해제 후 재연결), LLM 키, `BRIDGE_TOKEN`, Cloudflare Access Service Token, n8n 계정 비밀번호·2FA |
+| D08 n8n 장애 | Job 상태는 DB에 있어 사라지지 않는다 (원안과 같음). 서버 재구성(26.3) → 볼륨 복원 + `N8N_ENCRYPTION_KEY` → **전역 스위치를 끈 채로** n8n 시작(복원된 Workflow가 바로 활성이어도 해가 없다) → Credential 연결 확인 → 스위치를 하나씩 켬 |
+| D09 SNS 계정 손실 | 콘텐츠·Asset·분석·Persona는 DB에 그대로다. 계정을 되찾으면 재연결(28.4). 계정을 잃었으면 새 계정을 만들어 같은 Persona에 연결하고, 옛 계정의 `posts`·`performance_metrics`는 기록으로 남긴다 |
+| D11 설정 손상 | `app_settings`·정책 버전(33.5)·Strategy 버전(35.4)은 DB에 있고 버전이 남는다. 정책·Strategy는 이전 버전으로 되돌리기(새 버전으로 복사), `app_settings`는 덤프에서 그 행만 복원 |
+| D12 운영 실수 | 무엇을 했는지 `state_transitions`·`security_events`로 확인 → D02 또는 D11 |
+
+**새 PC 구성** (원안 38.36·38.42·38.76)
+
+| # | 작업 | 근거 |
+|---|---|---|
+| 1 | 25.3 설치 1~8 (드라이버, ComfyUI, Python, `.env`) | 25장 |
+| 2 | **Custom Node 목록**(`deploy/local/comfy_nodes.lock`: 저장소 주소 + 커밋)대로 설치 ⚙️ | 15.8 버전 고정 |
+| 3 | **모델 목록**(`deploy/local/models.manifest.json`: 이름, 출처 URL, SHA-256, 크기, 필수 여부)대로 Base Model 다운로드 → `verify_models.py`로 체크섬 확인 ⚙️ | 원안 38.20 |
+| 4 | LoRA·참조 원본: `persona-private` 또는 오프사이트에서 받아 `models\loras`에 → 체크섬 확인 | 38.2 |
+| 5 | 새 `BRIDGE_TOKEN`·브릿지용 secret key 발급 (옛 PC 것은 폐기) | 38.8 |
+| 6 | Cloudflare Tunnel 새로 연결 (25.5) | |
+| 7 | 브릿지 시작 → Registry 동기화 → `/v1/status`에서 Workflow 사용 가능 확인 | 13장 |
+| 8 | 25.6 첫 생성 (시험 Persona) | |
+| 9 | `generation_enabled` 켜기 → 큐 재개 | 32.6 |
+
+- 원안 38.21의 LoRA 학습 설정(training configuration)은 LoRA를 이 시스템 밖에서 만드는 지금은 `persona_assets.metadata`에 학습 메모(데이터셋 위치, 설정 파일)를 남기는 것으로 한다.
+- 모델 목록과 Custom Node 목록은 **V1 작업**이다. 지금은 사람이 기억하는 것이라, PC가 사라지면 같은 환경을 다시 만들 수 없다.
+
+### 38.9 복구 검증, 시험, 훈련
+
+**체크 목록** (원안 38.48): Supabase 접속·Auth 로그인, Storage 읽기·쓰기, Persona 화면, `get_system_status`(37.4) 각 서비스 `UP`, n8n Workflow 신호(37.5), 브릿지 `/v1/health`·`/v1/status`, GPU, SNS `validate_account`(12.8), 큐(`recover_stale_jobs` 후 `processing` 없음), Monitoring(`evaluate_health`가 돎).
+
+**시험 Job** (원안 38.49·38.50·38.73)
+
+| 순서 | 시험 | 통과 기준 |
+|---|---|---|
+| 1 | 시험 Persona(이름 `recovery-test`, `inactive`가 아닌 별도 Persona, 게시 계정 없음)로 Content Job 1개 | 생성 → Asset → 캡션 초안까지 (27장 E2E와 같은 단계) |
+| 2 | SNS 게시 경로 | `validate_account` 성공 + **Instagram 미디어 컨테이너만 만들고 게시(`media_publish`)는 부르지 않는다** ⚙️. 컨테이너 상태가 `FINISHED`가 되면 게시 직전까지 정상이다 (컨테이너는 게시되지 않고 만료된다. 구현 시 동작 확인) |
+| 3 | 실제 Persona 1개로 예약 게시 1건 (사람 승인) | 게시 → 1시간 수집 |
+| 4 | AI·팬 자동 기능 | 스위치를 켜고 다음 매일 실행을 지켜본다 |
+
+원안 38.73의 "1 Persona → 10% → 50% → 100%"는 3·4번 순서와 스위치 단계 재개(32.6)가 그 역할이다. 비율로 나눌 필요는 없다 (1인 운영, Persona 몇 개).
+
+**훈련** (원안 38.57~38.59)
+
+| 훈련 | 주기 | 내용 | 측정 |
+|---|---|---|---|
+| 복원 검증 | 매주, 자동 | 38.6 | 성공·실패 |
+| DB 복원 훈련 | 분기 | 오프사이트에서 덤프를 **새 Supabase 프로젝트**(무료 등급 임시 프로젝트)에 복원 → 체크 목록 → 시험 Job 1번(로컬 브릿지를 임시로 연결) → 프로젝트 삭제 | 실제 RPO(덤프 시각과 훈련 시각 차이 중 최대), RTO(시작부터 시험 Job 성공까지) |
+| PC 재구성 훈련 | 반기 | 다른 PC나 같은 PC의 새 Windows 사용자 계정에서 38.8 새 PC 구성 | 걸린 시간, 막힌 단계 |
+| 키 교체 훈련 | 반기 | D07 절차를 실제로 (키 교체만) | 걸린 시간 |
+
+훈련 결과는 `recovery_runs`(`kind = 'drill'`)에 남기고, 목표(38.5)보다 느리면 runbook을 고친다 (원안 38.59).
+
+### 38.10 기록 테이블 ⚙️
+
+**`backup_runs`** (원안 38.52 `backup_records`)
+
+| Column | Type | Description |
+|---|---|---|
+| id | uuid PK | ID |
+| kind | text | `db` / `persona_private` / `media` / `n8n_volume` |
+| status | text | `running` / `succeeded` / `failed` / `verified` / `verify_failed` |
+| location | text | 오프사이트 경로 (비밀값 없음) |
+| size_bytes | bigint | 크기 |
+| sha256 | text | 업로드한 파일의 체크섬 |
+| manifest | jsonb | 원안 38.51: 마이그레이션 버전, 테이블별 행 수, Asset 수, Persona 수, Workflow 수 |
+| started_at, completed_at, verified_at | timestamptz | 시각 |
+| error | text | 실패 이유 |
+
+- 원안 상태 8개(`PENDING` ~ `EXPIRED`)를 5개로 줄인다. `PENDING`은 서버 스크립트라 없고, `VERIFYING`은 짧아서 상태로 두지 않으며, `CORRUPTED`는 `verify_failed`, `EXPIRED`는 보존 기간으로 오프사이트에서 사라지는 것이라 기록하지 않는다.
+- 쓰기: 서버 스크립트가 Worker RPC `record_backup_run`. 읽기: admin.
+
+**`recovery_runs`** (원안 38.54 `recovery_events`)
+
+| Column | Type | Description |
+|---|---|---|
+| id | uuid PK | ID |
+| kind | text | `recovery` / `drill` |
+| disaster | text | `D01` ~ `D12` (38.8) |
+| scope | text | 예: `db_full`, `rows:personas`, `storage:persona-private`, `pc` |
+| backup_run_id | uuid, nullable | 쓴 백업 |
+| restore_point | timestamptz | 되돌린 시점 |
+| status | text | `in_progress` / `succeeded` / `failed` / `abandoned` |
+| steps | jsonb | 단계별 시작·끝 시각: `freeze`, `restore`, `validate`, `reconcile`, `test`, `resume` (원안 상태 9개를 단계로) |
+| measured | jsonb | 실제 RPO·RTO |
+| incident_id | uuid, nullable | 관련 Incident (37-A.4) |
+| initiated_by | uuid | Operator |
+| notes | text | 문제점·개선점 |
+
+- **이 기록을 어디에 쓰나** ⚙️: DB를 복원하는 동안 DB에 쓴 기록은 복원과 함께 사라진다. 그래서 복구 중에는 `recovery_runs`를 **백업 밖**(오프사이트 `recovery-logs/` 폴더의 JSON + 운영자 PC의 파일)에 먼저 쓰고, 복구가 끝난 뒤 DB에 넣는다 (38.8 순서 2·8). 원안의 상태 9개(`PLANNED` ~ `ROLLED_BACK`)는 `steps`의 단계 시각으로 표현한다. 단계가 늘어도 상태를 늘리지 않는다.
+- `recovery_runs`는 감사 기록이라 지우지 않는다.
+
+### 38.11 알림과 화면
+
+**알림 규칙** (원안 38.67, 37-A.4 규칙 표에 더함)
+
+| 규칙 | 조건 | 수준 |
+|---|---|---|
+| `backup_failed` | `backup_runs` `failed` | high |
+| `backup_stale` | `db`의 마지막 `succeeded`가 8시간(V1) / 30시간(MVP) 넘음, 그 밖은 30시간 | high |
+| `backup_unverified` | `db`의 마지막 `verified`가 8일 넘음 | high |
+| `verify_failed` | `verify_failed` | critical |
+| `recovery_in_progress` | 진행 중인 `recovery_runs` | warning (화면 배지) |
+
+**화면** ⚙️: 원안 38.68·38.69의 `/monitoring/backups`, `/monitoring/recovery`를 `/monitoring`(37.12)의 **"백업·복구" 탭** 하나로 둔다 (admin).
+
+| 영역 | 내용 |
+|---|---|
+| 백업 | 종류별 마지막 성공·마지막 검증·크기·나이, 현재 RPO 상태(마지막 성공 덤프 이후 경과 시간 vs 38.5) |
+| 복구 | 진행 중 복구(단계 진행), 마지막 복구·훈련, 실측 RPO·RTO 추이 |
+| 준비 상태 | 체크 목록: 모델 목록·Custom Node 목록이 최신인가(PC의 실제 목록과 비교, 브릿지가 `/v1/status`로 보고), 오프라인 키 확인 날짜(사람이 [확인함]), 마지막 분기 훈련 날짜 |
+
+### 38.12 Persona 내보내기
+
+원안 38.11·38.12의 "Persona 하나를 독립적으로 복구"는 **내보내기**로 한다.
+
+- `export_persona(p_persona_id)` RPC가 하나의 JSON을 돌려준다: Persona 행(정체성·성격·말투·규칙·`visual_settings`), `persona_platform_settings`, 현재 Champion Strategy, 권한 수준, `persona_assets` 목록(이름·종류·경로·SHA-256). **비밀값·토큰·팬 데이터는 넣지 않는다.** 원안의 파일 7개 묶음은 같은 내용을 한 JSON 안의 키로 나눈다.
+- Lovable Persona 상세에 [백업 내보내기] (V1). 매일 백업 스크립트도 모든 Persona의 내보내기를 오프사이트에 함께 올린다.
+- **가져오기**(`import_persona`, 다른 프로젝트·새 Persona로 복원)는 V2다. 가져올 때 ID는 새로 만들고, 참조 파일은 체크섬을 확인한다.
+
+### 38.13 작업 목록과 테스트
+
+| 단계 | 작업 |
+|---|---|
+| **MVP** (M0, n8n 서버 구성 때) | `deploy/backup/backup.sh`(하루 1회 DB 덤프 + n8n 볼륨, 서버 로컬 7일, 15.23·26.4), systemd timer, `N8N_ENCRYPTION_KEY`·DB 비밀번호 오프라인 보관, LoRA·참조 원본 외장 사본 |
+| V1 | 6시간 덤프, age 암호화, 오프사이트 Object Lock 버킷과 쓰기 전용 키, `persona-private`·쓰이는 `media` 증분 복사, `assets`·`persona_assets`의 `sha256`·`file_size`, `verify.sh`(주간 복원 검증), `backup_runs`·`recovery_runs`·`record_backup_run`, `reconcile_after_restore`, 모델·Custom Node 목록과 `verify_models.py`, `export_persona`, 알림 규칙(38.11), `/monitoring` 백업·복구 탭, 분기 DB 복원 훈련 시작 |
+| V2 | `import_persona`, PITR 사용 여부 결정, 팬 삭제 요청 재적용 자동화 |
+
+| 경우 | 기대 |
+|---|---|
+| 백업 스크립트 실행 | 암호화된 덤프가 오프사이트에 있고, 서버에서 그 파일을 지우려 하면 거부(쓰기 전용 키, Object Lock) |
+| 서버의 age 공개키로 복호화 시도 | 불가 |
+| 주간 검증 | 일회용 Postgres에 복원, 행 수가 Manifest와 같음, `verified` 기록 |
+| 덤프 파일 1바이트 변조 | 체크섬 불일치 → `verify_failed` → `critical` |
+| 덤프 30시간 없음 | `backup_stale` |
+| 10:30에 게시된 Post, 10:00 시점으로 복원 | `reconcile_after_restore`가 게시를 찾아 `complete_publish`, 다시 게시하지 않음 |
+| 복원 후 `reply_send` 대기 | 이미 보낸 응답은 완료 처리, 같은 말을 다시 보내지 않음 |
+| 새 프로젝트에 덤프 복원 | 모든 SNS 계정 재연결 필요 (Vault 복호화 불가), 나머지 데이터 정상 |
+| 옛 브릿지 키 폐기 후 옛 PC 켬 | DB 접근 거부 (`401`), 큐를 가져가지 않음 |
+| 복원된 n8n을 스위치가 꺼진 채 시작 | 게시·생성·AI 없음, 수집만 |
+| 새 PC 구성 | 모델 목록 체크섬 일치, 25.6 첫 생성 성공 |
+| Persona 내보내기 | JSON에 토큰·팬 데이터 없음, 참조 파일 체크섬 포함 |
+
+### 38.14 원안 조정
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 백업 대상 | 13개 영역 | 실제 위치 기준 등급 표. AI Decision·실험·최적화·감사는 DB 백업에 포함 | 모두 DB 테이블 |
+| `media` | Tier 1 전체 | 쓰이는 것(승인·게시)만 백업 (15.23은 백업 안 함이었음) | seed로 같은 이미지가 다시 나오지 않음, 쓰이지 않은 것은 잃어도 됨 |
+| DB 주기 | PITR + 매일 | 6시간 덤프 (V1), PITR은 유료라 규모가 커지면 | 비용 대비 RPO |
+| RPO·RTO | 예시 값 | 이 설계로 낼 수 있는 값, 훈련에서 실측 | 원안도 실측이 먼저 |
+| 변조 방지 | Immutable Backup | 다른 회사 오프사이트 + Object Lock | 계정 탈취·랜섬웨어 |
+| 접근 권한 | 역할 4개 | 키 분리 (공개키·쓰기 전용 키만 서버에) | 1인 운영, 구조적으로 앱이 백업을 못 지움 |
+| 백업 Workflow | n8n `[PA] 017` | 서버 systemd timer 스크립트 | n8n은 셸 명령을 막았음 (15.9), 017은 Fan Reply Sender |
+| 복구 Workflow | n8n `[PA] 018` | 사람이 따르는 절차 (38.8) | 복구는 판단이 필요, 자동화하면 위험 |
+| 복원 검증 | `[PA] 019` | 주간 서버 스크립트 (일회용 Postgres) + 분기 사람 훈련 | 셸 필요, 읽기 키는 오프라인 |
+| 정합 맞추기 | 실행 중 → 대기, 멱등 키 유지 | 과거 시점 복원 뒤 게시·응답을 플랫폼에서 확인하고 완료 처리 | 멱등 키도 되돌아가 중복 게시·중복 응답 위험 |
+| Split-Brain | 옛 Worker 비활성화 | 옛 인스턴스의 secret key·Bridge Token 폐기 | 켜져도 DB에 못 붙음 |
+| RECOVERY_MODE | 새 모드 | 전역 스위치 3개 + 진행 중 `recovery_runs` | 막을 것은 스위치가 이미 막음 |
+| SNS 자격 증명 | 백업에서 복원 안 함 | 같음. 새 프로젝트 복원 시 Vault가 자동으로 그렇게 됨 | Vault 키가 프로젝트마다 다름 |
+| 시험 게시 | Test Publish | Instagram 컨테이너만 만들고 게시는 안 함 | 플랫폼에 시험 게시가 없음 |
+| Recovery Canary | 1 → 10% → 50% → 100% | 시험 Job → 실제 1건 → 스위치 단계 재개 | 1인 운영, Persona 몇 개 |
+| `backup_records` 상태 | 8개 | `backup_runs` 5개 | 서버 스크립트에 대기 상태 없음 |
+| `recovery_events` 상태 | 9개 | `recovery_runs` 4개 + `steps` 단계 시각 | 단계가 늘어도 상태는 그대로 |
+| 복구 기록 위치 | DB | 복구 중에는 백업 밖, 끝나고 DB | DB 복원과 함께 사라지지 않게 |
+| 팬 데이터 | 백업 | 백업 보존 1년 이하, 복원 후 삭제 요청 재적용 | 31.13 삭제 요청 |
+| 모델 백업 | Manifest | `models.manifest.json` + `comfy_nodes.lock` + 체크섬 스크립트 | 지금은 사람 기억뿐 |
+| Persona 백업 | 파일 7개 묶음 | `export_persona` JSON 하나, 가져오기는 V2 | 같은 내용 |
+| 화면 | 2개 경로 | `/monitoring`의 탭 하나 | 37.12 |
