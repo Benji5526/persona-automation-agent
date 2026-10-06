@@ -4,3 +4,10 @@ __pycache__/
 *.pyc
 .pytest_cache/
 data/
+
+# 비밀값·브라우저 세션·모델 파일 (TECH_DESIGN 44.11)
+.env.*
+!.env.example
+*storage_state*.json
+*.safetensors
+*.ckpt

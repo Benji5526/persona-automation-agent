@@ -525,7 +525,7 @@ Report what you changed.
 
 ### V1 Phase S — Scheduler (예약 게시)
 
-**보내기 전에** (TECH 42.1): V1 마이그레이션(업로드 Asset, `posts.origin`·`late_policy`·`scheduled_timezone`, `media-uploads` 버킷, 42.4 RPC)이 적용되어 있고, `supabase gen types typescript`를 다시 실행했고, 연결된 SNS 계정이 하나 이상 있어야 한다.
+**보내기 전에** (TECH 42.1): V1 마이그레이션(업로드 Asset, `posts.origin`·`late_policy`·`scheduled_timezone`, `personas.timezone`, `media-uploads` 버킷, 42.4 RPC, Realtime의 `social_accounts`)이 적용되어 있고, `supabase gen types typescript`를 다시 실행했고, 연결된 SNS 계정이 하나 이상 있어야 한다. 또 V1 Phase P(Post 목록·상세 공용 컴포넌트)가 끝나 있어야 한다. `/scheduler/:id`가 `/posts/:id` 컴포넌트를 재사용하기 때문이다. Phase P 프롬프트는 Sprint 2 ②에서 이 파일에 추가한다 (TECH 44.6).
 
 ```text
 Implement V1 Phase S only: the Scheduler (scheduled publishing of media the operator already owns).
