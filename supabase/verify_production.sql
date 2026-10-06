@@ -58,7 +58,7 @@ select
   has_function_privilege('service_role', 'public.reserve_llm_call(uuid, timestamptz)', 'execute')            as reserve_llm_call;
 
 -- 7. status 칸에 authenticated의 쓰기 권한이 있는지
---    기대: 0행 (personas.status만 예외로 허용되어 있으므로 personas 한 줄은 정상)
+--    기대: personas.status의 INSERT·UPDATE 두 줄만 (예외로 허용됨). 그 밖의 줄이 있으면 회수
 select table_name, column_name, privilege_type
   from information_schema.column_privileges
  where table_schema = 'public' and grantee = 'authenticated'

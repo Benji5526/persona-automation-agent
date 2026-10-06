@@ -2271,6 +2271,7 @@ n8n Workflow는 하나의 거대한 Workflow로 만들지 않고 **기능별로 
 | WF-015 | Autonomous Operation Controller ⚙️ | Long-term | Schedule (30분) | 이벤트 감지 → `decision` Job 생성만 (실행은 기존 Workflow, 32.2) |
 | WF-016 | Token Refresh | V1 | Schedule (매일) | 만료가 가까운 SNS 장기 토큰 갱신 → Vault (20.3) |
 | WF-017 | Fan Reply Sender | V2 | `reply_send` Job | 전송 전 검사 → SNS Reply (31.5) |
+| WF-018 | Storage Cleanup ⚙️ | V1 | Schedule (매일) | DB가 고른 삭제 대상(보관·반려 30일 지난 Asset 파일, 업로드 고아)을 Storage API로 지우고 기록 (45.7) |
 
 > ⚙️ 원안의 **Retry Handler**와 **Generation Monitor**는 별도 Workflow로 만들지 않는다. 재시도는 DB 함수가, 멈춘 Job 회수는 pg_cron이 맡는다 (14.11, 14.12). 원안의 **Asset Processing**은 Python이 생성 직후 처리한다 (14.10).
 
@@ -2699,7 +2700,7 @@ grant update (display_name, avatar_url) on public.users to authenticated;
 - 경로에 추측할 수 없는 uuid(Asset ID)를 쓴다. 파일명에 Persona 이름이나 주제를 넣지 않는다.
 - `storage.objects`에 공개 SELECT(목록 조회) 정책을 만들지 않는다. 공개 버킷이어도 정확한 경로 없이는 목록을 볼 수 없다.
 - 공개 URL을 Lovable과 게시 API 외의 곳(로그, 알림 메시지 등)에 남기지 않는다.
-- `rejected`·`archived` Asset은 30일 뒤 Storage 파일을 지운다 (DB 행과 메타데이터는 남김, 10.21 Rule 4).
+- `rejected`·`archived` Asset은 30일 뒤 Storage 파일을 지운다 (DB 행과 메타데이터는 남김, 10.21 Rule 4). ⚙️ 삭제는 WF-018이 Storage API로 한다 (V1, 45.7). SQL로 `storage.objects`를 지우면 실제 파일이 남는다.
 
 **Persona 참조 이미지는 비공개 버킷에 둔다.** Face Reference는 캐릭터의 정체성 자체라서, 유출되면 다른 사람이 같은 얼굴로 콘텐츠를 만들 수 있다. 그래서 생성 결과물과 달리 `persona-private`에 둔다.
 
@@ -3179,7 +3180,7 @@ persona-automation-agent/
 
 | 대상 | 할 일 | 완료 조건 |
 |---|---|---|
-| Supabase | 프로젝트 생성, Supabase CLI 연결 (`supabase link`), Google OAuth Provider 설정 (이메일 가입 끔) | 로컬 CLI로 마이그레이션 적용 가능 |
+| Supabase | 프로젝트 생성, Supabase CLI 연결 (`supabase link`), Google OAuth Provider 설정 (이메일 로그인 끔. 새 사용자 가입 허용은 켬, 가입 제한은 허용 목록 트리거, 45.3) | 로컬 CLI로 마이그레이션 적용 가능 |
 | Cloudflare | 도메인 연결, Named Tunnel 생성(`bridge.<도메인>` → `127.0.0.1:8000`), Access Application + Service Token 발급 | Service Token 없는 요청이 403 |
 | n8n 서버 | VPS에 Docker + Caddy(HTTPS), SSH 키 로그인, 방화벽(22·80·443), Owner 2FA, `NODES_EXCLUDE`, `N8N_ENCRYPTION_KEY` 백업, 실행 기록 14일 삭제 설정 | `https://n8n.<도메인>` 접속, 15.9 항목 충족 |
 | 로컬 PC | ComfyUI (`--listen 127.0.0.1`), `.safetensors` 모델·LoRA 준비, Python 3.12 venv, `cloudflared` 서비스 등록 | ComfyUI·브릿지가 PC 시작 시 자동 실행 |
@@ -3684,7 +3685,7 @@ GPU 작업은 정확한 진행률을 알 수 없다. **가짜 %를 만들지 않
 
 - 성격은 슬라이더(0~1)와 태그를 함께 쓴다. 말투는 드롭다운과 표현 목록으로 입력한다.
 - `age_group`은 **성인 연령대만** 고를 수 있다 (`20s`, `30s`, `40s+`) (15.11).
-- Visual Identity 화면: Base Model·Default Workflow 드롭다운(`comfy_workflows`), LoRA 선택(`persona_assets` 중 `lora`), LoRA 강도, Face·Style Reference 업로드(`persona-private`, 15.5).
+- Visual Identity 화면: Base Model·Default Workflow 드롭다운(`comfy_workflows`), LoRA 선택(`persona_assets` 중 `lora`), LoRA 강도, Face·Style Reference 업로드(`persona-private`, 15.5. 파일을 먼저 올리고 성공한 뒤 행을 만든다. 행 저장이 실패하면 올린 파일을 지운다 ⚙️ 45.6).
 - **테스트 이미지 생성:** `[테스트 이미지 생성]`은 별도 기능이 아니라 `metadata = {"purpose": "visual_test"}`인 `draft` Content Job을 INSERT한 뒤 `submit_content_job`을 부른다 (`create_content_job`에는 `metadata` 인자가 없다, 23.4). 결과는 같은 화면 미리보기 칸에 표시하고, Asset Library 기본 필터에서는 숨긴다.
 
 ### 17.9 Content Jobs · Create Content · Job Detail
@@ -4056,6 +4057,7 @@ await supabase.auth.signInWithOAuth({
 - `AuthProvider`가 `supabase.auth.getSession()`과 `onAuthStateChange`로 세션을 관리한다. 상태는 `loading` / `authenticated` / `unauthenticated`.
 - 세션은 supabase-js 기본 저장소에 유지된다 (새로고침해도 로그인 유지).
 - **가입 거부 처리** ⚙️: 허용 목록에 없는 계정은 가입 트리거가 거부한다 (15.3). 이때 Supabase는 `?error=…&error_description=Database error saving new user`로 되돌려 보낸다. `/login`은 이 값을 읽어 "이 계정은 사용할 수 없어요. 관리자에게 이메일 등록을 요청하세요."를 보여준다.
+- **그 밖의 로그인 오류** ⚙️ (45.4): `error_description`이 있는데 가입 거부가 아니면(예: Google 화면에서 취소) "로그인하지 못했어요. 다시 시도해 주세요."를 보여준다. 원문은 보여주지 않는다.
 - 로그인 직후 `users` 행(자기 것)을 읽어 Header에 이름·아바타를 표시하고 `role`로 메뉴를 정한다.
 
 ### 18.5 레이아웃
@@ -4161,7 +4163,7 @@ useEffect(() => {
 | 단계 | 구독 테이블 |
 |---|---|
 | MVP | `content_jobs`, `automation_jobs`, `assets`, `worker_status` ⚙️ |
-| V1 | + `posts`, `approvals` |
+| V1 | + `posts`, `approvals`, `social_accounts`(M7b, 42.4), `personas`(36.5 생성 차단기, 45.7) |
 
 - Realtime에도 RLS가 적용되어 자기 Persona의 변경만 받는다.
 - 이벤트 내용을 직접 화면에 반영하지 않고 **쿼리를 무효화해서 다시 읽는다.** 이벤트가 빠지거나 순서가 바뀌어도 화면이 DB와 어긋나지 않는다.
@@ -6009,9 +6011,9 @@ Phase는 22.22 빌드 순서를 따른다. Phase 1~3은 n8n·브릿지 없이 �
 | 1 | 프로젝트 생성. Region은 **Seoul (ap-northeast-2)**. DB 비밀번호는 비밀번호 관리자에 보관 | Dashboard | – |
 | 2 | `supabase link --project-ref <ref>` → `supabase db push` | 이 저장소에서 CLI | 0001~0008 적용 (점검 1) |
 | 3 | pg_cron 확인. `db push`에서 0006이 실패하면 Dashboard → Database → Extensions에서 `pg_cron`을 켜고 다시 push | Dashboard | 점검 13 |
-| 4 | **Google만** 켜고 Email·Phone·Anonymous 끄기 | Authentication → Sign In / Providers | – |
+| 4 | **Google만** 켜고 Email·Phone·Anonymous 끄기. 새 사용자 가입 허용은 켜 둔다 (가입 제한은 허용 목록 트리거, 45.3) | Authentication → Sign In / Providers | – |
 | 5 | Google Cloud Console에서 OAuth Client(웹) 생성. 승인된 리디렉션 URI = `https://<ref>.supabase.co/auth/v1/callback`. Client ID·Secret을 4번 화면에 입력 | Google Cloud, Dashboard | – |
-| 6 | URL Configuration: Site URL = Lovable 운영 주소. Redirect URLs에 운영 주소와 Lovable 미리보기 주소의 **`/login`** 추가 (23.4: 로그인 후 `/login`으로 돌아와야 가입 거부 안내가 보인다) | Authentication → URL Configuration | – |
+| 6 | URL Configuration: Site URL = Lovable 운영 주소. Redirect URLs에 운영 주소와 Lovable 미리보기 주소의 **`/login`** 추가 (23.4: 로그인 후 `/login`으로 돌아와야 가입 거부 안내가 보인다). 와일드카드는 쓰지 않는다 (45.3) | Authentication → URL Configuration | – |
 | 7 | **로그인 전에** 허용 목록 입력: `update public.app_settings set value = '["you@example.com"]'::jsonb where key = 'allowed_emails';` (소문자) | SQL Editor | 점검 9 |
 | 8 | Lovable(또는 임시 페이지)에서 Google 로그인 → `users` 행 생성 확인 → `update public.users set role = 'admin' where email = 'you@example.com';` | SQL Editor | 점검 9 |
 | 9 | API Keys: **publishable key** → Lovable. **secret key 두 개**를 새로 만들어 이름을 `n8n`, `bridge`로 구분 → n8n Credential `PA Supabase`, 브릿지 `.env`의 `SUPABASE_SECRET_KEY`. 레거시 `service_role` JWT는 쓰지 않는다 (15.6) | Project Settings → API Keys | 각 키가 한 곳에만 있는지 |
@@ -6021,7 +6023,7 @@ Phase는 22.22 빌드 순서를 따른다. Phase 1~3은 n8n·브릿지 없이 �
 | 13 | n8n 연결 (n8n_guide 3~6절: Credential, Database Webhook 2개) → 점검 15~17 | n8n, Dashboard | 24.4 |
 | 14 | 브릿지 연결 (`.env`) → 점검 17 | 로컬 PC | Worker Online |
 
-Supabase CLI 명령은 `supabase/README.md`에 있다. 1~12는 Lovable·n8n·브릿지 없이 끝낼 수 있다.
+Supabase CLI 명령은 `supabase/README.md`에 있다. 6·8번은 Lovable 주소(또는 임시 로그인 페이지)가, 12번은 n8n 서버가 필요하다. 나머지는 Lovable·n8n·브릿지 없이 끝낼 수 있다 (실행 순서는 45.3).
 
 ### 24.4 적용 후 점검
 
@@ -6034,7 +6036,7 @@ Supabase CLI 명령은 `supabase/README.md`에 있다. 1~12는 Lovable·n8n·브
 | 3·4 | anon의 테이블·함수 권한 | 0행 | 0005 이후 Dashboard에서 권한을 바꾼 것. 0005의 회수 블록을 새 마이그레이션으로 다시 적용 |
 | 5 | authenticated가 실행할 수 있는 함수 | Operator RPC 11개만 | Worker RPC가 보이면 **즉시** 회수 마이그레이션 (Lovable이 상태를 마음대로 바꿀 수 있음) |
 | 6 | service_role의 Worker RPC 실행 | 모두 true | 0005·0007 grant 확인 |
-| 7 | authenticated의 `status`·`role`·`user_id` 쓰기 권한 | `personas.status`만 | 다른 줄이 있으면 회수 |
+| 7 | authenticated의 `status`·`role`·`user_id` 쓰기 권한 | `personas.status`의 INSERT·UPDATE 두 줄만 | 다른 줄이 있으면 회수 |
 | 8 | 가입 트리거 | `on_auth_user_created` → `private.handle_new_user` 하나 | 다른 가입 트리거가 있으면 제거 (24.2) |
 | 9 | 허용 목록·계정 | 본인 이메일, `admin` | 24.3 7·8번 |
 | 10·11 | 버킷·Storage 정책 | `media` 공개, `persona-private` 비공개, 정책 4개 | 0005 Storage 블록 |
@@ -11098,7 +11100,7 @@ create unique index cost_rates_effective on public.cost_rates (usage_type, provi
 |---|---|---|
 | `generated` (아무도 승인·게시하지 않음) | **60일 뒤 자동 `archived`** ⚙️ → 그 30일 뒤 파일 삭제 (15.5). 가장 많이 쌓이고 쓰이지 않는 것이라 Storage를 가장 많이 줄인다 | V1 |
 | `approved`, 게시에 쓰인 Asset | 지우지 않는다. 오프사이트 백업도 있다 (38.3) | – |
-| `rejected`·`archived` | 30일 뒤 파일 삭제 (15.5) | MVP |
+| `rejected`·`archived` | 30일 뒤 파일 삭제 (15.5, 삭제는 WF-018) | V1 ⚙️ (45.7. MVP에는 파일이 조금 더 남는다) |
 | Persona 정체성 파일, LoRA | 지우지 않는다 (원안과 같음) | – |
 
 원안의 **COLD STORAGE**(싼 저장소로 옮기기)는 두지 않는다. 오래된 게시 Asset도 이미지 몇 MB라 옮기는 작업이 아끼는 돈보다 크다. 영상이 생기면(용량이 수십~수백 배) 그때 검토한다.
@@ -11388,6 +11390,7 @@ half_open ──(15분 동안 시간당 속도가 기준 아래)──▶ closed
 | WF-015 | Autonomous Operation Controller (이벤트 감지만) | Long-term | 020 |
 | WF-016 | Token Refresh | V1 | 008 |
 | WF-017 | Fan Reply Sender | V2 | 012 |
+| WF-018 | Storage Cleanup (45.7) | V1 | – |
 | 하위 | `[PA] LLM Structured Call`, `[PA] SNS - Instagram - {Connect, Publish, Metrics, ValidateAccount, Messages, Reply}` | MVP / V1 / V2 | – |
 
 **Workflow로 만들지 않는 것** (원안 번호 → 대신하는 것)
@@ -11405,7 +11408,7 @@ half_open ──(15분 동안 시간당 속도가 기준 아래)──▶ closed
 | 025 Recovery Monitor | pg_cron `recover_stale_jobs` + 확인 실행 (`verify_only`) | 43.8 |
 | 021 Resource & Budget Controller | DB 세 지점 (만들 때, LLM 직전, GPU 선점) | 우회 불가 (39.4) |
 
-**pg_cron** (Supabase): `recover_stale_jobs` 1분, `expire_approvals` 5분, `evaluate_health` 1분, `sample_metrics` 5분, `evaluate_ai_decisions` 매일 07:00, 보존 정리(Context 30일, 대화 1년, `execution_logs` 출력 90일, 지표 30일, 이벤트 1년), Asset 정리(`generated` 60일 → 보관, 보관 30일 → 파일 삭제), Long-term: `advance_experiments`, `advance_optimizations`.
+**pg_cron** (Supabase): `recover_stale_jobs` 1분, `expire_approvals` 5분, `evaluate_health` 1분, `sample_metrics` 5분, `evaluate_ai_decisions` 매일 07:00, 보존 정리(Context 30일, 대화 1년, `execution_logs` 출력 90일, 지표 30일, 이벤트 1년), Asset 정리(`generated` 60일 → 보관, 보관 30일 → 파일 삭제 대상. 실제 삭제는 WF-018, 45.7), Long-term: `advance_experiments`, `advance_optimizations`.
 
 **하루 흐름**: 07:00 결정 평가 → 08:00 WF-011 분석 → 09:00 WF-012 매일 결정 (32.11).
 
@@ -11556,7 +11559,7 @@ Lovable 앱 코드는 Lovable 프로젝트(그리고 그것이 연결한 GitHub 
 원안 40.62의 Phase 1~10(44단계)는 16장 마일스톤과 같은 방향이다. 범위의 정본은 16장이고, **실행 순서(Sprint)·관문·사람과 도구별 작업 분리는 44장**이다 ⚙️. 지금 위치는 README의 진행 상황이다.
 
 ```text
-[완료]  PRD 1~8, 기술 설계 9~44
+[완료]  PRD 1~8, 기술 설계 9~45
 [완료]  M1 DB (로컬 테스트), M2 브릿지 (로컬 테스트), M3 n8n Workflow 작성
 [다음]  M0 환경 (Supabase·n8n 서버·Cloudflare·Lovable 계정 = 직접 작업)
         → 24장 Supabase 적용 → 25장 PC 연결 → 26장 n8n 배포
@@ -11928,7 +11931,7 @@ Lovable은 테이블·칼럼·정책을 만들지 않는다 (22.3 금지 4). 위
 ```
 
 - 업로드 중 진행률은 실제 바이트 진행만 보여준다 (가짜 % 금지, 22.3 금지 10).
-- `register_uploaded_media`가 실패하면 올라간 파일은 Asset 행 없이 남는다. 하루 한 번 pg_cron이 `media-uploads`에서 Asset이 없는 24시간 지난 파일을 지운다.
+- `register_uploaded_media`가 실패하면 올라간 파일은 Asset 행 없이 남는다. 하루 한 번 WF-018이 `media-uploads`에서 Asset이 없는 24시간 지난 파일을 Storage API로 지운다 ⚙️ (45.7: SQL로 지우면 실제 파일이 남는다).
 
 ### 42.4 데이터 접근: RPC와 Hook
 
@@ -12601,7 +12604,7 @@ DB 복원 뒤의 대조(38장 `reconcile_after_restore`)도 이 확인 실행과
 **지금 위치** (2026-10-06)
 
 ```text
-[완료]  PRD 1~8, 기술 설계 9~44
+[완료]  PRD 1~8, 기술 설계 9~45
 [완료]  M1 DB · M2 브릿지 (로컬 테스트 107개 통과), M3 n8n Workflow 작성
 [다음]  Sprint 1: M0 환경 → DB 적용 → [PC → n8n] ∥ [Lovable] → M5 (27장 E2E)
 ```
@@ -12690,8 +12693,8 @@ G1의 복원 시험 ⚙️: 38.13은 복원 검증·훈련을 V1에서 시작한
 
 | # | 단계 | 사람 | Claude Code | 통과 |
 |---|---|---|---|---|
-| 0 | 코드 | – | `pytest tests -q` 확인 (2026-10-06: 107개 통과). **36.12 MVP 수정**을 첫 `db push` 전에 한다 ⚙️: 브릿지의 `content_job.persona_id == job.persona_id` 검사, `automation_jobs`·`posts`의 Persona 일치 트리거(`persona_isolation` 마이그레이션), 격리 테스트 | 전부 통과, 36.12 격리 테스트의 MVP 행 |
-| 1 | **M0 + DB 적용** | Supabase 프로젝트, Google OAuth Client(Google Cloud), 이메일 가입 끔, `supabase link`·`db push`, 허용 목록 → **Lovable 프로젝트를 만들어 Supabase에 연결하고 빈 화면에서 Google 로그인**(또는 임시 페이지) → admin 지정, secret key 분리 (24.3) | 순서 안내, `verify_production.sql` 결과 해석 | `verify_production.sql` 1~14 |
+| 0 | 코드 | – | `pytest tests -q` 확인 (2026-10-06: 107개 통과). **36.12 MVP 수정**을 첫 `db push` 전에 한다 ⚙️: 브릿지의 `content_job.persona_id == job.persona_id` 검사, `automation_jobs`·`posts`의 Persona 일치 트리거(`persona_isolation` 마이그레이션), 격리 테스트, Foundation 보강 테스트(45.6) | 전부 통과, 36.12 격리 테스트의 MVP 행 |
+| 1 | **M0 + DB 적용** | Supabase 프로젝트, Google OAuth Client(Google Cloud), 이메일 로그인 끔(새 사용자 가입 허용은 켬), `supabase link`·`db push`, 허용 목록 → **Lovable 프로젝트를 만들어 Supabase에 연결하고 빈 화면에서 Google 로그인**(또는 임시 페이지) → admin 지정, secret key 분리 (24.3) | 순서 안내, `verify_production.sql` 결과 해석 | `verify_production.sql` 1~14 |
 | 2 | PC (트랙 A) | 드라이버, ComfyUI(`127.0.0.1`), 체크포인트·LoRA, venv, `.env` 채우기 (25.3) | 설치 오류 분석 | `/v1/health` `ok` |
 | 3 | 첫 생성 (n8n 없이) | 25.6의 SQL·호출 실행 | 결과 확인, 실패 분석 | Content Job `ready`, Asset 1행 |
 | 4 | 터널 | 도메인, Named Tunnel, Access Service Token (25.5) | – | 토큰이 없으면 차단 |
@@ -12750,7 +12753,7 @@ G1의 복원 시험 ⚙️: 38.13은 복원 검증·훈련을 V1에서 시작한
 | M7 나머지: 승인 게시 | – | AI 생성물의 `review_asset` → `submit_post_for_approval` → `resolve_approval` 흐름(DB는 `publishing` 마이그레이션에 있음), 브릿지 게시용 JPEG 사본·`transcode` Job | Phase R (`/approvals`, Post 상세의 승인·즉시 게시) |
 | M8 성과 | – | `analytics_monitoring` 마이그레이션, WF-009, `[PA] SNS - Instagram - Metrics`, `record_metrics`, 29장 계산 함수, `complete_publish`의 수집 Job 생성 | Phase A (`/analytics`, 계정·Post 화면의 성과 칸) |
 | M8 감시 | 외부 업타임 감시 가입 | 37-A 테이블, `evaluate_health`·`sample_metrics`, WF-010을 Incident 단위 알림(37.6)으로 확장, `expire_approvals` | Phase M (`/monitoring` 개요·서비스·Incident·추이·백업·복구 탭) |
-| M8 백업·사용량 | 오프사이트 저장소 계정 (Object Lock) | `backup.sh` V1판(6시간, age 암호화, 오프사이트, Storage 증분), `verify.sh`, `backup_runs`, Asset `sha256`·`file_size` 기록(38.13 V1), `monitoring_usage`·`cost_rates` 기록 (비용 화면은 V2b, 37-A.5) | – |
+| M8 백업·사용량 | 오프사이트 저장소 계정 (Object Lock) | `backup.sh` V1판(6시간, age 암호화, 오프사이트, Storage 증분), `verify.sh`, `backup_runs`, Asset `sha256`·`file_size` 기록(38.13 V1), `monitoring_usage`·`cost_rates` 기록 (비용 화면은 V2b, 37-A.5), WF-018 Storage Cleanup (45.7) | – |
 | V1 Persona 운영 | – | 36.12 V1: Persona 생성 차단기, pHash 기록과 게시 전 검사 10번, 준비도 RPC | `/personas` 운영 칸 |
 | M8 생성 확장 | – | Video Generation·Upscale Workflow (16.11) | – |
 | M7b 후반: Instagram Reels | – | `[PA] SNS - Instagram - Publish`에 Reels (41.5), `platform_specs.instagram`에 영상 형식 추가, 영상 지표 칸 결정 (29.3) | – |
@@ -12843,7 +12846,7 @@ WF-011 분석 (performance_insight.v1) → WF-012 결정 (ai_decision.v1) → re
 | `social_accounts` (0010) | 2 ① | `oauth_states`, Vault 함수(`upsert_social_account`, `get_social_account_token`), `create_oauth_state`·`consume_oauth_state` |
 | `publishing` (0011) | 2 ② | `approvals`, `posts (platform, external_post_id)` Unique, 28.14의 Operator·Worker RPC(`record_metrics`·`expire_approvals` 제외), `transcode` job_type, `check_publish_ready`(1~10번), 43.10 게시 RPC 변경, R8 확장, `generation_enabled`·`emergency_stop_all`, Realtime에 `approvals` |
 | `scheduler` (0012) | 2 ③ | 41.12 DB (업로드 Asset, `posts.origin`·`late_policy`, Likey·Fantrie, `media-uploads`, 42.4 RPC, `publisher` Worker, `platform_specs`·`platform_controls`), `check_publish_ready` 11·12번, `claim_next_automation_job(p_channel)`, `personas.timezone`, Realtime에 `social_accounts` |
-| `analytics_monitoring` (0013) | 3 | `performance_metrics`, `app_settings.analytics`, `record_metrics`, `complete_publish`의 수집 Job 생성, 29장 함수, `expire_approvals`, 37-A 테이블, 36.12 V1(생성 차단기·pHash), `monitoring_usage`·`cost_rates`, `backup_runs`·`recovery_runs` |
+| `analytics_monitoring` (0013) | 3 | `performance_metrics`, `app_settings.analytics`, `record_metrics`, `complete_publish`의 수집 Job 생성, 29장 함수, `expire_approvals`, 37-A 테이블, 36.12 V1(생성 차단기·pHash), Realtime에 `personas`, `monitoring_usage`·`cost_rates`, `backup_runs`·`recovery_runs`, `list_storage_deletions`·`mark_storage_deleted`·`assets.file_deleted_at`(45.7) |
 | `ai_decisions` (0014) | 4 | `ai_decisions`, `agent_policy_versions`, `performance_analyses`, `agent_permission_level`, 39.12 V2 한도 |
 | `fan` (0015) | 5 | `conversations`, `messages`, `fan_memories`, `fan_reply_level` |
 | 이후 | 6~ | `strategy_versions`, `experiments` 등 |
@@ -12983,3 +12986,241 @@ WF-011 분석 (performance_insight.v1) → WF-012 결정 (ai_decision.v1) → re
 | 팬 자율 단계 | L0~L3 | `fan_reply_level` 0~2 (L1·L2를 1로 합침). 3은 원안의 L4 | 31.9 |
 | 단계 이름 | Production MVP, V1~V3 | MVP / V1 / V2a / V2b / Long-term | 40.1 |
 | Claude Code | 역할 목록 | 작업 규칙 10개 | 운영 영향·비밀값·증거 기준을 정함 |
+
+---
+
+## 45. Foundation Implementation — 로그인·Persona 기반 구축 실행 명세 ✅
+
+> 원안 45의 Foundation(Repository, 환경, Supabase, Google 로그인, `users`·`personas`·`persona_assets`, RLS, Storage, Lovable App Shell, Persona CRUD)은 **대부분 이미 설계·구현되어 있다.** DB는 M1(마이그레이션 0001~0008, `tests/db`)에서 끝났고, 화면은 18·22장과 `lovable_master_prompt.md`의 Phase 1·2가 정한다. 그래서 이 장은 새 설계가 아니라 **44.5 Sprint 1 중 Foundation 부분(0번, 1번, 7번의 Phase 1·2)의 실행 순서, 남은 빈 곳, 완료 판정**이다. 원안과 다른 곳은 ⚙️로 표시하고 45.12에 모았다.
+
+### 45.1 범위와 위치 (원안 45.1·45.2)
+
+```text
+F0 코드 보강 → F1 Supabase·Google → F2 Lovable 연결·Shell → F3 Persona → F4 교차 계정·보안 → F5 Foundation E2E
+ (44.5 0번)     (44.5 1번)           (44.5 7번 Phase 1)     (Phase 2)      (45.5·45.6)          (45.8)
+```
+
+- **포함**: 원안 45.2의 포함 목록 그대로다 (Repository부터 Basic Realtime까지).
+- **제외**: 원안과 같다 (ComfyUI, Python Worker, n8n, SNS, AI Decision, 팬, 자율 운영). 이것들은 Sprint 1의 트랙 A(PC·n8n, 44.5 2~6번)와 이후 Sprint다.
+- **Foundation 체크포인트는 관문이 아니다** (44.4). F5를 통과하면 트랙 A와 Lovable Phase 3~6을 이어 가고, Sprint 1의 출구는 그대로 G1이다. 트랙 A는 F1 직후부터 동시에 진행해도 된다.
+
+### 45.2 원안 항목별 현재 상태 (원안 45.2~45.43)
+
+| 원안 항목 | 지금 | 근거 | 남은 일 |
+|---|---|---|---|
+| Git Repository, Project Structure | 있음. 원안의 `database/`·`execution/`·`src/` 구조로 바꾸지 않는다 ⚙️. 화면 코드(`src/`)는 Lovable 저장소에 있다 | 40.13, 44.11 | – |
+| `.gitignore` | 있음. 원안 45.4 목록 중 빠진 것을 더했다 | 44.11 | – |
+| 환경 변수 | Frontend는 `VITE_SUPABASE_URL`·`VITE_SUPABASE_PUBLISHABLE_KEY` 두 개(원안 `ANON_KEY` ⚙️). 서버 비밀값 위치는 15.6 | 16.5, 15.6 | – |
+| Supabase 프로젝트 | 운영 1개 + 로컬 테스트 + 필요할 때 임시 프로젝트 (원안 Development·Production 두 개 ⚙️) | 40.12 | F1 (사람) |
+| Auth, Google OAuth | Google만, 이메일·전화·익명 끔. 가입 트리거가 허용 목록 밖 계정을 거부 | 15.3, 18.4, 24.3 | F1·F2 (사람) |
+| `users` | 0001. 원안보다 강하다: `email` 필수, `role`은 `operator`/`admin`(원안 `user` ⚙️), 가입 트리거(0005)가 허용 목록 확인·소문자 정규화·이름 대체(`full_name` → `name`)를 하고 `security definer` + `search_path = ''` | 15.3, 18.12 | – |
+| `personas` | 0001. 원안 칸에 더해 이름 길이·slug 형식 CHECK, `profile_image_path`, `visual_settings`. `status`는 `active`/`inactive`(원안 `draft` 등 9개 ⚙️) | 10.5, 36.2 | – |
+| `persona_assets` | 0001. `asset_type`은 소문자 5종(`base_model`, `lora`, `face_ref`, `style_ref`, `character_ref`, 원안 대문자 4종 ⚙️) | 10.6 | – |
+| RLS | 0005. 원안 45.25의 `personas` 정책 4개가 같은 모양으로 있다 (`(select auth.uid())` 형태). 여기에 칼럼 단위 GRANT로 `user_id`는 쓸 수 없고, 상태 칸은 `personas.status`만 직접 쓴다 | 21.10, 44.11 | F0 보강 테스트 |
+| Storage | 0005의 `media`(공개)·`persona-private`(비공개, Persona 경로 정책 4개). M7b에 `media-uploads`(비공개) (원안 3버킷·`{user_id}` 경로 ⚙️, 45.7) | 15.5, 15.13, 42.3 | – |
+| App Shell, User Profile, Persona CRUD | `lovable_master_prompt.md` Phase 1(Shell·Auth)·Phase 2(Persona) | 22.22, 23장 | F2·F3 (Lovable) |
+| Basic Realtime | 0001·0007: `content_jobs`, `automation_jobs`, `assets`, `posts`, `worker_status`. `personas`는 넣지 않는다 ⚙️ (45.7) | 18.8 | – |
+| TypeScript 타입 | `supabase gen types typescript` → Lovable 저장소의 `src/types/database.ts` | 22.2, 24.7 | F2 (사람) |
+| 테스트 | `tests/db`에 가입 허용 목록, 교차 Operator 조회, 상태·역할 직접 쓰기 거부, anon 차단, 비공개 버킷 소유자 전용, 참조 경로 검사가 있다 (전체 107개 통과) | 16.12 | F0 보강 (45.6) |
+
+원안 45.53의 "Claude 구현 순서" 13단계 중 1~4(구조·스키마·RLS·Auth)와 11~13(Storage·Realtime·테스트)의 DB 부분은 M1에서 끝났다. 5(Google OAuth)는 사람이, 6~10(클라이언트·App Shell·Persona 화면)은 Lovable이 한다.
+
+### 45.3 실행 순서와 작업 분리 (원안 45.47~45.49, 45.53)
+
+| # | 단계 | 사람 | Claude Code | Lovable | 통과 |
+|---|---|---|---|---|---|
+| F0 | 코드 보강 | – | 36.12 MVP 수정(브릿지 Persona 일치 검사, `persona_isolation` 마이그레이션, 44.5 0번), Foundation 보강 테스트(45.6). 마이그레이션이 하나 늘므로 `verify_production.sql` 1번·24.3 2번·24.4 1번의 기대값을 0001~0009로 고친다 (44.12 규칙 4) | – | `pytest tests -q` 전부 통과 |
+| F1 | Supabase·Google | 프로젝트(Seoul), `supabase link`·`db push`, pg_cron 확인, Auth는 Google만, Google OAuth Client·동의 화면, 허용 목록 입력, secret key 분리, Advisors (24.3 1~5, 7, 9~11번) | 순서 안내, 점검 SQL 해석 | – | `verify_production.sql` 1~8, 10~14, Advisors 경고 0 (또는 이유 기록) |
+| F2 | Lovable 연결·Shell | Lovable 프로젝트 → 기존 Supabase 연결(publishable key) → Site URL·Redirect URLs 설정(24.3 6번) → §1 Master Prompt, Phase 1 보내기 → 첫 로그인 → `admin` 지정 (24.3 8번) → `supabase gen types` | Phase 1 코드 리뷰 (45.5) | Phase 1 | `verify_production.sql` 9, Phase 1 확인 항목 |
+| F3 | Persona | Phase 2 보내기 | Phase 2 코드 리뷰 (45.5) | Phase 2 | Phase 2 확인 항목 |
+| F4 | 교차 계정·보안 | 두 번째 Google 계정으로 가입 거부와 격리 확인 (45.6) | 보안 검색 (45.5), 결과 정리 | – | 45.5·45.6 표 |
+| F5 | Foundation E2E·정리 | 45.8 시나리오, 끝나면 시험 계정 정리 (45.6) | 기대 상태와 대조 | – | 45.8 체크 |
+
+트랙 A(44.5 2번 이후)는 F1이 끝나면 동시에 시작할 수 있다. 브릿지·n8n이 쓰는 secret key가 F1(24.3 9번)에서 만들어지기 때문이다.
+
+**F1의 Google·Supabase 설정** (원안 45.47·45.48, 24.3 보충)
+
+| 대상 | 설정 | 이유 |
+|---|---|---|
+| Google OAuth Client | 유형 "웹 애플리케이션", 승인된 리디렉션 URI = `https://<ref>.supabase.co/auth/v1/callback` | 24.3 5번 |
+| Google 동의 화면 | 범위는 `email`·`profile`·`openid`만. 게시 상태가 "테스트"면 테스트 사용자에 Operator 이메일을 넣는다 (Google 화면 이름·정책은 구현 시 확인) | 필요 이상의 권한을 받지 않음 |
+| Client Secret | Supabase Dashboard의 Google Provider에만 입력. Lovable·저장소·채팅에 두지 않는다 | 원안 45.47과 같음 |
+| 새 사용자 가입 허용 | **켜 둔다** ⚙️. 끄면 허용 목록에 있는 사람도 처음 로그인할 수 없다. 가입 제한은 트리거가 한다 (15.3) (화면 이름은 구현 시 확인) | 허용 목록이 유일한 가입 관문 |
+| Site URL, Redirect URLs (F2) | Lovable 프로젝트를 만든 직후에 설정한다. Site URL = Lovable 운영 주소. Redirect URLs = 운영 주소와 **실제로 쓰는** 미리보기 주소의 `/login` (24.3 6번). **와일드카드(예: `https://*.lovable.app/**`)를 쓰지 않는다** ⚙️ | 같은 도메인의 남의 앱도 허용 목록에 들어가, 로그인 링크를 조작하면 세션이 그 앱으로 넘어갈 수 있다. Supabase도 운영에서는 정확한 주소를 권한다 |
+| 허용 목록 | 첫 로그인 **전에** Operator 이메일(소문자) | 24.3 7번 |
+
+### 45.4 화면 기준 (원안 45.10~45.14, 45.17~45.23, 45.33~45.46)
+
+화면의 정본은 18장과 Master Prompt다. 원안 항목과의 대응:
+
+| 원안 | 정본 | 조정 |
+|---|---|---|
+| 로그인 화면·흐름 (45.10·45.11) | 18.4, Master Prompt §1 8번 | 같음. ⚙️ 가입 거부(`Database error saving new user`) 말고 다른 오류(Google 화면에서 취소 등)는 "로그인하지 못했어요. 다시 시도해 주세요."로 보여준다. 원문은 보여주지 않는다 (원안 45.57). Master Prompt와 18.4에 더했다 |
+| 인증 상태·세션·Route Guard (45.12·45.14·45.46) | 18.4·18.5: `AuthProvider`(`getSession` + `onAuthStateChange`, `loading`/`authenticated`/`unauthenticated`), `ProtectedRoute`(`/login?next=…`) | 같음 |
+| 보호 경로 (45.13) | `/login`을 뺀 모든 경로. 경로 이름은 18.3 (`/content-jobs`, `/monitoring` 등) | 원안의 `/content`·`/ai-decisions` 같은 이름은 18.3 이름으로 |
+| Sidebar (45.34) | 17.2: 그룹 없는 한 줄 목록, 다음 단계 메뉴는 **숨김** | 원안의 그룹(PERSONA·CONTENT…)과 "Coming Soon"은 쓰지 않는다 (42.2와 같은 이유) |
+| Dashboard (45.35) | Foundation 시점은 프롬프트 Phase 1의 빈 화면(제목 + EmptyState). KPI는 프롬프트 Phase 5 (22.8) | 원안의 Scheduled·Published Posts는 V1. 가짜 지표 금지는 원안과 같다 (22.3 금지 10) |
+| 사용자 메뉴 (45.36) | Phase 1 Header의 사용자 메뉴(로그아웃) | 같음 |
+| Loading·Empty·Error·Optimistic (45.37~45.40) | 18.10 | 같음 |
+| 타입 (45.41) | 22.2, 24.7 | 같음 |
+| 단일 Supabase Client (45.42) | `src/lib/supabase.ts` (18.14) | ⚙️ Lovable의 Supabase 통합이 클라이언트 파일(`src/integrations/supabase/client.ts`)을 따로 만들면 그것 하나만 쓰고, `src/lib/supabase.ts`는 그것을 다시 내보낸다. 클라이언트가 둘이면 세션 처리가 서로 경쟁한다. Phase 1 프롬프트에 반영했다. 키 값이 코드에 직접 들어가도 publishable key면 괜찮다. secret key·`service_role`만 금지 (15.6) |
+| Repository 패턴 (45.43) | 18.7: Hook이 Supabase를 부른다. 여러 Hook이 같은 쿼리를 쓰면 쿼리 빌더 함수로 묶는다 (42.4) | Repository 층을 두지 않는다 ⚙️ (42.4와 같은 이유: 캐시 키와 쿼리가 두 곳으로 나뉨) |
+| `usePersonas`·`useAuth` (45.44·45.45) | 18.7: `{ data, isLoading, error, refetch }` + 명령 Hook(`useMutation`) | 반환 형태가 원안과 다르다 ⚙️ (TanStack Query 그대로) |
+| Persona 상태 (45.19) | 저장은 `active`/`inactive`(+ V2 `agent_paused`), 화면 표시는 계산 (36.2, 40.6) | 원안 `draft`의 "아직 준비 안 됨"은 36.12 V1의 준비도 체크 목록이 보여준다 ⚙️ |
+| Persona 만들기 (45.20) | Phase 2: 이름·자동 slug·설명, 나머지는 기본값 | 같음 |
+| Persona 상세 탭 (45.23) | 17.8 MVP 4개: 프로필, 성격·말투, Visual Identity, 콘텐츠 규칙 | 원안 MVP 3개 대신 4개 ⚙️. 생성에 Base Model·LoRA·참조 이미지가 필요해서 Visual Identity가 MVP다 (16.14) |
+| Persona 삭제 (45.25 DELETE) | 화면은 보관(`inactive`)만. DB는 하위 데이터가 없는 Persona만 지울 수 있다 (FK `restrict`, 21.17) | 정책은 원안처럼 있다 |
+| 역할 (45.17) | `operator`/`admin`. 화면에서 숨기는 것은 편의이고, 권한은 RLS·RPC가 확인한다 (18.12) | 원안 원칙과 같음 |
+
+### 45.5 보안 검색 (원안 45.52)
+
+F2·F3의 Phase가 끝날 때마다, 그리고 F4에서 한 번 더 한다. **하나라도 걸리면 다음 단계로 가지 않는다** (원안과 같음).
+
+| 검색 대상 | 어디서 | 방법 | 통과 |
+|---|---|---|---|
+| secret·`service_role` key | Lovable 저장소 전체 | 문자열 `sb_secret_`, `service_role`, `SERVICE_ROLE`, `SUPABASE_SECRET`. JWT 모양(`eyJ…`)이 있으면 가운데 부분을 디코드해 `role`이 `anon`인지 본다 | 0건 (JWT는 `anon`만) |
+| 다른 비밀값 | 같음 | `sk-ant-`, `GOCSPX-`(Google Client Secret 접두어), `client_secret`, `BRIDGE_TOKEN`, `Bearer ` | 0건 (나오면 용도 확인) |
+| 비공개 버킷의 공개 URL | 같음 | `getPublicUrl(`은 `media` 버킷에만. `persona-private`(이후 `media-uploads`)는 `createSignedUrl` | 위반 0 |
+| Supabase 밖 호출 | 같음 | `fetch(`·`axios`·`XMLHttpRequest`의 대상이 Supabase 주소뿐 (22.3 금지 1) | 위반 0 |
+| 상태 직접 변경 | 같음 | `.update(`·`.insert(`·`.upsert(` 안의 `status`·`role`·`user_id` (예외: `personas.status`) (22.3 금지 5) | 위반 0 |
+| RLS가 꺼진 테이블 | 운영 DB | `verify_production.sql` 2번 | 0행 |
+| anon 권한 | 운영 DB | 3·4번 | 0행 |
+| 상태 칸 쓰기 권한 | 운영 DB | 7번 | `personas.status`의 INSERT·UPDATE 두 줄만 |
+| 교차 계정 SELECT·UPDATE·DELETE | 운영 DB + `tests/db` | 45.6 | 모두 0행 또는 거부 |
+| Git의 비밀값 | 이 저장소 | **값 모양**만 검색한다: `sb_secret_[A-Za-z0-9_-]{20,}`, `sk-ant-[A-Za-z0-9_-]{20,}`, `GOCSPX-[A-Za-z0-9_-]{20,}`, JWT(`eyJ[A-Za-z0-9_-]{10,}\.eyJ`)를 `git log -p` 전체에서. `git ls-files`에 `.env`가 없음. 도구를 쓸 수 있으면 gitleaks | 0건 |
+
+이 저장소에서는 이름만으로 검색하지 않는다. 마이그레이션·테스트의 `service_role`, `.env.example`의 `BRIDGE_TOKENS`, 로그 비밀값 가리기 코드(`app/security.py`, n8n Error Handler)의 `sb_secret_`·`sk-ant-`·`Bearer `처럼 정상적인 이름이 이미 많아서, 이름으로 찾으면 늘 걸린다.
+
+### 45.6 격리·실패 테스트 (원안 45.49~45.51, 45.57)
+
+**F0: `tests/db`에 더하는 것** (Foundation 보강). 지금 테스트는 교차 Operator 조회, 남의 Persona로 RPC 호출(`PT404`), 남의 폴더에 Storage 쓰기(`42501`), 남의 참조 이미지를 가리키는 위조 입력(`PT422`)을 본다. **테이블 API로 직접 하는 수정·삭제**와 **위조 `user_id`**가 없다.
+
+아래 표의 처음 다섯 행은 정책이 이미 있으므로 지금 마이그레이션 그대로 통과해야 한다. 마지막 행은 F0에서 만드는 코드(`persona_isolation`, 브릿지 검사)가 있어야 통과한다.
+
+| 경우 | 기대 |
+|---|---|
+| B가 A의 Persona를 `update` / `delete` | 0행 (RLS는 오류 대신 0행) |
+| B가 A의 `persona_assets`를 `update` / `delete` | 0행 |
+| B가 `user_id`를 A로 넣어 Persona `insert`, 또는 자기 Persona의 `user_id`를 A로 `update` | `42501` (`user_id` 칼럼에 INSERT·UPDATE 권한 없음) |
+| B가 A의 Persona에 `storage_path` 없는 `persona_assets` `insert` (LoRA 이름 등록과 같은 행) | RLS 위반 `42501`. `storage_path`가 B 자신의 refs 경로면 경로 검사 트리거가 먼저 `PT422`를 낸다 (0003) |
+| B가 A의 `persona-private` 파일을 `update` / `delete` | 0행 |
+| 36.12 격리 테스트의 MVP 행 (A의 Content Job에 B의 `persona_id`인 Automation Job 등) | 트리거·브릿지가 거부 (44.5 0번, F0 코드 필요) |
+
+**F4: 운영에서 두 계정으로** (원안 45.50·45.51)
+
+1. **가입 거부부터**: 두 번째 Google 계정 B로, 허용 목록에 넣기 **전에** 로그인한다 → 가입 거부 안내, `users` 행 없음. Google 동의 화면이 "테스트" 상태면 B를 Google 테스트 사용자에 먼저 넣는다. 아니면 Google 단계에서 막혀 다른 오류가 보인다.
+2. B를 허용 목록에 **잠시** 넣고 로그인한다. B는 Persona만 만들고 Content Job·파일은 만들지 않는다 (정리를 간단하게).
+3. A는 **시험용 Persona**를 따로 만든다. 수정·삭제 시도가 실제 Persona에 닿지 않게 하기 위해서다. B의 화면에 A의 Persona·참조 이미지가 보이지 않는지 본다.
+4. B의 Access Token(개발자 도구 Local Storage의 `sb-<ref>-auth-token`)으로 REST를 직접 부른다. 앱 번들 안의 `supabase` 객체는 전역이 아니어서 콘솔에서 바로 쓸 수 없다. A의 시험 Persona ID로 조회하면 빈 배열이어야 하고, 수정·삭제에 `Prefer: return=representation`을 붙여도 빈 배열(0행)이어야 한다. 이 헤더가 없으면 성공 응답(204)만 와서 0행인지 알 수 없다.
+5. **정리는 F5가 끝난 뒤**: B를 허용 목록에서 빼고 Authentication에서 지운다 (B의 Persona도 함께 지워진다). 지울 수 없으면 차단(ban)한다. 허용 목록은 가입할 때만 확인하므로, 남은 계정은 계속 로그인할 수 있다. A의 시험 Persona는 지운다 (하위 데이터가 없으면 지워진다, 21.17).
+
+**실패 테스트** (원안 45.57)
+
+| 원안 | 이 시스템에서 | 기대 |
+|---|---|---|
+| Google 로그인 실패 | 허용 목록 밖 계정(F4 1번) / Google 화면에서 취소 | 각각 안내 문구(45.4), 세션 없음, `users` 행 없음 |
+| Persona 생성 실패 | 만들기는 slug가 겹치면 `-2`, `-3`을 붙여 다시 시도하고, 이름 길이는 zod가 먼저 막는다 (Master Prompt). 오류가 보이는 경우는 프로필 탭에서 slug를 다른 Persona의 값으로 바꿀 때(`23505`)다 | 칸 옆 오류, 변경 없음. 한 행 쓰기라 일부만 저장되는 경우가 없다 |
+| RLS | 위 F0·F4 | 0행 또는 거부 |
+| Storage 업로드 실패 | 업로드 중 네트워크 끊김 | `persona_assets` 행 없음. 파일을 먼저 올리고 성공한 뒤에 행을 만든다. 행 저장이 실패하면 올린 파일을 지운다 ⚙️ (Phase 2 프롬프트와 17.8에 반영). 그래도 남는 파일(업로드 직후 브라우저가 닫힌 경우)은 자동으로 지우지 않는다 (45.7) |
+| 세션 만료 (원안 45.49 Invalid Session) | Access Token이 만료되고 갱신도 실패 (예: 다른 곳에서 로그아웃해 Refresh Token이 폐기됨) | `PGRST301`(401) → 다시 로그인 (18.10). 폐기된 세션의 Access Token은 만료(기본 1시간, 15.3)까지는 유효하다 |
+| 새로고침·로그아웃·보호 경로 (원안 45.49) | Phase 1 확인 항목 | 세션 유지, 로그아웃 후 보호 경로는 `/login` |
+
+### 45.7 Storage와 Realtime (원안 45.28~45.32)
+
+**Storage** ⚙️: 원안의 비공개 3버킷(`persona-assets`, `scheduled-media`, `generated-assets`)과 `{user_id}/{persona_id}/…` 경로 대신 지금 구성을 쓴다.
+
+| 원안 | 여기 | 이유 |
+|---|---|---|
+| `persona-assets` (비공개) | `persona-private` (비공개), `persona/{persona_id}/refs/…` | 15.5 |
+| `generated-assets` (비공개) | `media` (**공개**, 추측할 수 없는 uuid 경로, 목록 조회 정책 없음, 쓰기는 `service_role`만) | 15.13 확정 결정: Instagram이 공개 URL로 이미지를 가져가고(28.9) 화면 썸네일이 많다. 유료 구독 콘텐츠인 업로드 미디어만 비공개로 바꿨다 (42.3) |
+| `scheduled-media` (비공개) | `media-uploads` (비공개, M7b) | 42.3 |
+| 경로 첫 칸 = `user_id` | 경로에 **Persona ID**, 정책이 그 Persona의 소유자를 확인 | Persona가 격리 단위다 (36.1). 나중에 Persona를 여러 사람이 함께 관리해도(36.3 `persona_members`) 파일을 옮기지 않는다 |
+
+원안 45.30의 "비공개가 기본, 공개가 필요하면 서명 URL"은 `persona-private`·`media-uploads`에 그대로 적용된다. `media`는 15.13이 정한 명시적 예외다.
+
+**Storage 파일 삭제 규칙** ⚙️: Storage 파일은 **Storage API로만** 지운다. SQL로 `storage.objects` 행을 지우면 실제 파일은 남아 용량과 요금이 계속 든다 (Supabase 문서). 그런데 지금까지 일부 절이 "pg_cron이 파일을 지운다"고 적었다 (15.5의 보관 30일 뒤 삭제, 39.6, 40.7, 42.3의 업로드 고아 파일). 이것을 둘로 나눈다.
+
+| 일 | 누가 | 비고 |
+|---|---|---|
+| 지울 대상 고르기 | DB: Worker RPC `list_storage_deletions(p_limit)`가 (버킷, 경로, 이유, 대상 ID)를 돌려준다 | 보관·반려 30일 지난 Asset 파일, `media-uploads`에서 Asset이 없는 24시간 지난 파일 |
+| 지우고 기록하기 | **WF-018 Storage Cleanup** (n8n, 매일): service key로 Storage API `remove`를 부른 뒤 `mark_storage_deleted`로 `assets.file_deleted_at`을 기록 | Supabase는 외부를 부르지 않고 n8n이 부른다는 원칙과 같다 (44.2). V1 (Sprint 3). MVP에는 파일이 조금 더 오래 남을 뿐이다 |
+
+**`persona-private`는 자동으로 지우지 않는다.** 이 버킷에는 `persona_assets` 행이 가리키지 않는 정상 파일이 있다. 프로필 이미지는 `personas.profile_image_path`가 가리키고, LoRA 원본(38.2)을 가리키는 `lora` 행은 `storage_path`가 비어 있다. 그래서 "행이 없는 파일 = 고아"로 판단하면 살아 있는 파일을 지운다. 업로드 실패로 생기는 고아는 화면이 바로 지우는 것(45.6)으로 충분하고, 남는 것은 용량 감시(39.6)로 보인다.
+
+**Realtime** ⚙️: Foundation에서 `personas`를 Realtime에 넣지 않는다. Persona는 Operator 자신만 바꾸고, 바꾼 화면은 명령 Hook이 서버 성공 뒤 쿼리를 무효화해 다시 읽는다 (18.7, 원안 45.40과 같은 방식). 다른 탭은 화면이 다시 보일 때 쿼리를 다시 읽는다 (18.8). Realtime 동작 확인은 22.22대로 SQL Editor에서 `content_jobs` 상태를 바꿔 본다 (프롬프트 Phase 3). `personas`는 DB가 Persona 행을 스스로 바꾸기 시작할 때(V1 생성 차단기 `generation_blocked_at`, 36.5) `analytics_monitoring` 마이그레이션에서 publication에 더한다 (44.11, 18.8). 원안 45.32 목록의 `scheduled_posts`는 없다 (`posts`, 41장).
+
+### 45.8 Foundation E2E와 완료 체크 (원안 45.56·45.58)
+
+**E2E** (원안 45.56을 이 시스템으로)
+
+```text
+브라우저 → /login → Google → Supabase Auth → 가입 트리거(허용 목록) → users 행
+ → /dashboard (빈 화면) → Persona 만들기 → personas 행 → 목록에 표시 (쿼리 무효화)
+ → Visual Identity에서 참조 이미지 업로드·미리보기 (서명 URL)
+ → 두 번째 계정에는 보이지 않음 (F4) → 로그아웃 → 보호 경로가 /login으로
+ → 시험 계정·시험 Persona 정리 (45.6 F4 5번)
+```
+
+**완료 체크** (원안 45.58의 항목 → 확인하는 곳)
+
+| 영역 | 항목 | 확인 |
+|---|---|---|
+| AUTH | Google 로그인, 로그아웃, 세션 유지, 보호 경로, **허용 목록 밖 계정 거부** ⚙️ | Phase 1 확인 항목, 45.6 실패 테스트 |
+| DATABASE | `users`·`personas`·`persona_assets`, 마이그레이션(0001~0008 + `persona_isolation`) | `verify_production.sql` 1·8번, `tests/db` |
+| SECURITY | RLS, Storage RLS, 브라우저에 `service_role` 없음, Git에 비밀값 없음, Advisors 경고 0 | 45.5, `verify_production.sql` 2~4·7·11번, 24.3 10번 |
+| FRONTEND | App Shell, Sidebar, Dashboard(빈 화면), Persona 목록·만들기·수정·상세 | Phase 1·2 확인 항목 |
+| INFRASTRUCTURE | Storage, Realtime 대상, TypeScript 타입 | `verify_production.sql` 10~12번, `supabase gen types` |
+| QUALITY | Loading·Empty·Error, 교차 계정 테스트 | 18.10, 45.6 |
+
+### 45.9 Lovable·Claude Code 지시 (원안 45.54·45.55)
+
+- **Lovable**: 원안 45.54의 첫 프롬프트 대신 `lovable_master_prompt.md`의 §1 + Phase 1 + Phase 2를 보낸다. 실제 DB와 한 줄씩 대조해 고친 프롬프트다 (23.4). 원안의 "Repository", "Basic Realtime for personas", "Persona delete"는 넣지 않는다 (45.4·45.7).
+- **Claude Code**: 원안 45.55가 시키는 것(스키마, 마이그레이션, `users`·`personas`·`persona_assets`, RLS, Storage 정책, 테스트, 문서)은 M1에서 끝났다. "TypeScript 타입, 인증 연동, Repository 층"은 Lovable 저장소의 일이다. 원안 프롬프트의 "GPT = Runtime Intelligence"는 Claude API다 (40.18). Foundation에서 Claude Code가 하는 일은 F0의 코드·테스트, F2·F3의 코드 리뷰, F4의 보안 검색이다 (44.12 규칙).
+
+### 45.10 다음 단계 (원안 45.59) ⚙️
+
+원안이 Foundation 다음으로 든 46~54번(Content Job System, Python Execution, ComfyUI, n8n Generation Pipeline, Asset Management, Scheduler, SNS Publishing, Analytics, AI Decision)은 **이미 설계된 장**이고, 앞의 다섯은 구현도 되어 있다. 그래서 Foundation 다음은 새 명세가 아니라 **Sprint 1의 나머지 실행**(44.5 2~11번)이다.
+
+| 원안 | 설계 | 구현 상태 | 실행 |
+|---|---|---|---|
+| 46 Content Job System | 10.7, 11.3, 12.4, 17.9 | DB·RPC 완료 (M1) | Lovable Phase 3 |
+| 47 Python Execution | 19장, 25장 | 브릿지 완료 (M2) | 44.5 2·3번 |
+| 48 ComfyUI | 13장, 25.6 | Registry·Workflow 5개 | 44.5 2·3번 |
+| 49 n8n Generation Pipeline | 14장, 20장, 26장 | WF-001~006 작성 (M3) | 44.5 4~6번 |
+| 50 Asset Management | 11.7, 17.10, 22.12 | DB 완료 | Lovable Phase 4 |
+| 51 Scheduler | 41~43장 | 설계 | Sprint 2·3 |
+| 52 SNS Publishing | 28장 | 설계 | Sprint 2 |
+| 53 Analytics | 29장 | 설계 | Sprint 3 |
+| 54 AI Decision | 30장 | 설계 | Sprint 4 |
+
+### 45.11 원칙 (원안 45.60)
+
+원안의 결론(기능보다 `Auth → Ownership → RLS → Data Integrity`를 먼저 완벽하게)에 동의한다. 이 시스템에서 그 순서는 M1에서 DB가 강제하고(가입 허용 목록, 칼럼 단위 GRANT, Persona 경로 정책, 상태 전이 트리거), `tests/db`가 고정한다. Foundation에서 남은 것은 F0의 빈틈(교차 계정 수정·삭제 테스트, 36.12 MVP 수정)과, 운영 프로젝트에서 같은 결과가 나오는지 확인하는 것(F4)이다.
+
+### 45.12 원안 조정
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 이 장의 성격 | 새로 구축할 명세 | 이미 있는 설계·구현의 실행 순서와 빈 곳 | M1·18·22·23장이 이미 정함 |
+| 저장소 구조 | `database/`, `execution/`, `src/`, `docs/*/` | 지금 구조, 화면 코드는 Lovable 저장소 | 40.13, 44.11 |
+| Frontend 키 이름 | `VITE_SUPABASE_ANON_KEY` | `VITE_SUPABASE_PUBLISHABLE_KEY` | 새 API Key 체계 (15.6, 16.5) |
+| Supabase 프로젝트 | Development + Production | 운영 1개 + 로컬 테스트 + 임시 | 40.12 |
+| 가입 | Google 로그인이 곧 가입 | + 허용 목록 트리거 (가입 허용은 켜 둔 채) | 낯선 사람이 GPU를 쓰지 못하게 (15.3) |
+| `users.role` | `user` (이후 `admin`·`operator`) | `operator`/`admin` | 18.12 |
+| Persona 상태 | `draft` 시작, 9개 | `active`/`inactive` 저장, 표시는 계산, 준비도는 36.12 V1 | 36.2, 40.6 |
+| `asset_type` | 대문자 4종 | 소문자 5종 (`character_ref` 포함) | 18.6 (화면 값 = DB 값) |
+| Storage | 비공개 3버킷, `{user_id}` 경로 | `media`(공개)·`persona-private`·`media-uploads`, Persona 경로 | 15.13, 15.5, 36.1 |
+| Realtime | `personas` 먼저 | `personas`는 V1, 확인은 `content_jobs`로 | Operator만 바꾸는 데이터는 쿼리 무효화로 충분 |
+| Sidebar | 그룹 + Coming Soon | 한 줄 목록, 다음 단계 메뉴는 숨김 | 17.2, 42.2 |
+| Dashboard | Scheduled·Published Posts 포함 | Foundation은 빈 화면, KPI는 Phase 5, 게시 지표는 V1 | 22.8 |
+| Persona 탭 | MVP 3개 | MVP 4개 (Visual Identity 포함) | 생성에 필요 (16.14) |
+| Repository 층·Hook 반환 | Page → Hook → Repository | Hook + 쿼리 빌더, TanStack Query 반환 형태 | 18.7, 42.4 |
+| 로그인 오류 | 친절한 오류 | 가입 거부와 그 밖의 오류를 나눠 안내, 원문 숨김 | Master Prompt에 빠져 있던 경우 |
+| Redirect URL | 정확히 설정 | 와일드카드 금지 | 세션이 같은 도메인의 남의 앱으로 넘어갈 수 있음 |
+| 업로드 실패 | 잘못된 행을 만들지 않음 | 업로드 → 행 순서, 행 실패 시 화면이 파일 삭제. `persona-private`는 자동 정리 없음 | 원안 목적을 구체화. 이 버킷에는 행이 가리키지 않는 정상 파일(프로필 이미지, LoRA 원본)이 있다 |
+| Storage 파일 삭제 | – (일부 절은 pg_cron이 삭제) | DB가 대상을 고르고 WF-018이 Storage API로 삭제 (V1) | SQL로 지우면 실제 파일이 남는다 |
+| 교차 계정 테스트 | SELECT·UPDATE·DELETE | `tests/db`에 직접 수정·삭제·위조 `user_id` 추가 + 운영 2계정 확인(가입 거부부터, 시험용 Persona, REST 직접 호출) | 기존 테스트에 직접 수정·삭제가 없음 |
+| Git 비밀값 검색 | 문자열 검색 | 이 저장소는 값 모양으로만 검색 | 정상 코드에 이름이 많아 이름 검색은 늘 걸린다 |
+| Lovable 첫 프롬프트 | 45.54 | Master Prompt §1 + Phase 1·2 | DB와 대조된 프롬프트 (23.4) |
+| Claude 프롬프트 | 45.55 (GPT 포함) | F0 코드·테스트, Phase 리뷰, 보안 검색 | DB 부분은 M1에서 끝남, 운영 LLM은 Claude API |
+| 다음 단계 | 46~54번 새 명세 | Sprint 1 나머지 실행 (44.5) | 그 장들은 이미 설계·대부분 구현됨 |

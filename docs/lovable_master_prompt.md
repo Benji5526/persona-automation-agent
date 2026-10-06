@@ -256,7 +256,9 @@ and Success states.
   On /login read error_description from BOTH window.location.search and window.location.hash
   (URL-decoded, '+' = space). If it contains "Database error saving new user", the email is
   not on the allow list → show "이 계정은 사용할 수 없어요. 관리자에게 이메일 등록을 요청하세요."
-  and clear the params. If a session exists on /login, go to ?next or /dashboard.
+  and clear the params. Any other error_description (for example the user cancelled on Google)
+  → show "로그인하지 못했어요. 다시 시도해 주세요." without the raw text, and clear the params.
+  If a session exists on /login, go to ?next or /dashboard.
   ProtectedRoute must never drop error / error_description params when redirecting.
 
 /dashboard (answer "what is happening right now?" in 5 seconds):
@@ -415,7 +417,9 @@ inventing a workaround.
 
 ```text
 Implement Phase 1 only: app shell and authentication.
-- Supabase client in src/lib/supabase.ts using VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY.
+- Exactly one Supabase client. If the Supabase integration already created one (for example
+  src/integrations/supabase/client.ts), reuse it and make src/lib/supabase.ts re-export it;
+  otherwise create src/lib/supabase.ts using VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY.
 - QueryClientProvider, AuthProvider (session/loading/authenticated/unauthenticated via
   getSession + onAuthStateChange), PersonaProvider (selected persona in localStorage).
 - /login with Google sign-in (redirectTo = origin + '/login') and the not-allowed-account
@@ -445,7 +449,8 @@ Implement Phase 2 only: Persona management.
   (persona_assets row by name, no upload, suggestions from worker_status.models.loras), LoRA strength,
   default params bounded by the workflow's params, reference image upload to bucket
   'persona-private' at object path persona/{id}/refs/{uuid}.{ext} (no bucket prefix in the
-  path) + persona_assets row with the same path, signed URL previews.
+  path) + persona_assets row with the same path, signed URL previews. Upload first and insert
+  the row only after the upload succeeds; if the insert fails, remove the uploaded object.
 - Leave [테스트 이미지 생성] for Phase 3.
 Use real data only. Do not touch content jobs. Do not run or suggest SQL.
 Verify: create, edit each tab, upload and preview a reference image, archive; a second

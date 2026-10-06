@@ -11,3 +11,15 @@ data/
 *storage_state*.json
 *.safetensors
 *.ckpt
+
+# 개발 도구 산출물·로그·OS 파일 (TECH_DESIGN 45.2)
+venv/
+node_modules/
+dist/
+build/
+playwright-report/
+.playwright/
+*.storage.json
+*.log
+.DS_Store
+Thumbs.db
