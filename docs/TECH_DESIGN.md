@@ -2929,6 +2929,8 @@ MVP·V1에는 Operator 정보만 저장한다. 팬 데이터는 V2에서 생긴�
 
 ### 15.18 실행 한도: Rate Limit과 Budget (보강)
 
+> ⚙️ 금액·GPU 분·Storage 한도, 실행 전 확인 지점, 미룸, 예산 상태는 39장이다. 아래는 횟수 한도다.
+
 AI나 자동화가 오류로 무한 반복하면 GPU와 LLM 비용이 폭주한다. 예를 들어 "생성 → 실패 → 재시도 → 실패 → 새 Job 생성 → …"이 끝없이 돌 수 있다. Job 하나의 재시도는 `max_attempts`가 막지만, **새 Job이 계속 만들어지는 것**은 따로 막아야 한다.
 
 `app_settings`에 한도를 두고 **DB 함수가 강제**한다. 한도를 넘으면 `create_content_job`·`create_automation_job`이 `RATE_LIMITED` 오류(SQLSTATE `PT429` → HTTP 429)를 낸다.
@@ -8598,7 +8600,7 @@ content_need = 앞으로 7일 게시 계획 수 (Champion Strategy의 posts_per_
 | Storage | Asset 파일 크기 합 | `assets.file_size` (V1, 38.6) |
 | SNS API | 호출 수 | `execution_logs` (`service = 'sns'`) |
 
-- 단가는 `app_settings.cost_rates` (모델별 토큰 단가, GPU 시간당 전기·감가 추정, Storage GB 단가). 단가를 바꾸면 과거 추정치도 다시 계산된다 (저장하지 않고 계산).
+- 단가는 `cost_rates` 테이블(유효 기간이 있는 이력, 39.2) ⚙️: 모델별 토큰 단가, GPU 시간당 전기·감가 추정, Storage GB 단가. 금액은 저장하지 않고, 사용량이 기록된 시점의 단가로 계산한다. 그래서 단가를 바꿔도 과거 비용은 바뀌지 않는다 (처음에는 `app_settings.cost_rates`로 두고 과거도 다시 계산하기로 했다).
 - 표시: 하루·Persona별 추정 비용, Decision 하나가 만든 Job들의 비용 합(원안의 Cycle Cost). 비용 기준 한도(예: 하루 $5)는 이후 Cost Management 단계에서 15.18 한도에 더한다.
 
 ### 32.14 감사 기록과 추적
@@ -8649,7 +8651,7 @@ content_need = 앞으로 7일 게시 계획 수 (Champion Strategy의 posts_per_
 | Effectiveness | 0~1 수치 | 범주(30.11) + 실험으로 변수 분리 | 다른 변수가 섞여 있음 |
 | 실험 | 언급 | 34장으로 대체 (Variant당 10개, 10% + 검정, 60일), 결과 반영은 사람 승인 | 확정 |
 | Level 4 진입 | 언급 없음 | 기간·경험·반려율·사고·결정 품질 조건 + 자동 강등 | 28.13에서 미룬 것 |
-| 비용 | Cycle Cost | 토큰·GPU 시간·파일 크기·호출 수 × 단가 추정, 저장하지 않고 계산 | 단가 변경에 대응 |
+| 비용 | Cycle Cost | 토큰·GPU 시간·파일 크기·호출 수 × 그 시점 단가 추정, 금액은 저장하지 않음 (39.2) | 단가 이력으로 과거 비용 고정 |
 | Trace ID | 새 ID | 기존 FK 연결 | 31.15 |
 
 ---
@@ -10467,6 +10469,7 @@ create index monitoring_alerts_status on public.monitoring_alerts (status, sever
 | `SAFETY_EVENT` | `fan_critical_pending` (V2) |
 | `SECURITY_EVENT` | `security_spike`: `API_AUTH_FAILED` 1시간 50건 초과 (15.22에 이미 정한 알림을 이 규칙으로 옮김) |
 | (38장) | `backup_failed`, `backup_stale`, `backup_unverified`, `verify_failed`, `recovery_in_progress` (38.11) |
+| (39장) | `budget_state`, `quota_storage`, `budget_forecast`, `llm_cost_circuit`, `jobs_deferred` (39.11) |
 
 **중복 제거** (원안 37-A.12): `dedupe_key = rule:service:resource_id[:persona_id]` (예: `error_spike:comfyui:OUT_OF_MEMORY`, `token_expiry:sns:instagram:{persona_id}`). 같은 키의 Alert가 열려 있으면 새로 만들지 않고 `occurrences`·`last_seen_at`·`observed`만 갱신한다. 원안의 `metadata.count`를 칸으로 올렸다. 같은 Alert가 더 높은 수준으로 걸리면 `severity`를 올린다 (내리지 않음).
 
@@ -10510,7 +10513,7 @@ create index monitoring_usage_type_time on public.monitoring_usage (usage_type, 
 | `storage_bytes` | 하루 한 번 Persona별 Asset 크기 합 | pg_cron |
 | `sns_calls` | 하루 한 번 플랫폼·계정별 Adapter 호출 수 (`execution_logs` `service = sns`에서 셈) | pg_cron |
 
-- **금액은 저장하지 않는다** ⚙️ (원안 `unit_cost`·`total_cost`·`currency`). 32.13대로 `app_settings.cost_rates`의 단가를 곱해 조회할 때 계산한다. 단가가 바뀌면 과거 추정도 새 단가로 다시 나온다. 대신 `provider`(모델 이름)를 남겨서 모델별 단가가 정확히 적용되게 한다.
+- **금액은 저장하지 않는다** ⚙️ (원안 `unit_cost`·`total_cost`·`currency`). `cost_rates`(39.2)에서 사용량이 기록된 시점에 유효한 단가를 곱해 조회할 때 계산한다. 단가를 바꿔도 과거 비용은 바뀌지 않는다. 대신 `provider`(모델 이름)를 남겨서 모델별 단가가 정확히 적용되게 한다.
 - 원안의 `cost_type` `INFRASTRUCTURE`·`NETWORK`·`OTHER`는 두지 않는다. n8n 서버·Supabase 요금은 사용량이 아니라 월정액이라, 필요하면 `cost_rates`에 월 고정비로 넣어 하루 몫을 더한다.
 - 32.13의 "LLM 토큰은 `execution_logs.output_data.usage`"를 이 테이블로 바꾼다. **기록은 V1부터** 시작한다 (비용 화면은 V2b, 32.13). 데이터가 먼저 쌓여 있어야 비교 기준이 생긴다.
 - 보존: 영구 (작다. 하루 수백 행).
@@ -10597,7 +10600,7 @@ evaluate_health() (1분) 이 위를 읽는다
 | Operator X가 Incident 상세 조회 | `impact.affected_personas`에 X의 Persona만 |
 | X가 Y Persona의 `monitoring_usage` 조회 | 0행 |
 | 90일 지난 `execution_logs`의 출력 칸 정리 후 비용 조회 | `monitoring_usage`에서 토큰 수가 그대로 계산됨 |
-| `cost_rates` 단가 변경 | 과거 기간 비용 추정도 새 단가로 |
+| `cost_rates` 단가 변경 (39.2) | 과거 기간 비용은 그대로, 새 단가는 `effective_from`부터 |
 
 ### 37-A.11 원안 조정
 
@@ -10612,7 +10615,7 @@ evaluate_health() (1분) 이 위를 읽는다
 | Incident 묶음 | Alert 수준·반복 | 원인 서비스(`incident_key`)로 묶음 | 원인 하나 = 장애 하나 |
 | 수준 | Alert 4단계, Incident 4단계 (서로 다름) | 둘 다 `warning`·`high`·`critical` | 척도 변환 규칙이 필요 없게 |
 | Incident 상태 | 6개 | 3개 + `review` (37.6) | 혼자 운영 |
-| `monitoring_costs` | 금액 저장 | `monitoring_usage`, 사용량만, 금액은 단가로 계산 | 32.13, 단가 변경에 대응 |
+| `monitoring_costs` | 금액 저장 | `monitoring_usage`, 사용량만, 금액은 그 시점 단가로 계산 | 32.13, 39.2 단가 이력 |
 | 토큰 기록 위치 | – | `execution_logs` 대신 `monitoring_usage` | `execution_logs` 출력 칸은 90일 뒤 비움 (37.10) |
 | 비용 종류 | 7개 | 사용량 4종, 고정비는 `cost_rates` | 인프라 요금은 사용량이 아님 |
 | `correlation_id` | 모든 테이블 | 두지 않음 | 37.2 |
@@ -10930,3 +10933,280 @@ evaluate_health() (1분) 이 위를 읽는다
 | 모델 백업 | Manifest | `models.manifest.json` + `comfy_nodes.lock` + 체크섬 스크립트 | 지금은 사람 기억뿐 |
 | Persona 백업 | 파일 7개 묶음 | `export_persona` JSON 하나, 가져오기는 V2 | 같은 내용 |
 | 화면 | 2개 경로 | `/monitoring`의 탭 하나 | 37.12 |
+
+---
+
+## 39. Cost & Resource Management ✅
+
+> LLM·GPU·Storage·SNS API·실행 자원을 재고, 누구 몫인지 나누고, 실행 전에 통제하는 체계다. 이미 있는 것을 모은다: 횟수 한도(15.18, 30.10, 31.10, 0008의 `reserve_llm_call`), Persona별 한도 덮어쓰기와 공정 선점(36.4), 사용량 원장 `monitoring_usage`(37-A.5), 비용 추정(32.13), 비용 급증 규칙(37.6), OOM 처리(19.12), 실험 탐색 비율(34.11). 이 장이 새로 정하는 것은 **금액·시간 기준 한도**, 단가 이력, 실행 전 예산 확인의 위치, 예산이 모자랄 때 무엇부터 줄이나, 비용 차단기다. **아직 구현되지 않았다.** ⚙️ 표시는 원안을 조정한 부분이다 (39.13).
+
+### 39.1 원칙과 단위 ⚙️
+
+원안의 원칙 5개(모든 자원에 주인, 비용 귀속, 실행 전 예산 확인, 하드 한도, 공유 자원의 공정성)를 따른다. 다만 **자원마다 실제로 모자라는 것이 다르므로 한도의 단위를 자원별로 정한다.**
+
+| 자원 | 실제로 모자라는 것 | 한도 단위 | 비용 단위 |
+|---|---|---|---|
+| LLM | 돈 (API 요금) | **금액** (하루·월) + 호출 수 (15.18) | 토큰 × 모델 단가 |
+| GPU (RTX 5080 한 대) | **시간** (하루는 24시간뿐, 다른 Persona와 나눠 씀) | **GPU 분** (하루·월) + 생성 이미지 수 (15.18) | GPU 시간 × 시간당 전기·감가 추정 |
+| Storage | 공간·요금 | **GB** (Persona별) | GB·월 × 단가 |
+| SNS API | 플랫폼 호출 한도 | 플랫폼 한도 + 하루 게시 수 (15.18) | 대개 무료 (0) |
+| n8n·Supabase | 월정액 | 한도 없음 (감시만, 37장) | 월 고정비 |
+
+원안은 GPU 예산도 금액으로 예를 들지만(39.13), 이 시스템의 GPU는 이미 산 PC라 **전기비는 작고 시간이 귀하다.** 그래서 GPU는 분으로 통제하고, 금액은 보고용으로만 계산한다.
+
+**통화**: 모든 단가를 하나의 보고 통화(`app_settings.cost.currency`, 기본 `USD`)로 입력한다. 전기 요금처럼 원화로 받는 값은 Operator가 환산해 넣는다. 환율 테이블은 두지 않는다 (1인 운영, 추정치이므로).
+
+### 39.2 사용량과 비용: 단가 이력 ⚙️
+
+원안 39.67~39.72와 같이 **사용량과 비용을 나눈다.** 사용량은 37-A.5의 `monitoring_usage`(원안 39.68의 `resource_usage`와 같은 것)에 쌓이고, 비용은 저장하지 않고 단가로 계산한다.
+
+그런데 32.13은 "단가를 바꾸면 과거 추정치도 다시 계산된다"고 했다. 원안 39.72는 반대로 "가격이 바뀌어도 **과거 비용은 바뀌지 않아야 한다**"고 한다. 원안이 맞다 ⚙️: 지난달 실제로 낸 돈이 오늘 단가로 바뀌면 월별 비교가 의미 없어진다. 그래서 단가를 **유효 기간이 있는 이력**으로 둔다.
+
+```sql
+create table public.cost_rates (
+  id             bigint generated always as identity primary key,
+  usage_type     text not null check (usage_type in
+                   ('llm_tokens', 'gpu_seconds', 'storage_bytes', 'sns_calls', 'fixed_monthly')),
+  provider       text not null default '*',   -- LLM 모델 이름, 'comfyui', 'supabase-storage', 'n8n-server' 등
+  direction      text not null default '*',   -- llm_tokens: 'input' / 'output'
+  unit_price     numeric not null check (unit_price >= 0),
+  per_quantity   numeric not null default 1,  -- 예: 1,000,000 토큰당, 3,600초당, 1GB·월당
+  effective_from timestamptz not null,
+  note           text,
+  created_by     uuid references public.users (id),
+  created_at     timestamptz not null default now()
+);
+create unique index cost_rates_effective on public.cost_rates (usage_type, provider, direction, effective_from);
+```
+
+- **insert만 한다.** 단가가 바뀌면 새 `effective_from`으로 행을 더한다. 사용량 행의 비용 = 그 `recorded_at` 시점에 유효한 단가(같은 종류·`provider`·`direction` 중 `effective_from ≤ recorded_at`인 가장 최근 행). `provider = '*'`는 그 종류의 기본값이다.
+- `app_settings.cost_rates`(32.13)는 이 테이블로 바뀐다. 단가를 코드에 넣지 않는다 (원안 39.7·39.71).
+- 단가를 실수로 잘못 넣었을 때는 같은 `effective_from`의 행을 고치지 않고, 바로잡는 행을 더 이른 시각으로 넣지도 않는다. **admin RPC `correct_cost_rate`**가 그 행을 고치고 `security_events`에 남긴다 (실수 수정은 과거 값을 바꾸는 것이 맞으므로, 대신 기록을 남긴다).
+- `fixed_monthly`(n8n 서버, Supabase 요금제)는 하루 몫(월액 ÷ 그 달 일수)을 전체 비용에 더한다. Persona에 나누지 않는다 (원안 39.2 "Global").
+
+**귀속** (원안 39.2·39.6·39.40): `monitoring_usage`에 `persona_id`와 `automation_job_id`가 있다. 그 Job에서 Content Job → `ai_decision_id`·`metadata.experiment`·`strategy_version_id`로, Post로 따라간다. 원안 예 "GPU 12분 → Persona A → CJ-001 → EXP-003"이 이 FK 연결이다. 새 칸은 필요 없다. LLM 사용량에는 `dimensions.agent`(33.2의 Agent 이름)를 더해 Agent별로도 본다.
+
+### 39.3 한도 표 ⚙️
+
+원안 39.29~39.31의 Persona·전체 한도를 **기존 한도 위치**에 더한다. 원안의 `persona_resource_quotas` 테이블은 36.4·36.11에서 정한 대로 `personas.limits_override jsonb`다. 칸을 늘리지 않고 키를 늘린다.
+
+| 한도 | 전체 (`app_settings.limits`) | Persona (`limits_override`, 전체보다 클 수 없음) | 단계 | 기존 |
+|---|---|---|---|---|
+| Content Job / 시간 | – | 30 | MVP | 15.18 |
+| 생성 이미지 / 일 | 300 | 덮어쓰기 가능 | MVP / V2 | 15.18, 36.4 |
+| LLM 호출 / 일 | 1,000 | 덮어쓰기 가능 | MVP / V2 | 15.18, 0008 |
+| 게시 / 일 | – | 10 | V1 | 15.18 |
+| **GPU 분 / 일** | 1,200 (20시간) | 예: 240 | V2 | 새로 |
+| **GPU 분 / 월** | – | 선택 | V2 | 새로 |
+| **LLM 금액 / 일** | 예: $5 | 예: $2 | V2b | 새로 |
+| **LLM 금액 / 월** | 예: $100 | 선택 | V2b | 새로 |
+| **Storage GB** | 선택 | 예: 50 | V2 | 새로 |
+| Agent 전용 (콘텐츠 Job, 생성, LLM 호출 등) | 30.10 | – | V2 | 30.10 |
+| 팬 전용 | 31.10 | 덮어쓰기 가능 (36.5) | V2 | 31.10 |
+| 실험 | – | 실험마다 `max_posts`, 추가: `max_gpu_minutes`, `max_cost` | Long-term | 34.3 |
+
+- 원안의 월 생성·게시·메시지 한도(`monthly_generation_limit` 등)는 두지 않는다. 하루 한도 × 30이 이미 상한이고, 월 한도가 따로 의미 있는 것은 돈(월 청구)과 GPU 시간뿐이다.
+- 원안 39.52의 `daily_optimization_budget`도 두지 않는다. 최적화 롤아웃은 콘텐츠를 **더 만들지 않고** 평소 콘텐츠의 설정을 나눌 뿐이라(35.6) 추가 비용이 없다. 하루 전략 변경 1건(35.5)이 이미 제한이다.
+- 원안 39.53·39.54의 탐색 예산은 34.11의 "Variant 게시물 ≤ 최근 28일의 20%"가 그것이다. 생성·LLM 비용은 게시물 수를 따라가므로 따로 비율을 두지 않는다.
+
+### 39.4 실행 전 확인: 어디서, 무엇을 ⚙️
+
+원안 39.32·39.77의 순서(Permission → Safety → Budget → Quota → Resource → Priority → 실행·미룸·거절)를 **세 지점**에 나눠 둔다. 원안 39.78의 `[PA] 021 - Resource & Budget Controller` Workflow는 만들지 않는다. 한도는 15.18처럼 **DB 함수가 강제**해야 n8n을 거치지 않는 경로로도 우회할 수 없다.
+
+| 지점 | 확인 | 결과 |
+|---|---|---|
+| ① Job을 **만들 때** (`create_content_job`, `record_ai_decisions`) | 횟수 한도(15.18), Agent 예산(30.10), 33.6의 8단계 | 거절(`RATE_LIMITED`) / AI는 `blocked` |
+| ② LLM을 **부르기 직전** (`reserve_llm_call` 확장) | 호출 수 + **금액**: 이번 호출의 최대 비용(입력 토큰 추정 + `max_tokens`) × 단가가 남은 금액 안인가 | 허용 / 미룸 |
+| ③ GPU Job을 **선점할 때** (`claim_next_automation_job(generation)`) | 그 Persona의 오늘 **GPU 분** + 이번 Job 예상 시간이 한도 안인가, Storage 한도 | 선점 / 그 Persona의 Job은 건너뛰고 다음 Persona |
+
+- ①은 "만들 수 있나", ②·③은 "지금 실행할 여유가 있나"다. 원안 39.38의 "Permission ≠ Budget"과 39.39의 "Budget ≠ Safety"가 이렇게 분리된다. 권한·안전은 ①(33.6)에서, 예산·자원은 ②·③에서 본다.
+- **0008의 `reserve_llm_call` 확장** (V2b): 지금은 `prompt`·`caption` Job만, 하루 호출 수만 본다. 모든 LLM Job(`decision`, `reply_draft`, `memory`, WF-011)으로 넓히고, 인자에 예상 입력 토큰·`max_tokens`·모델을 더해 금액을 **예약**한다. 호출이 끝나면 실제 토큰을 `record_usage`(37-A.5)로 남기고 예약을 실제 값으로 바꾼다. 예약은 `private.usage_counters`에 금액 키로 둔다.
+- **예상 GPU 시간** (원안 39.34): 그 Workflow·해상도의 최근 30일 `gpu_seconds` 중앙값 × 변형 수. 기록이 없으면 Registry의 `expected_seconds`(13장에 칸 추가). 원안의 "예상 Storage"는 예상하지 않는다. 이미지 하나가 몇 MB라 한도를 넘기 전에 경고(39.6)가 먼저 뜬다.
+
+**예산 판정** (원안 39.33): `ALLOW` / `ALLOW_WITH_LIMIT` / `DEFER` / `REJECT`를 기존 동작에 대응시킨다.
+
+| 원안 | 이 시스템 |
+|---|---|
+| `ALLOW` | 실행 |
+| `ALLOW_WITH_LIMIT` | 33.6과 같음 (변형 수를 남은 예산만큼 줄임). AI 결정일 때만 |
+| `DEFER` | **Job을 실패시키지 않는다** (원안 39.64). `pending`으로 두고 `run_after` = 예산이 다시 생기는 시각(Persona 시간대 기준 다음 날 0시, 36.8) + `result.deferred = {reason, until}`. 원안의 `DEFERRED` 상태는 만들지 않는다 (11.4 상태 5개 유지) |
+| `REJECT` | 만들 때(①)의 `RATE_LIMITED`. 이미 만들어진 Job은 거절하지 않고 미룬다 |
+
+- 미뤄진 Job은 화면에 "예산 대기 (내일 0시)"로 보인다. 시도 횟수를 쓰지 않는다.
+- Operator가 직접 만든 Job도 ②·③을 받는다. 다만 Operator는 Job 상세에서 [오늘 예산 무시하고 실행](admin)을 누를 수 있다. 사람의 명시적 행동이고, 전체 하드 한도(생성 300, LLM 1,000)는 그래도 넘지 않는다.
+
+### 39.5 예산 상태와 줄이는 순서 ⚙️
+
+원안 39.10의 예산 상태(NORMAL 0~70% / WARNING 70~90% / LIMIT_REACHED 90~100% / BLOCKED 100% 초과)를 LLM 금액과 GPU 분에 쓴다. 칸으로 저장하지 않고 사용률로 계산한다. 원안 39.60·39.96의 "무엇부터 줄이나"를 상태에 묶는다.
+
+| 상태 | 사용률 | 줄이는 것 (위에서부터 누적) |
+|---|---|---|
+| NORMAL | < 70% | – |
+| WARNING | 70~90% | Alert `warning` (37-A.4). 새 실험 표본·탐색 중지 (34.6 `advance_experiments`가 새 짝을 만들지 않음) |
+| LIMIT_REACHED | 90~100% | AI의 콘텐츠 생성 결정을 자동 승인하지 않음 (승인 대기, 30.9 자동 조건에 추가). WF-011 분석·매일 Decision Run을 다음 날로 미룸 |
+| BLOCKED | ≥ 100% | 그 자원을 쓰는 새 실행을 모두 미룸 (39.4 ②·③). Alert `high` |
+
+**보호하는 것** (원안 39.59·39.60): 어느 상태에서도 멈추지 않는다.
+
+| 보호 | 이유 |
+|---|---|
+| 예약 게시 (WF-008·007) | LLM·GPU를 쓰지 않는다. 이미 승인된 일 |
+| 성과 수집 (WF-009), 감시 (37장), 백업 (38장) | 자원을 거의 쓰지 않고, 멈추면 데이터를 잃는다 |
+| 팬 메시지 저장 | 저장은 LLM을 쓰지 않는다. 초안은 팬 전용 예산(31.10)을 따로 쓴다 |
+| 복구 작업 (38장) | 원안 39.60의 1순위 |
+
+원안 39.16의 GPU 작업 우선순위(복구 > 높은 우선순위 운영 > 예약 콘텐츠 > 실험 > 탐색)는 `automation_jobs.priority`(10이 가장 높음)로 표현한다: Operator Job 기본 5, Agent Job 상한 6(30.6), 실험 Control 표본 4, 실험 Variant 표본(탐색) 3 ⚙️. 공정 선점(36.4)은 같은 우선순위 안에서만 작동한다.
+
+### 39.6 Storage
+
+**Persona별 한도** (원안 39.23): `limits_override.storage_gb`. 사용량은 `monitoring_metrics`의 `storage_bytes`(37-A.2, Persona별).
+
+| 사용률 | 처리 |
+|---|---|
+| ≥ 80% | Alert `warning`, Persona 상세에 표시 |
+| ≥ 100% | 그 Persona의 새 `generation` Job을 미룬다 (39.4 ③). Operator에게 정리 안내 |
+
+**Asset 수명** (원안 39.22) ⚙️: 원안의 `GENERATED → READY → PUBLISHED → ARCHIVED → COLD STORAGE`를 기존 Asset 상태(`generated`·`approved`·`rejected`·`archived`)와 15.5의 삭제 규칙으로 정리한다.
+
+| 상태 | 파일 | 단계 |
+|---|---|---|
+| `generated` (아무도 승인·게시하지 않음) | **60일 뒤 자동 `archived`** ⚙️ → 그 30일 뒤 파일 삭제 (15.5). 가장 많이 쌓이고 쓰이지 않는 것이라 Storage를 가장 많이 줄인다 | V1 |
+| `approved`, 게시에 쓰인 Asset | 지우지 않는다. 오프사이트 백업도 있다 (38.3) | – |
+| `rejected`·`archived` | 30일 뒤 파일 삭제 (15.5) | MVP |
+| Persona 정체성 파일, LoRA | 지우지 않는다 (원안과 같음) | – |
+
+원안의 **COLD STORAGE**(싼 저장소로 옮기기)는 두지 않는다. 오래된 게시 Asset도 이미지 몇 MB라 옮기는 작업이 아끼는 돈보다 크다. 영상이 생기면(용량이 수십~수백 배) 그때 검토한다.
+
+### 39.7 비용 차단기 ⚙️
+
+원안 39.61·39.62. 예산 한도는 "하루 전체를 얼마나 쓰나"를 막지만, **루프 버그로 한 시간 만에 하루 예산을 다 쓰는 것**은 막지 못한다. 차단기는 속도를 본다.
+
+37.7의 `service_circuits`에 `llm_cost` 행을 둔다.
+
+```text
+closed ──(최근 1시간 LLM 비용 > 최근 7일 같은 시간대 시간당 중앙값 × 5, 그리고 > $0.50)──▶ open
+open ──(30분 뒤)──▶ half_open : LLM 호출을 1분에 1번만 허용
+half_open ──(15분 동안 시간당 속도가 기준 아래)──▶ closed      (다시 넘으면) ──▶ open (대기 두 배)
+```
+
+- `open` 동안 `reserve_llm_call`이 **Agent·분석·팬 초안** LLM 호출을 미룬다. Operator가 직접 만든 Content Job의 프롬프트·캡션은 허용한다 (사람이 지켜보는 작업이고, 폭주의 원인은 대개 자동 루프다).
+- 원안의 `WARNING` 상태는 차단기에 두지 않고 37.6의 `cost_spike` Alert(하루 기준, `warning`)가 맡는다. 차단기는 열림·반열림·닫힘 세 상태다 (37.7과 같은 모양).
+- 차단기가 열리면 Incident(`high`, `incident_key = llm`)가 열리고, 원인을 찾기 쉽게 최근 1시간 사용량을 Agent·Job 종류·Persona별로 묶어 `impact`에 넣는다 (원안 39.11의 "원인 확인").
+- GPU는 차단기가 필요 없다. GPU가 하나라 속도가 물리적으로 제한되고, 생성 차단기(37.7)·Persona 생성 차단(36.5)이 이미 있다.
+
+### 39.8 AI에게 주는 자원 정보
+
+원안 39.36·39.37. Decision Context(30.5)의 `queue` 칸에 더한다.
+
+```json
+"resources": {
+  "llm_budget_state": "warning",
+  "llm_budget_used_ratio": 0.78,
+  "gpu_minutes_remaining_today": 55,
+  "storage_used_ratio": 0.42,
+  "queue": { "generation_pending": 8 }
+}
+```
+
+- 원안 예의 `daily_budget_remaining: 4.20`(금액)은 넣지 않는다 ⚙️. AI가 금액을 근거로 "이 정도면 쓸 만하다"고 판단하게 할 이유가 없다. 상태와 비율이면 충분하다. 최종 판정은 시스템이 한다 (원안 39.36과 같음).
+- 상태가 `limit_reached` 이상이면 Context에 "콘텐츠 생성 결정은 승인 대기가 된다"를 함께 알려, AI가 `no_action`을 고를 수 있게 한다.
+
+### 39.9 LLM 비용 줄이기
+
+| 방법 | 결정 | 단계 |
+|---|---|---|
+| **Agent별 모델** (원안 39.8 Model Routing) | `app_settings.llm_models`에 Agent(33.2)별 모델을 둔다. 예: Prompt·Caption·Memory는 작은 모델, Strategy·Analytics는 큰 모델. 바꾸는 것은 admin. 작업 난이도를 보고 자동으로 모델을 고르는 것은 Long-term | V2 |
+| **프롬프트 캐싱** (원안 39.57) | LLM 제공자의 프롬프트 캐싱을 쓴다. 시스템 지시와 Persona 설명처럼 매번 같은 앞부분을 요청의 맨 앞에 고정 순서로 두면 캐시가 맞는다 (구현 시 제공자 문서 확인). 바뀌는 부분(팬 메시지, 오늘 데이터)은 뒤에 둔다 | V1 |
+| Context 재사용 | Decision Context·Analytics Context는 한 Run 안에서 한 번 만든다 (30.5, 29.14). 다른 Run 사이에 재사용하지 않는다 (데이터가 바뀌므로) | V2 |
+| 묶음 처리 (원안 39.56) | 팬 메시지는 60초 묶음(31.5)이 이미 그것이다. Memory 추출은 대화당 10분에 한 번(31.12) | V2 |
+| 재시도 비용 (원안 39.93) | `LLM_OUTPUT_INVALID`는 1회만 재시도 (12.9). 그 밖은 Job `max_attempts` 3 (14.11) | MVP |
+
+**OOM** (원안 39.19)은 19.12가 이미 정했다: 두 번째 OOM 뒤 한 번만 해상도·배치를 줄이고, 그래도 실패하면 `failed`. 원안의 "Reduce → Retry Once → Failure"와 같다.
+
+### 39.10 단위 경제와 화면
+
+**지표** (원안 39.45~39.49, 39.83): 모두 SQL로 계산한다 (`get_cost_summary(p_from, p_to, p_persona_id)`, V2b).
+
+| 지표 | 계산 |
+|---|---|
+| 기간 비용 | 자원별 사용량 × 그 시점 단가 (39.2) + 고정비 하루 몫 |
+| Asset당 비용 | 생성 비용(GPU + 프롬프트 LLM) ÷ 생성된 Asset 수 |
+| 게시물당 비용 | (그 게시물 Asset의 생성 비용 + 캡션 LLM + 그 Content Job의 버려진 변형 몫) ÷ 게시물 |
+| 1K 조회당 비용 | 게시물 비용 ÷ (24h 조회수 ÷ 1,000) (29.11 기준 시점) |
+| 참여당·새 팔로워당 비용 | 같은 방식 (V2b 이후) |
+| 실험 비용 (원안 39.89·39.90) | 실험 표본 Content Job들의 비용 합. 원안의 Experiment ROI는 금전 가치가 없으므로 `result_detail`의 개선폭과 비용을 **나란히** 보여준다. 나눈 값(ROI)은 단위가 없어 만들지 않는다 |
+| 월말 예측 (원안 39.73) | 이번 달 누적 + 최근 14일 일별 비용 중앙값 × 남은 일수. 월 한도를 넘을 것 같으면 `budget_forecast` Alert(`warning`) |
+
+- **비용만으로 콘텐츠를 판단하지 않는다** (원안 39.47·39.48·39.76). 화면은 비용과 성과(29장 점수, 기준선 대비)를 같은 행에 놓고, 비용 순 정렬을 기본으로 두지 않는다.
+- 원안 39.75~39.76의 **비용 최적화 엔진**(모델 낮추기, 프롬프트 압축 등)은 자동으로 하지 않는다. 모델을 바꾸면 품질이 달라지므로, 바꾸려면 실험(34장)처럼 비교해야 한다. 지금은 Operator가 화면을 보고 `llm_models`를 바꾼다. 원안 39.87의 한도 재배분 제안도 AI가 하지 않고, 화면이 "한도 대비 사용률"(원안 39.86 공정성 지표)을 보여준다.
+
+**화면** ⚙️: 원안의 `/costs`, `/monitoring/costs`, `/monitoring/resources`, `/personas/:id/resources` 대신
+
+| 위치 | 내용 |
+|---|---|
+| `/monitoring` **"비용·자원" 탭** (37.12) | 오늘·이번 달 비용과 한도, 자원별 비용, Persona별 비용, 예산 상태(39.5), 월말 예측, 비용 차단기 상태, GPU 분·LLM 토큰·Storage·SNS 호출 사용량 |
+| `/personas/:id?tab=limits` (36.9) | 그 Persona의 한도와 오늘 사용량 (원안 39.85: LLM $3.20 / $5, GPU 82 / 120분, Storage 42 / 50GB, 생성 38 / 50, 게시 7 / 10), 미뤄진 Job 수 |
+| Job 상세 | 그 Job의 사용량과 추정 비용, 미뤄졌으면 이유와 시각 |
+
+### 39.11 알림
+
+37-A.4 규칙 표에 더한다 (원안 39.81·39.82).
+
+| 규칙 | 조건 | 수준 | 단계 |
+|---|---|---|---|
+| `budget_state` | LLM 금액·GPU 분이 WARNING / BLOCKED (39.5) | warning / high | V2 (GPU), V2b (LLM) |
+| `quota_storage` | Persona Storage ≥ 80% / 100% | warning / high | V2 |
+| `budget_forecast` | 월말 예측 > 월 한도 | warning | V2b |
+| `cost_spike` | 37.6 그대로 (하루 비용 > 7일 중앙값 × 2) | warning | V2b |
+| `llm_cost_circuit` | 차단기 열림 (39.7) | high | V2b |
+| `jobs_deferred` | 예산 때문에 미뤄진 Job이 24시간 넘게 쌓임 (Persona별) | warning | V2 |
+
+원안의 `GPU_QUOTA_*`, `LLM_QUOTA_*`, `STORAGE_QUOTA_*`, `BUDGET_*`, `RESOURCE_EXHAUSTED`는 위 규칙의 대상(`resource_id`)과 수준으로 표현된다. `SNS_RATE_LIMIT`·`SNS_QUOTA_WARNING`은 37-A.4의 `rate_limit_repeated`가 맡는다. Instagram은 게시 전에 남은 게시 수를 확인한다 (28.9).
+
+### 39.12 작업 목록과 테스트
+
+| 단계 | 작업 |
+|---|---|
+| V1 | `cost_rates` 테이블(이력), 사용량 기록(37-A.5), `generated` Asset 60일 자동 보관, 프롬프트 순서 고정(캐싱) |
+| V2 | GPU 분 한도(하루·월)와 ③ 선점 확인, Registry `expected_seconds`, Storage 한도, `limits_override` 키 추가, 미룸(`run_after` + `result.deferred`), Agent별 모델(`llm_models`), 우선순위 표(39.5), 화면의 GPU·Storage 부분 |
+| V2b | LLM 금액 한도와 `reserve_llm_call` 확장(모든 LLM Job, 금액 예약), 예산 상태별 줄이기(39.5), 비용 차단기, `get_cost_summary`, 월말 예측, Decision Context `resources`, `/monitoring` 비용 탭 |
+| Long-term | 실험 `max_cost`·`max_gpu_minutes`, 작업 난이도별 자동 모델 선택, 비용 최적화 실험 |
+
+| 경우 | 기대 |
+|---|---|
+| 단가 변경 (`effective_from` 내일) | 어제까지 비용은 그대로, 내일부터 새 단가 |
+| Persona A GPU 240분 중 235분 사용, 다음 Job 예상 8분 | A의 Job은 선점되지 않고 B의 Job이 선점됨. A의 Job은 `pending` + 내일 0시 |
+| 미뤄진 Job | 시도 횟수 그대로, 화면 "예산 대기" |
+| LLM 금액 72% | `warning` Alert, 새 실험 짝 생성 중지 |
+| 92% | AI 생성 결정 승인 대기, 매일 Run 다음 날로 |
+| 100% | Agent·분석 LLM 호출 미룸, 예약 게시·수집은 정상 |
+| 루프 버그로 1시간에 평소 10배 LLM 호출 | 비용 차단기 `open`, Incident, Operator의 수동 Job은 계속 |
+| Operator [오늘 예산 무시하고 실행] | 실행됨, 전체 하드 한도는 넘지 않음, `security_events` 기록 |
+| Persona Storage 100% | 그 Persona 생성 미룸, 다른 Persona 정상 |
+| 60일 된 `generated` Asset | `archived` → 30일 뒤 파일 삭제, DB 행 남음 |
+| 같은 시스템 지시로 연속 호출 | 제공자 응답의 캐시 적중 토큰이 `monitoring_usage`에 기록됨 |
+
+### 39.13 원안 조정
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 한도 단위 | 대부분 금액 | LLM은 금액, GPU는 분, Storage는 GB | 자원마다 모자라는 것이 다름. GPU는 산 PC라 시간이 귀함 |
+| 통화 | USD | 보고 통화 하나, 원화 값은 환산해 입력 | 추정치, 1인 운영 |
+| 단가 | Configuration + 버전 | `cost_rates` 유효 기간 이력 (insert만), 실수 수정은 admin RPC + 기록 | 과거 비용 고정 (32.13을 원안대로 바꿈) |
+| 비용 저장 | `monitoring_costs`에 금액 | 사용량만 (`monitoring_usage`), 금액은 시점 단가로 계산 | 37-A.5 |
+| `persona_resource_quotas` | 테이블 | `personas.limits_override` 키 | 36.4·36.11 |
+| 월 한도 | 생성·게시·메시지까지 | 금액·GPU 분만 | 나머지는 하루 × 30이 상한 |
+| 최적화·탐색 예산 | 별도 | 두지 않음 (롤아웃은 추가 비용 없음, 탐색은 34.11) | 이미 제한됨 |
+| Resource Controller | n8n `[PA] 021` | DB 세 지점 (만들 때, LLM 직전, GPU 선점) | 우회 불가 (15.18 원칙) |
+| `DEFERRED` | 상태 | `pending` + `run_after` + `result.deferred` | 상태 5개 유지 |
+| 예산 판정 | 4개 | 기존 동작에 대응, 만들어진 Job은 거절하지 않고 미룸 | 승인된 일을 버리지 않음 |
+| 예산 상태 | 4단계 | 채택, 단계마다 줄이는 것을 고정 | 원안 39.96 순서를 상태에 묶음 |
+| GPU 우선순위 | 1~5 (1이 최고) | `priority` 값으로 (10이 최고), 실험 4, 탐색 3 | 10.15 |
+| Asset 수명 | Cold Storage 포함 | `generated` 60일 자동 보관 + 15.5 삭제, Cold Storage 없음 | 이미지는 작음, 영상 때 검토 |
+| 비용 차단기 | 4개 상태 | 3개 (경고는 Alert), LLM만 | 속도 폭주 대응, GPU는 물리적으로 제한 |
+| AI 자원 정보 | 남은 금액 | 상태·비율만 | AI가 금액으로 판단할 이유 없음 |
+| Model Routing | 난이도별 자동 | Agent별 고정 모델 (admin), 자동은 Long-term | 품질 변화는 비교가 필요 |
+| 비용 최적화 엔진 | 자동 | 없음, 화면에 비용과 성과를 나란히 | 품질 저하 위험 |
+| Experiment ROI | 개선 ÷ 비용 | 나란히 표시, 나눈 값 없음 | 단위 없는 숫자 |
+| 한도 재배분 | AI 제안 | 사용률 표시만 | AI 운영 조치 없음 (37.9) |
+| 화면 | 4개 경로 | `/monitoring` 탭 + Persona `limits` 탭 + Job 상세 | 같은 정보를 여러 곳에 두지 않음 |
