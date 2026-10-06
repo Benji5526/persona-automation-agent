@@ -6385,7 +6385,7 @@ select (select count from private.usage_counters
        (select value ->> 'daily_llm_calls_limit' from public.app_settings where key = 'limits') as limit;
 ```
 
-Worker 가용성은 `verify_production.sql` 17번 (`worker_status`). GPU 사용률·VRAM 추이, LLM 비용, SNS 게시 성공률은 원안처럼 이후(V1·V2)에 추가한다. 그 설계는 37장이다 (`health_samples`, `evaluate_health`, `/monitoring`).
+Worker 가용성은 `verify_production.sql` 17번 (`worker_status`). GPU 사용률·VRAM 추이, LLM 비용, SNS 게시 성공률은 원안처럼 이후(V1·V2)에 추가한다. 그 설계는 37장이다 (`monitoring_metrics`, `evaluate_health`, `/monitoring`, 37-A).
 
 ### 26.7 원안 요구사항 대응과 조정
 
@@ -8589,7 +8589,7 @@ content_need = 앞으로 7일 게시 계획 수 (Champion Strategy의 posts_per_
 
 | 항목 | 측정 | 위치 |
 |---|---|---|
-| LLM | 호출마다 입력·출력 토큰과 모델 | LLM 하위 Workflow가 `execution_logs.output_data.usage`에 기록 |
+| LLM | 호출마다 입력·출력 토큰과 모델 | LLM 하위 Workflow가 `monitoring_usage`에 기록 (37-A.5. 처음에는 `execution_logs.output_data.usage`였으나 그 칸은 90일 뒤 비운다, 37.10) ⚙️ |
 | GPU | `generation` Job의 ComfyUI 실행 시간 | `execution_logs.duration_ms` |
 | Storage | Asset 파일 크기 합 | `assets` (V2b에 `file_size` 칸 추가) |
 | SNS API | 호출 수 | `execution_logs` (`service = 'sns'`) |
@@ -10062,7 +10062,7 @@ Supabase가 멈추면 이 함수도 못 부른다. 그때 Lovable은 "서버에 
 | CPU, RAM, 디스크 여유 (출력·모델 폴더 드라이브) | 브릿지가 `psutil`로 읽어 `host` 키에 넣는다 | V1 |
 | 생성 단계 시간 (대기, ComfyUI, 검증, 업로드) | `execution_logs` 단계별 `duration_ms` (이미 있음) | MVP |
 
-**추이 데이터** ⚙️: `worker_status`는 현재 값 한 줄뿐이라 "지난 밤 VRAM 추이"를 볼 수 없다. **`health_samples`** 테이블을 둔다 (V1): 5분마다 pg_cron이 `worker_status`와 큐 길이(job_type별 대기·실행·재시도 대기)를 한 행씩 복사한다. 30일 보존. 원안 37.62의 시계열 시스템은 Long-term이다.
+**추이 데이터** ⚙️: `worker_status`는 현재 값 한 줄뿐이라 "지난 밤 VRAM 추이"를 볼 수 없다. **`monitoring_metrics`** 테이블을 둔다 (V1): 5분마다 pg_cron이 `worker_status`와 큐 길이(job_type별 대기·실행·재시도 대기)를 한 행씩 복사한다. 30일 보존. 원안 37.62의 시계열 시스템은 Long-term이다.
 
 **Workflow 신호** ⚙️ (원안 37.14·37.15): n8n 실행 결과는 n8n 안에만 있고 14일 뒤 지워진다 (20.13). Job을 다루는 Workflow는 Job 결과(`automation_jobs` job_type별 성공·실패)로 건강을 알 수 있다. 문제는 **Job 없이 일정으로만 도는 Workflow**(WF-008 예약 게시, WF-009 수집, WF-015, WF-016 토큰 갱신)다. 이것들이 멈추면 아무 오류도 없이 **조용히** 일이 안 된다. 그래서 각 Workflow가 끝날 때 `report_workflow_run(p_workflow, p_ok)`를 부르고 `workflow_heartbeats`(Workflow별 마지막 성공·실패 시각, 연속 실패 수)에 남긴다 (V1).
 
@@ -10107,7 +10107,7 @@ Supabase가 멈추면 이 함수도 못 부른다. 그때 Lovable은 "서버에 
 
 **Incident** (원안 37.46~37.50): 규칙이 처음 걸리면 Incident를 연다. 같은 규칙이 다시 걸리면 **새로 만들지 않고 횟수만 올린다** (원안 37.46 중복 제거).
 
-**incidents** (V1)
+**incidents** (V1) ⚙️: 37-A.4에서 `monitoring_alerts`(감지, 이 표의 `rule_key` = `dedupe_key`, `occurrences`)와 `monitoring_incidents`(원인 서비스별 장애)로 나눴다. 아래 표는 처음 정한 형태다.
 
 | Column | Type | Description |
 |---|---|---|
@@ -10182,14 +10182,16 @@ half_open ──(성공)──▶ closed      half_open ──(실패)──▶ 
 | 데이터 | 보존 |
 |---|---|
 | `execution_logs` | 행은 영구. **90일이 지나면 `input_data`·`output_data`를 비운다** (pg_cron). 단계·상태·소요 시간·오류·외부 실행 ID는 남아서 추적·지연 시간 통계는 계속된다 |
-| `health_samples` | 30일 |
+| `monitoring_metrics` | 30일 |
 | n8n 실행 기록 | 14일 (20.13) |
 | 브릿지 로그 파일 | 30일 (V1부터 파일 회전) |
-| `system_errors`, `incidents`, `state_transitions`, `security_events`, `ai_decisions` | 영구 (감사) |
+| `system_errors`, `monitoring_alerts`·`monitoring_incidents`, `state_transitions`, `security_events`, `ai_decisions` | 영구 (감사) |
+| `monitoring_events` | 1년 (37-A.3) |
+| `monitoring_usage` | 영구 (37-A.5) |
 | `performance_metrics` | 영구 |
 | 팬 데이터 | 31.13 (1년, Context 30일) |
 
-원안 37.60대로 **운영 기록과 감사 기록은 다르다**: `execution_logs`·`health_samples`는 "어떻게 동작했나", `state_transitions`·`security_events`·`ai_decisions`는 "누가 무엇을 바꿨나"다. 위 정리는 앞쪽만 줄인다.
+원안 37.60대로 **운영 기록과 감사 기록은 다르다**: `execution_logs`·`monitoring_metrics`는 "어떻게 동작했나", `state_transitions`·`security_events`·`ai_decisions`는 "누가 무엇을 바꿨나"다. 위 정리는 앞쪽만 줄인다.
 
 ### 37.11 SLO와 운영 지표
 
@@ -10200,7 +10202,7 @@ half_open ──(성공)──▶ closed      half_open ──(실패)──▶ 
 | 생성 성공 | ≥ 95% | `generation` Job `done` ÷ (`done` + `failed`) |
 | 게시 성공 | ≥ 98% | `publish` Job |
 | 성과 수집 성공 | ≥ 98% | `analytics` Job |
-| 자동화 가용성 | ≥ 99% | `health_samples` 중 시스템 상태가 `MAJOR_OUTAGE`가 아닌 비율 |
+| 자동화 가용성 | ≥ 99% | `monitoring_metrics` 중 시스템 상태가 `MAJOR_OUTAGE`가 아닌 비율 |
 
 운영 지표: 위 성공률, 재시도율(`attempts > 1`), 최종 실패율, 큐 대기 시간 P50·P95, 생성 시간 P50·P95, OOM 횟수, MTTD·MTTR, 열린 Incident 수. 원안 37.68의 AI·업무 지표는 각 장의 화면(29·30·31·35장)에 있고 여기서는 링크만 둔다.
 
@@ -10215,7 +10217,7 @@ half_open ──(성공)──▶ closed      half_open ──(실패)──▶ 
 | 개요 | 시스템 상태(37.4, `UNKNOWN` 포함), 기능별 가능 여부(생성·게시·수집·팬 응답), 열린 Incident, GPU(사용률·VRAM·온도, 24시간 그래프), 큐(job_type별 대기·실행·재시도 대기), 오늘 실패, SLO 목표선 |
 | 서비스 | 서비스별 살아 있음·일할 수 있음, 마지막 신호 시각, 최근 1시간 오류율, 버전(`worker_status.version`), Workflow 신호 표(37.5), 차단기 상태 |
 | Incident | 목록(수준, 제목, 시작, 지속 시간, 영향, 상태), 상세에 원인 행 링크(오류·Job), [확인] [해결], 사후 기록(`review`) |
-| 추이 | `health_samples` 7·30일: VRAM·온도·큐 길이, 생성 시간 P50·P95, MTTD·MTTR |
+| 추이 | `monitoring_metrics` 7·30일: VRAM·온도·큐 길이, 생성 시간 P50·P95, MTTD·MTTR |
 
 - Header의 시스템 상태 배지(17장)는 `get_system_status()`를 쓰고, 누르면 `/monitoring`으로 간다.
 - Persona별 상태(원안 37.28·37.29)는 36.9의 `/personas` 운영 칸이다. 원안의 Health Score 숫자는 쓰지 않는다 (36.9와 같은 이유).
@@ -10226,7 +10228,7 @@ half_open ──(성공)──▶ closed      half_open ──(실패)──▶ 
 | 단계 | 작업 |
 |---|---|
 | MVP | 지금 있는 것(37.1) 유지. 변경 없음 |
-| V1 | `evaluate_health`(pg_cron 1분)와 37.6 V1 규칙, `incidents`, `workflow_heartbeats`·`report_workflow_run`, `service_circuits`와 WF-003의 차단기 확인, `fail_automation_job` 지터, `system_errors.resolved_at`, `health_samples`(5분, 30일), 브릿지 NVML·psutil 수집과 구조화 JSON 로그, `get_system_status`, `get_trace`, `get_public_health`, `pg_net` 직접 알림, 외부 업타임 감시 설정, `execution_logs` 90일 정리, `/monitoring` |
+| V1 | `evaluate_health`(pg_cron 1분)와 37.6 V1 규칙, `incidents`, `workflow_heartbeats`·`report_workflow_run`, `service_circuits`와 WF-003의 차단기 확인, `fail_automation_job` 지터, `system_errors.resolved_at`, `monitoring_metrics`(5분, 30일), 브릿지 NVML·psutil 수집과 구조화 JSON 로그, `get_system_status`, `get_trace`, `get_public_health`, `pg_net` 직접 알림, 외부 업타임 감시 설정, `execution_logs` 90일 정리, `/monitoring` |
 | V2 | AI·팬 규칙 (37.6), Post·Conversation·Decision 상세 타임라인 |
 | V2b | 비용 급증 규칙 (32.13 이후) |
 | Long-term | 최적화 규칙, 외부 관측 스택(OpenTelemetry, 시계열·로그 저장소), 통계 기반 이상 감지 (원안 37.62·37.69) |
@@ -10257,7 +10259,7 @@ half_open ──(성공)──▶ closed      half_open ──(실패)──▶ 
 | 심각도 | 오류·알림 두 체계 | 오류는 20.12 그대로, 수준은 Incident에만 | 수준이 필요한 것은 Incident |
 | GPU·Workflow·서비스 상태 | 상태 값 | 신호로 계산, 저장하지 않음 | 상태와 신호가 어긋나지 않게 |
 | GPU 지표 | 사용률·온도·전력 | NVML·psutil 추가 (ComfyUI API에 없음) | 데이터 출처 |
-| 추이 | 시계열 | `health_samples` 5분·30일 | 현재 값만 있었음 |
+| 추이 | 시계열 | `monitoring_metrics` 5분·30일 | 현재 값만 있었음 |
 | 조용한 정지 | 언급 없음 | `workflow_heartbeats` | 일정 Workflow가 멈추면 오류가 안 남음 |
 | Health Monitor | n8n `[PA] 016` | DB pg_cron `evaluate_health` | 016은 Token Refresh, n8n도 감시 대상 |
 | Incident 상태 | 6개 | 3개 + 사후 기록 칸, 자동 해결 | 혼자 운영, 누를 사람이 없는 상태 제외 |
@@ -10273,3 +10275,344 @@ half_open ──(성공)──▶ closed      half_open ──(실패)──▶ 
 | 보존 | 종류별 | `execution_logs`는 90일 뒤 입력·출력만 비움 | 추적·감사 유지, 크기만 줄임 |
 | 화면 | `/monitoring` 아래 5개 | `/monitoring` 4탭, Job·오류는 기존 `/automation`·Error Center | 같은 화면 두 번 만들지 않음 |
 | Health Score | 숫자 | 쓰지 않음 | 36.9 |
+
+---
+
+## 37-A. Monitoring Data Model ✅
+
+> 37장을 구현할 수 있는 테이블 수준으로 정한다. 원안의 핵심 요구는 "기존 `automation_jobs`·`execution_logs`·`system_errors`와 **중복되지 않게** 역할을 나누는 것"이다. 그 기준으로 원안의 10개 테이블을 하나씩 따져서, **이미 같은 정보를 담는 테이블이 있으면 만들지 않고**, 없는 정보만 새 테이블로 둔다. 결과는 새 테이블 4개다. 37장 본문의 `health_samples`·`incidents`는 이 장의 테이블로 바뀐다. 단계는 37장과 같이 **V1**이다 (원안 37-A.42는 MVP 필수 5개). ⚙️ 표시는 원안을 조정한 부분이다 (37-A.11).
+
+### 37-A.1 결론: 무엇을 만들고 무엇을 만들지 않나
+
+| 원안 테이블 | 결정 | 이유 |
+|---|---|---|
+| `monitoring_metrics` | **채택** (축소) | 시간에 따른 측정값을 담는 곳이 없다 (`worker_status`는 현재 값 한 줄). 37장의 `health_samples`를 이것으로 바꾼다 |
+| `monitoring_health_checks` | 만들지 않음 ⚙️ | 현재 상태는 `worker_status` + 계산(37.4). 1분마다 모든 서비스의 결과를 쌓으면 하루 수천 행이 "정상"으로 채워진다. **상태가 바뀐 순간**만 `monitoring_events`에 남긴다 |
+| `monitoring_alerts` | **채택** | 규칙이 감지한 이상 하나. 중복 제거 키로 묶는다 |
+| `monitoring_incidents` | **채택** | 여러 Alert를 하나의 장애로 묶는다 (원안 37-A.18 예: OOM + 생성 실패 + 큐 적체 = 장애 하나) |
+| `monitoring_incident_alerts` | 만들지 않음 ⚙️ | Alert 하나는 Incident 하나에만 속한다. `monitoring_alerts.incident_id` FK로 충분하다 (원안도 이 칸과 관계 테이블을 둘 다 둔다) |
+| `monitoring_traces`, `monitoring_trace_spans` | 만들지 않음 ⚙️ | `execution_logs`가 이미 Span이다: 단계(`step`), 서비스(`n8n`·`python`·`comfyui`·`supabase`·`llm`·`sns`), 상태, 소요 시간, 외부 실행 ID. 원안 37-A.23의 예(n8n.dispatch → python.validate → comfyui.generate → storage.upload → supabase.create_asset)가 19.16·20.13의 단계와 같다. Trace는 뿌리 행(37.2)이고, `get_trace`가 둘을 합쳐 보여준다. 같은 내용을 두 테이블에 쓰지 않는다 |
+| `monitoring_events` | **채택** (범위를 좁혀서) | Job·Decision·실험·전략의 상태 변화는 `state_transitions`(11.14), 정지·권한·정책 변화는 `security_events`(15.22)가 이미 담는다. 남는 것은 **어떤 행에도 붙지 않는 운영 상태 변화**(서비스 시작·정지·저하, 차단기, 감시 공백)다 |
+| `monitoring_costs` | **`monitoring_usage`로 채택** ⚙️ | 사용량(토큰·GPU 시간·바이트·호출 수)을 남기는 원장이 필요하다. 37.10에서 `execution_logs`의 출력 칸을 90일 뒤 비우기로 했으므로, 32.13처럼 거기에 토큰 수를 두면 비용 기록이 사라진다. 금액은 저장하지 않고 단가로 계산한다 (32.13) |
+| `metric_aggregations` | V2 | 원안과 같음 |
+| `monitoring_current_state` | 만들지 않음 | `worker_status` + `get_system_status()` (37.4) |
+
+**기존 테이블과의 역할** (원안 37-A.1·37-A.51의 표를 이 결정으로 다시 쓴 것)
+
+| 테이블 | 질문 |
+|---|---|
+| `automation_jobs` | 무엇을 실행했나 |
+| `execution_logs` | Job 안에서 어느 서비스가 무엇을 얼마나 걸려 했나 (= Span) |
+| `system_errors` | 무엇이 잘못됐나 (오류의 정본, 원안 37-A.34와 같음) |
+| `state_transitions` | 어떤 행의 상태가 언제 누구 때문에 바뀌었나 |
+| `security_events` | 누가 정지·권한·정책을 바꿨나 (감사) |
+| `worker_status` | Worker·GPU의 지금 상태 |
+| **`monitoring_metrics`** | 시간에 따라 수치가 어땠나 |
+| **`monitoring_events`** | 어떤 행에도 붙지 않는 운영 상태가 언제 바뀌었나 |
+| **`monitoring_alerts`** | 어떤 이상이 감지됐나 |
+| **`monitoring_incidents`** | 그것들이 어떤 장애 하나로 묶였나 |
+| **`monitoring_usage`** | 자원을 얼마나 썼나 |
+
+### 37-A.2 `monitoring_metrics`
+
+```sql
+create table public.monitoring_metrics (
+  id          bigint generated always as identity primary key,
+  metric_name text not null check (metric_name ~ '^[a-z][a-z0-9_]{2,63}$'),
+  persona_id  uuid references public.personas (id) on delete cascade,  -- null = 전체
+  resource_id text,                       -- 예: python:rtx5080-1, instagram
+  dimensions  jsonb not null default '{}'::jsonb,
+  value       double precision not null,
+  recorded_at timestamptz not null
+);
+create index monitoring_metrics_name_time on public.monitoring_metrics (metric_name, recorded_at desc);
+create index monitoring_metrics_persona_time on public.monitoring_metrics (persona_id, recorded_at desc)
+  where persona_id is not null;
+```
+
+원안과 다른 점 ⚙️:
+
+- **다른 곳에서 계산할 수 있는 값은 저장하지 않는다.** 성공률·실패율·지연 시간·생성 수는 `automation_jobs`·`execution_logs`에서 언제든 다시 계산된다 (37.5). 두 곳에 두면 서로 다른 숫자가 나온다. 이 테이블에는 **그 순간 재지 않으면 사라지는 값**만 넣는다.
+- 원안의 `metric_type`·`unit`·`service`·`resource_type`·`created_at`은 칸으로 두지 않는다. 종류와 단위는 아래 **목록(카탈로그)**이 이름별로 정하고, 이름이 바뀌지 않으므로 행마다 반복할 필요가 없다. `id`는 행이 많으므로 `bigint`다.
+- 쓰는 곳은 **pg_cron 샘플러 하나**다 (`sample_metrics()`, 5분). 브릿지는 지금처럼 `worker_status`만 보고하고, 샘플러가 그 값을 복사한다. 쓰는 곳이 하나여야 이름·단위가 어긋나지 않는다.
+
+**측정값 목록** (V1. 원안 37-A.3·37-A.5의 이름 규칙 `<영역>_<대상>_<측정>`을 따른다)
+
+| metric_name | 단위 | 출처 | 범위 |
+|---|---|---|---|
+| `gpu_utilization_pct` | % | `worker_status.gpu` (NVML, 37.5) | Worker |
+| `gpu_vram_used_mb`, `gpu_vram_total_mb` | MB | 같음 | Worker |
+| `gpu_temperature_c` | °C | 같음 | Worker |
+| `gpu_power_w` | W | 같음 | Worker |
+| `host_cpu_pct`, `host_ram_used_pct` | % | `worker_status` `host` (psutil) | Worker |
+| `host_disk_free_gb` | GB | 같음 (`dimensions.drive`) | Worker |
+| `queue_pending_count`, `queue_retry_wait_count`, `queue_running_count` | 개 | `automation_jobs` (`dimensions.job_type`) | 전체 |
+| `queue_oldest_wait_sec` | 초 | 가장 오래 기다린 `pending` Job | 전체, `job_type`별 |
+| `storage_bytes` | B | Asset 크기 합 (`assets.file_size`, 32.13) | Persona별 + 전체 |
+| `system_status_level` | 0~4 | `get_system_status()` (0 = OPERATIONAL … 4 = EMERGENCY_STOP, `UNKNOWN`은 기록하지 않음) | 전체 |
+| `bridge_health_latency_ms` | ms | n8n이 `/v1/health`를 부를 때 잰 응답 시간 (`report_worker_status`의 n8n 보고에 포함) | Worker |
+
+- 원안 37-A.3의 `generation_success_rate`, `publish_failure_rate`, `llm_latency`, `fan_auto_reply_rate` 등은 위 이유로 목록에 없다. 화면은 계산 함수(37.5·37.11)를 쓴다.
+- 원안의 `llm_token_usage`, `llm_cost`는 `monitoring_usage`(37-A.5)다.
+- 목록 밖의 이름은 샘플러가 쓰지 않는다. 새 측정값은 목록에 먼저 더한다 (원안 37-A.5 "같은 값에 여러 이름을 만들지 않는다").
+- 37.11의 "자동화 가용성"은 `system_status_level < 3`(`MAJOR_OUTAGE` 아님)인 샘플의 비율이다.
+
+**Dimension** (원안 37-A.4·37-A.31): `platform`, `job_type`, `workflow`, `drive`만 쓴다. `persona_id`는 칸이라 dimension에 넣지 않는다. `model`·`lora`는 측정값이 아니라 생성 기록의 속성이므로 `assets.generation_metadata`에서 본다. **`environment`**(원안 37-A.32)는 두지 않는다 ⚙️. 실행 환경은 PC 한 대와 운영 Supabase 하나이고 staging이 없다 (19.18). 나중에 환경을 나누면 Supabase 프로젝트를 따로 두므로 한 테이블에 섞이지 않는다.
+
+**보존** (원안 37-A.39·37-A.40): 5분 원본은 30일 (37.10). 1시간·1일 집계(`monitoring_metrics_hourly`, 평균·최소·최대)는 V2다. 1분 단위는 두지 않는다. 브릿지 보고 주기가 30초라 1분 값은 거의 원본과 같고, 판단은 `worker_status` 현재 값으로 하기 때문이다.
+
+### 37-A.3 `monitoring_events`
+
+```sql
+create table public.monitoring_events (
+  id           bigint generated always as identity primary key,
+  event_type   text not null,
+  service      text not null,          -- python, comfyui, gpu, n8n, sns, llm, monitor
+  resource_id  text,                    -- 예: python:rtx5080-1, generation, instagram
+  from_state   text,
+  to_state     text,
+  detail       jsonb not null default '{}'::jsonb,   -- 비밀값·팬 본문 금지
+  occurred_at  timestamptz not null default now()
+);
+create index monitoring_events_type_time on public.monitoring_events (event_type, occurred_at desc);
+create index monitoring_events_service_time on public.monitoring_events (service, resource_id, occurred_at desc);
+```
+
+**담는 것과 담지 않는 것** (원안 37-A.25의 이벤트 30여 종)
+
+| 원안 이벤트 | 어디에 남나 |
+|---|---|
+| `SERVICE_STARTED`, `SERVICE_STOPPED`, `SERVICE_DEGRADED`, `COMFYUI_UNAVAILABLE`, `GPU_ERROR`(서비스 상태로서) | **`monitoring_events`** `service_state_changed` (from → to: `UP`·`DEGRADED`·`DOWN`, 37.4) |
+| 차단기 열림·반열림·닫힘 (37.7) | **`monitoring_events`** `circuit_state_changed` |
+| 감시 공백 시작·끝 (`evaluate_health`가 3분 넘게 안 돎, 37.8) | **`monitoring_events`** `monitor_gap` |
+| Workflow 신호 상태 변화 (37.5 `HEALTHY` → `FAILING`) | **`monitoring_events`** `workflow_state_changed` |
+| `JOB_CREATED` ~ `JOB_DEAD`, `JOB_RETRY` | `state_transitions` (Automation Job, 11.14). 재시도는 `reason = retry_backoff` |
+| `GPU_OOM`(개별 실패) | `system_errors` (`OUT_OF_MEMORY`) |
+| `SNS_TOKEN_EXPIRED` | `security_events` `TOKEN_EXPIRED` (15.22) |
+| `SNS_RATE_LIMIT` | `system_errors` (`RATE_LIMIT`), 반복은 Alert |
+| `AI_DECISION_CREATED` / `_REJECTED` / `_EXECUTED` | `state_transitions` (`ai_decisions`, 30.14) |
+| `EXPERIMENT_STARTED` / `_COMPLETED`, `STRATEGY_CHANGED` / `_ROLLBACK` | `state_transitions` (`entity_type`에 `experiment`·`optimization_run`·`strategy_version` 추가) |
+| `PERSONA_PAUSED` / `_RESUMED`, `EMERGENCY_STOP` / `_RELEASED` | `security_events` (누가 했나가 중요한 감사 기록, 32.6) |
+
+- 원안 37-A.26의 "Log = 자세한 기록, Event = 의미 있는 상태 변화" 구분을 따른다. 다만 "의미 있는 상태 변화"의 대부분은 이미 `state_transitions`라서, 이 테이블은 **행이 없는 대상(서비스·차단기·감시)**의 상태 변화만 맡는다.
+- 원안의 `correlation_id`, `automation_job_id`, `persona_id`는 두지 않는다 ⚙️. 서비스 상태 변화는 특정 Job이나 Persona의 것이 아니다. 어떤 Job이 영향을 받았는지는 Incident의 `impact`(37-A.4)가 계산해 담는다.
+- 쓰는 곳은 `evaluate_health`(서비스·Workflow·감시)와 차단기 함수(37.7)뿐이다. 앞 상태와 같으면 쓰지 않는다.
+- 보존: 1년. 38장(복구)에서 "언제 무엇이 멈췄나"를 되짚는 데 쓴다.
+
+### 37-A.4 `monitoring_alerts`와 `monitoring_incidents`
+
+37.6의 `incidents` 하나를 **Alert(감지)와 Incident(장애)**로 나눈다 ⚙️. 37.6에서는 규칙마다 Incident를 열어서, 원안 37-A.18의 예처럼 원인 하나(VRAM 부족)가 Incident 세 개(OOM, 생성 실패율, 큐 적체)가 됐다. 나누면 감지는 규칙마다 따로, 장애는 원인 하나로 묶인다.
+
+```sql
+create table public.monitoring_incidents (
+  id            uuid primary key default gen_random_uuid(),
+  incident_key  text not null,          -- 원인 서비스 (예: comfyui, sns:instagram, n8n)
+  title         text not null,
+  severity      text not null check (severity in ('warning', 'high', 'critical')),
+  status        text not null default 'open' check (status in ('open', 'acknowledged', 'resolved')),
+  started_at    timestamptz not null,   -- 묶인 Alert 중 가장 이른 first_seen_at (또는 원인 행 시각)
+  detected_at   timestamptz not null default now(),
+  acknowledged_at timestamptz, acknowledged_by uuid references public.users (id),
+  resolved_at   timestamptz,
+  impact        jsonb not null default '{}'::jsonb,  -- affected_personas, platforms, jobs, services (원안 37-A.16)
+  review        jsonb not null default '{}'::jsonb,  -- root_cause, mitigation, prevention (37.6)
+  updated_at    timestamptz not null default now()
+);
+create unique index monitoring_incidents_open_key on public.monitoring_incidents (incident_key)
+  where status in ('open', 'acknowledged');
+
+create table public.monitoring_alerts (
+  id            uuid primary key default gen_random_uuid(),
+  dedupe_key    text not null,          -- 규칙:서비스:대상[:persona]
+  rule          text not null,          -- 37.6 규칙 이름 (아래 대응표)
+  severity      text not null check (severity in ('warning', 'high', 'critical')),
+  status        text not null default 'open'
+                check (status in ('open', 'acknowledged', 'resolved', 'suppressed')),
+  service       text not null,
+  resource_id   text,
+  persona_id    uuid references public.personas (id) on delete cascade,
+  title         text not null,
+  observed      jsonb not null default '{}'::jsonb,  -- 측정값·기준값·건수 (원안 threshold·observed_value·metadata.count)
+  occurrences   integer not null default 1,
+  first_seen_at timestamptz not null default now(),
+  last_seen_at  timestamptz not null default now(),
+  acknowledged_at timestamptz, acknowledged_by uuid references public.users (id),
+  resolved_at   timestamptz,
+  suppressed_until timestamptz,
+  incident_id   uuid references public.monitoring_incidents (id) on delete set null
+);
+create unique index monitoring_alerts_open_key on public.monitoring_alerts (dedupe_key)
+  where status in ('open', 'acknowledged', 'suppressed');
+create index monitoring_alerts_status on public.monitoring_alerts (status, severity, last_seen_at desc);
+```
+
+**규칙 이름 대응** (원안 37-A.9 → 37.6 규칙)
+
+| 원안 alert_type | `rule` |
+|---|---|
+| `SERVICE_DOWN`, `GPU_OFFLINE` | `worker_offline`, `n8n_down` |
+| `SERVICE_DEGRADED` | `comfyui_degraded`, `workflow_failing` |
+| `QUEUE_OVERLOAD` | `queue_backlog` |
+| `JOB_FAILURE_SPIKE`, `JOB_TIMEOUT_SPIKE`, `SYSTEM_ERROR_SPIKE` | `failure_rate`, `error_spike` (`observed.error_code`) |
+| `GPU_OVERLOAD`, `GPU_OOM` | `gpu_risk`, `error_spike` (`OUT_OF_MEMORY`) |
+| `SNS_TOKEN_EXPIRING`, `SNS_RATE_LIMIT`, `SNS_PUBLISH_FAILURE` | `token_expiry`, `rate_limit_repeated`, `publish_failures` |
+| `LLM_ERROR_SPIKE` | `failure_rate` (`job_type`별) |
+| `LLM_COST_SPIKE`, `COST_ANOMALY` | `cost_spike` (V2b) |
+| `AI_DECISION_ANOMALY` | `ai_anomaly`, `ai_concentration` (V2) |
+| `STORAGE_GROWTH_ANOMALY` | `storage_growth` |
+| `SAFETY_EVENT` | `fan_critical_pending` (V2) |
+| `SECURITY_EVENT` | `security_spike`: `API_AUTH_FAILED` 1시간 50건 초과 (15.22에 이미 정한 알림을 이 규칙으로 옮김) |
+
+**중복 제거** (원안 37-A.12): `dedupe_key = rule:service:resource_id[:persona_id]` (예: `error_spike:comfyui:OUT_OF_MEMORY`, `token_expiry:sns:instagram:{persona_id}`). 같은 키의 Alert가 열려 있으면 새로 만들지 않고 `occurrences`·`last_seen_at`·`observed`만 갱신한다. 원안의 `metadata.count`를 칸으로 올렸다. 같은 Alert가 더 높은 수준으로 걸리면 `severity`를 올린다 (내리지 않음).
+
+**Alert 상태** (원안 37-A.11과 같음): `open` → `acknowledged` → `resolved`, 그리고 `suppressed`(점검 중이라 일부러 끔, `suppressed_until`까지. 그동안 알림 없음, 끝나면 `open`으로 돌아오거나 조건이 풀렸으면 `resolved`). 규칙이 15분 동안 다시 걸리지 않으면 자동으로 `resolved`.
+
+**Alert → Incident** (원안 37-A.17)
+
+| Alert | Incident |
+|---|---|
+| `warning` | 만들지 않는다 (화면에만) |
+| `high`·`critical` | 같은 **원인 서비스**(`incident_key`)의 열린 Incident가 있으면 거기에 붙이고, 없으면 새로 연다 |
+
+- 원인 서비스는 규칙이 정한다: `worker_offline`·`comfyui_degraded`·`gpu_risk`·`OUT_OF_MEMORY`·`CUDA_ERROR`·생성 `failure_rate`·생성 `queue_backlog` → `generation`. SNS 규칙 → `sns:{platform}`. n8n·Workflow 규칙 → `n8n`. 그래서 원안 예의 OOM, 생성 실패율, 큐 적체가 **`generation` Incident 하나**에 묶인다.
+- Incident 수준 = 붙은 Alert 중 가장 높은 것. 붙은 Alert가 모두 `resolved`가 되면 Incident도 `resolved`.
+- 원안 37-A.17의 "같은 오류 × N → Incident"는 `error_spike` 규칙(15분 10건, `high`)이 그 역할이다.
+- 알림(WF-010, n8n이 멈췄으면 `pg_net`, 37.8)은 **Incident 단위**로 열림·수준 상승·해결 때만 보낸다. `critical`인데 확인 안 된 Incident는 30분마다 다시 보낸다 (37.6과 같음).
+
+**Incident 상태와 수준** ⚙️: 원안 37-A.14의 4단계(LOW~CRITICAL)와 37-A.15의 6단계 상태 대신, Alert와 같은 수준 3개(`warning`·`high`·`critical`)와 37.6의 상태 3개를 쓴다. Alert와 Incident가 다른 척도를 쓰면 "HIGH Alert가 MEDIUM Incident가 되나"를 따로 정해야 한다. 원안의 `mitigated_at`·`closed_at`은 두지 않는다. 완화 조치는 `review.mitigation`(시각 포함)에, 사후 기록 완료는 `review`가 채워진 것으로 본다.
+
+### 37-A.5 `monitoring_usage`
+
+```sql
+create table public.monitoring_usage (
+  id           bigint generated always as identity primary key,
+  usage_type   text not null check (usage_type in ('llm_tokens', 'gpu_seconds', 'storage_bytes', 'sns_calls')),
+  persona_id   uuid references public.personas (id) on delete set null,
+  automation_job_id uuid references public.automation_jobs (id) on delete set null,
+  provider     text,                    -- 예: LLM 제공자·모델 이름, comfyui, instagram
+  quantity     double precision not null check (quantity >= 0),
+  dimensions   jsonb not null default '{}'::jsonb,   -- 예: {"direction": "input"}, {"workflow": "portrait_v1"}
+  recorded_at  timestamptz not null default now()
+);
+create index monitoring_usage_persona_time on public.monitoring_usage (persona_id, recorded_at desc);
+create index monitoring_usage_type_time on public.monitoring_usage (usage_type, recorded_at desc);
+```
+
+| usage_type | 언제 쓰나 | 누가 |
+|---|---|---|
+| `llm_tokens` | LLM 호출마다 입력·출력 각각 한 행 (`dimensions.direction`) | LLM 하위 Workflow (`record_usage` RPC) |
+| `gpu_seconds` | `generation` Job 완료·실패 때 ComfyUI 실행 시간 | 브릿지 (`complete_automation_job`·`fail_automation_job`가 함께 기록) |
+| `storage_bytes` | 하루 한 번 Persona별 Asset 크기 합 | pg_cron |
+| `sns_calls` | 하루 한 번 플랫폼·계정별 Adapter 호출 수 (`execution_logs` `service = sns`에서 셈) | pg_cron |
+
+- **금액은 저장하지 않는다** ⚙️ (원안 `unit_cost`·`total_cost`·`currency`). 32.13대로 `app_settings.cost_rates`의 단가를 곱해 조회할 때 계산한다. 단가가 바뀌면 과거 추정도 새 단가로 다시 나온다. 대신 `provider`(모델 이름)를 남겨서 모델별 단가가 정확히 적용되게 한다.
+- 원안의 `cost_type` `INFRASTRUCTURE`·`NETWORK`·`OTHER`는 두지 않는다. n8n 서버·Supabase 요금은 사용량이 아니라 월정액이라, 필요하면 `cost_rates`에 월 고정비로 넣어 하루 몫을 더한다.
+- 32.13의 "LLM 토큰은 `execution_logs.output_data.usage`"를 이 테이블로 바꾼다. **기록은 V1부터** 시작한다 (비용 화면은 V2b, 32.13). 데이터가 먼저 쌓여 있어야 비교 기준이 생긴다.
+- 보존: 영구 (작다. 하루 수백 행).
+
+### 37-A.6 RLS와 권한
+
+원안 37-A.37·37-A.38의 원칙(소유한 Persona의 데이터만, Frontend는 service_role을 쓰지 않음)을 따른다.
+
+| 테이블 | Operator 읽기 | 쓰기 |
+|---|---|---|
+| `monitoring_metrics` | `persona_id`가 자기 Persona인 행 + `persona_id is null`(전체 인프라) 행 | service_role (pg_cron 샘플러) |
+| `monitoring_events` | 전부 (Persona 정보가 없는 인프라 기록. `worker_status`와 같은 기준, 0007) | service_role |
+| `monitoring_alerts` | `persona_id`가 자기 것이거나 null인 행 | service_role. 확인·숨김은 RPC |
+| `monitoring_incidents` | 전부. 단 `impact.affected_personas`는 RPC가 **자기 Persona만 남기고** 돌려준다 (다른 Operator의 Persona ID가 보이지 않게). 테이블 직접 조회는 막는다 | service_role. 확인·해결·사후 기록은 RPC |
+| `monitoring_usage` | 자기 Persona 행 + null 행 | service_role, `record_usage` RPC |
+
+전체 인프라 데이터(GPU, 큐, 서비스)는 모든 Operator가 같은 PC·서버를 공유하므로 함께 본다. admin은 모두 본다.
+
+### 37-A.7 RPC (원안 37-A.47~37-A.49)
+
+원안의 REST API 대신 기존 방식대로 Supabase RPC다 ⚙️.
+
+| 원안 | RPC |
+|---|---|
+| `GET /monitoring/overview` | `get_monitoring_overview()` (시스템 상태, 기능별 가능 여부, 열린 Incident, 큐, GPU 현재 값) |
+| `GET /monitoring/metrics` | `get_metric_series(p_metric_name, p_from, p_to, p_bucket, p_persona_id)` |
+| `GET /monitoring/health` | `get_service_health()` (37.4 서비스 표) |
+| `GET /monitoring/alerts`, `/incidents`, `/incidents/{id}` | 테이블 조회(RLS) / `get_incident_detail(p_id)` (붙은 Alert, 원인 오류·Job 링크, 영향, 같은 기간 `monitoring_events`) |
+| `GET /monitoring/traces/{trace_id}` | `get_trace(p_root_type, p_root_id)` (37.2) |
+| `GET /monitoring/events` | 테이블 조회 |
+| `GET /monitoring/costs` | `get_usage_summary(p_from, p_to, p_persona_id)` (사용량 × 단가) |
+| `POST …/alerts/{id}/acknowledge`, `…/resolve` | `ack_alert(p_id)`, `suppress_alert(p_id, p_until)`. 해결은 자동이라 RPC가 없다 |
+| `POST …/incidents/{id}/acknowledge`, `/resolve` | `ack_incident(p_id)`, `resolve_incident(p_id)`(붙은 Alert도 해결), `update_incident_review(p_id, p_review)` |
+| `POST …/incidents/{id}/mitigate`, `/close` | 없음 (상태 3개, 37-A.4) |
+
+Worker RPC (service_role): `sample_metrics()`, `evaluate_health()`, `record_usage(...)`, `report_workflow_run(...)`.
+
+### 37-A.8 데이터 흐름 (원안 37-A.43)
+
+```text
+브릿지 ──30초──▶ worker_status ──5분──▶ sample_metrics() ──▶ monitoring_metrics
+n8n ──1분──▶ worker_status(n8n), report_workflow_run ──▶ workflow_heartbeats
+Job 실행 ──▶ automation_jobs, execution_logs, system_errors, state_transitions, monitoring_usage
+
+evaluate_health() (1분) 이 위를 읽는다
+  ├─ 서비스·Workflow·감시 상태가 바뀜 ──▶ monitoring_events
+  ├─ 규칙에 걸림 ──▶ monitoring_alerts (중복 제거) ──(high 이상)──▶ monitoring_incidents
+  ├─ 조건이 풀림 15분 ──▶ Alert resolved ──(모두 풀림)──▶ Incident resolved
+  └─ Incident 열림·상승·해결 ──▶ WF-010 (n8n 정지면 pg_net)
+```
+
+**예: GPU OOM** (원안 37-A.44): ComfyUI OOM → 브릿지가 `fail_automation_job(OUT_OF_MEMORY)` → `system_errors`, `state_transitions`(재시도), `monitoring_usage`(쓴 GPU 시간) → 1시간에 2번이면 `evaluate_health`가 `gpu_risk` Alert(`warning`), 15분 10번이면 `error_spike` Alert(`high`) → `generation` Incident → 생성 차단기가 열리면 `monitoring_events` `circuit_state_changed` → 시험 Job 성공 → 차단기 닫힘 이벤트 → 15분 뒤 Alert·Incident `resolved`. 원안과 달리 OOM은 `monitoring_events`가 아니라 `system_errors`에 한 번만 남는다.
+
+**예: 토큰 만료** (원안 37-A.45): `token_expiry` 규칙이 `social_accounts.token_expires_at`을 본다. 7일 `warning`(Alert만), 24시간 `high`(→ `sns:instagram` Incident), 만료 `critical`.
+
+**예: 큐 적체** (원안 37-A.46): `queue_pending_count`(생성) ≥ 20이면 `queue_backlog` `warning`. 최근 6개 샘플(30분)이 계속 늘면 같은 Alert를 `high`로 올리고 `generation` Incident에 붙인다.
+
+### 37-A.9 37장 본문과의 관계
+
+이 장이 정본이고, 37장 본문의 다음 표현은 이 장의 테이블을 뜻한다.
+
+| 37장 | 이 장 |
+|---|---|
+| `health_samples` (37.5·37.10·37.11·37.12) | `monitoring_metrics` (37-A.2) |
+| `incidents` (37.6·37.10·37.13) | `monitoring_alerts` + `monitoring_incidents` (37-A.4). 37.6의 `rule_key`는 Alert의 `dedupe_key`, `occurrences`는 Alert의 칸 |
+| 32.13의 `execution_logs.output_data.usage` | `monitoring_usage` (37-A.5) |
+
+### 37-A.10 작업 목록과 테스트 (V1)
+
+| 영역 | 작업 |
+|---|---|
+| DB | 4개 테이블과 인덱스·RLS, `state_transitions.entity_type`에 `experiment`·`optimization_run`·`strategy_version` 추가(해당 기능 단계에서), `sample_metrics`(5분), `evaluate_health`의 Alert·Incident·Event 쓰기, RPC(37-A.7), 보존 정리(metrics 30일, events 1년) |
+| 브릿지 | `worker_status`에 NVML·psutil 값 (37.5), 생성 완료·실패 시 GPU 시간 전달 |
+| n8n | LLM 하위 Workflow가 `record_usage`, `/v1/health` 응답 시간을 n8n 상태 보고에 포함 |
+| Lovable | `/monitoring`(37.12)이 이 RPC를 쓴다. Incident 상세에 붙은 Alert 목록 |
+
+| 경우 | 기대 |
+|---|---|
+| 샘플러 5분 실행 | 목록의 측정값만 행 생성, 목록 밖 이름은 거부(CHECK·함수) |
+| VRAM 부족으로 OOM 10회 + 실패율 상승 + 큐 적체 | Alert 3개, Incident **1개** (`generation`), 알림 1번 |
+| 같은 `error_spike` 100번 | Alert 1개 `occurrences = 100` |
+| Alert `suppressed` 1시간 | 그동안 알림 없음, 끝나면 조건에 따라 `open` 또는 `resolved` |
+| 브릿지 Online → Offline → Online | `monitoring_events` 2행 (`UP → DOWN`, `DOWN → UP`), 그 사이 매분 행 없음 |
+| Operator X가 Incident 상세 조회 | `impact.affected_personas`에 X의 Persona만 |
+| X가 Y Persona의 `monitoring_usage` 조회 | 0행 |
+| 90일 지난 `execution_logs`의 출력 칸 정리 후 비용 조회 | `monitoring_usage`에서 토큰 수가 그대로 계산됨 |
+| `cost_rates` 단가 변경 | 과거 기간 비용 추정도 새 단가로 |
+
+### 37-A.11 원안 조정
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 테이블 수 | 10개 (MVP 5개) | 4개 (V1) | 같은 정보를 담는 테이블이 이미 있음. 37장과 같은 단계 |
+| `monitoring_metrics` | 모든 수치, 종류·단위 칸 | 그 순간 재야 하는 값만, 이름 목록으로 종류·단위 고정, 샘플러 하나가 씀 | 계산값을 두 곳에 두면 숫자가 어긋남 |
+| `monitoring_health_checks` | 매 확인 결과 저장 | 만들지 않음, 상태 변화만 `monitoring_events` | 정상 행이 대부분, 현재 상태는 `worker_status` |
+| `monitoring_traces`·`_spans` | 새 테이블 | 만들지 않음, `execution_logs` = Span, 뿌리 행 = Trace | 같은 단계를 두 번 기록하지 않음 |
+| `monitoring_events` | 30여 종 이벤트 | 행 없는 대상(서비스·차단기·감시·Workflow)의 상태 변화만. 나머지는 `state_transitions`·`security_events`·`system_errors` | 정본을 하나로 |
+| Alert와 Incident | 두 테이블 + 관계 테이블 | 두 테이블 + `incident_id` FK | Alert는 Incident 하나에만 속함 |
+| Incident 묶음 | Alert 수준·반복 | 원인 서비스(`incident_key`)로 묶음 | 원인 하나 = 장애 하나 |
+| 수준 | Alert 4단계, Incident 4단계 (서로 다름) | 둘 다 `warning`·`high`·`critical` | 척도 변환 규칙이 필요 없게 |
+| Incident 상태 | 6개 | 3개 + `review` (37.6) | 혼자 운영 |
+| `monitoring_costs` | 금액 저장 | `monitoring_usage`, 사용량만, 금액은 단가로 계산 | 32.13, 단가 변경에 대응 |
+| 토큰 기록 위치 | – | `execution_logs` 대신 `monitoring_usage` | `execution_logs` 출력 칸은 90일 뒤 비움 (37.10) |
+| 비용 종류 | 7개 | 사용량 4종, 고정비는 `cost_rates` | 인프라 요금은 사용량이 아님 |
+| `correlation_id` | 모든 테이블 | 두지 않음 | 37.2 |
+| `environment` | dimension | 두지 않음 | 환경이 하나 (19.18), 나누면 프로젝트를 분리 |
+| 집계 | 1분·5분·1시간·1일 | 5분 원본 30일, 1시간·1일은 V2 | 브릿지 30초 보고, 판단은 현재 값 |
+| `monitoring_current_state` | V2 | 만들지 않음 | 계산 함수 |
+| API | REST | RPC, 확인·숨김·해결·사후 기록만 | 기존 방식, 상태 3개 |
+| Incident의 Persona 노출 | RLS | RPC가 자기 Persona만 남김 | 다른 Operator의 Persona ID 노출 방지 |
