@@ -14345,3 +14345,207 @@ Supabase  generation = done, content_jobs = ready, assets = generated ─▶ Rea
 | 수집 재시도 | 5·15·60분 | 수집 Job은 `max_attempts` 4 + 300·900·3600초 (52.4 2번). 나머지 Job은 DB 기본값 | 수집은 장애가 길고 시점이 멀다 |
 | Historical Backfill | 별도 Workflow | 이후 | 연결 뒤 게시물부터 추적 |
 | 다음 단계 | 53 AI Decision Engine Production Implementation | 30·33장 설계 완료, `ai_decisions`(0014, Sprint 4) | 44.8 |
+
+---
+
+## 53. AI Decision Engine Production Implementation — 원안 대응과 실행 ✅
+
+> 원안 53의 Decision Engine(Context → GPT → 검증 → 권한 → 승인 → Job)은 **30장(AI Decision Engine)과 33장(Permission·Safety)이 같은 원안을 이미 반영해 설계해 두었고, 구현은 V2a(Sprint 4, M9)다**: `ai_decisions`·`decision` Job·`record_ai_decisions`는 아직 없다 (30.17). 이 장은 두 장의 대응, 원안과 다르게 두는 결정(상태 이름, Action 목록, LLM이 쓰지 않는 칸, 신뢰도 구간), 원안이 짚어 새로 찾은 빈틈 세 가지, 실행 순서를 정한다. 근거는 30·33장 외에 10.17(테이블), 12.9(출력 스키마), 15.18~15.20(한도·권한·프롬프트 인젝션), 31·32장(팬 응답·자율 루프), 34·35장(실험·최적화), 39.8(자원 정보), 44.8(실행 순서)이다. 원안과 다른 곳은 ⚙️로 표시하고 53.9에 모았다. 원안 53에는 구현 Prompt가 없고 완료 조건(53.46)과 테스트 목록(53.42)뿐이라, 이 장은 그 두 가지를 기존 설계에 대응시킨다.
+
+### 53.1 구현 상태 (원안 53.46)
+
+| 원안 완료 조건 | 상태 | 근거 |
+|---|---|---|
+| `ai_decisions` Production Schema (상태, 버전, `context_hash`, `confidence`, `risk_level`, `evidence`, 멱등, 실행 연결) | 설계 완료 (V2a). 칸 대응은 53.4. **`model`·`prompt_version`·`context_hash`는 Decision이 아니라 Run에 → 53.6 1번** | 30.7, 33.11 |
+| GPT Structured Output, Decision Schema, Context Builder, Evidence, `NO_ACTION`, 모델 설정 | 설계 완료. Prompt 버전 기록은 **53.6 1번** | 30.5, 30.6, 12.9, 39장 `llm_models` |
+| Schema·Policy·Permission·Budget·Rate·Duplicate·Safety Validator | 설계 완료. n8n은 형식·근거(1·2단계), **DB 함수 `record_ai_decisions` 하나가 3~8단계** | 30.8, 33.6 |
+| n8n AI Decision Controller, Approval Router, Content Job 생성, Post 연결, Retry, Error Handler | 설계 완료 (WF-012, `resolve_ai_decision`, `private.execute_ai_decision`). Post는 AI가 만들지 않는다 (53.5) | 30.11, 30.12, 30.15 |
+| Correlation ID | 두지 않음 ⚙️ | 37.2, 53.5 |
+| AI Decision Center, Detail, Evidence·Confidence·Risk, Approval UI, 실행 결과 | 설계 완료 (`/ai-decisions`, Approvals "AI 결정" 탭) | 30.16 |
+| RLS, Persona 격리, Prompt Injection 방어, 비밀값 분리, Fail Closed, Audit, Emergency Stop | 설계 완료 | 33.1, 33.9, 33.10, 33.12, 15.20 |
+| 테스트 (Schema·Injection·Policy·Permission·Duplicate·Budget·Approval·Retry·E2E) | 설계 완료 (30.18, 33.16). 대응은 53.5 마지막 표 | 30.18, 33.16 |
+| 구현 | ❌ 없음 (`ai_decisions` 마이그레이션 0014, Sprint 4) | 44.11, 44.8 |
+
+지금은 **새로 만들 코드가 없다.** 이 장의 보강은 아직 만들지 않은 `ai_decisions`(0014)와 WF-012에 처음부터 넣는다.
+
+### 53.2 상태 대응 (원안 53.3) ⚙️
+
+| 원안 | 현재 (30.8) | 이유 |
+|---|---|---|
+| `GENERATED` | **행으로 두지 않는다.** LLM 출력은 Run Job의 결과이고, Decision 행은 검증 뒤에 생긴다 | `record_ai_decisions`가 3~8단계를 한 트랜잭션으로 한다. 중간 상태의 행이 남으면 "검증 전인데 실행된 것처럼 보이는" 틈이 생긴다 |
+| `VALIDATED` | 없음. 검증을 통과한 Decision은 바로 `pending_approval` 또는 `approved` | 같은 이유 |
+| `PENDING_APPROVAL` | `pending_approval` (+ `approvals` 행, `approval_type = 'decision'`) | 30.12 |
+| `APPROVED` | `approved` | 자동이면 `approval_mode = 'auto'`, 사람이면 `human` |
+| `EXECUTING` | **없음.** 승인되는 순간 같은 함수 안에서 실행한다 | 승인과 실행 사이에 틈이 없다 (30.11, 원안 `/execute` API를 두지 않는 이유) |
+| `SUCCEEDED` | `executed` | 평가(`outcome`)는 `executed`에만 붙는다 |
+| `REJECTED`, `EXPIRED` | `rejected`, `expired` | 같다. 반려·만료한 Decision은 다시 실행하지 않는다 (33.4 #3) |
+| `FAILED` | `failed` (실행 중 한도 도달 등) | |
+| `CANCELLED` | 없음 | Decision을 취소하는 동작이 없다. 승인 전이면 반려, 이미 만든 Agent Content Job은 Content Job을 취소한다 |
+| (원안에 없음) | `invalid`, `blocked`, `duplicate`, `no_action`, `superseded` | 검증에서 걸린 이유를 상태로 구분한다 (정상 판정이라 `system_errors`에 쌓지 않는다) |
+
+### 53.3 Decision 종류·Action 대응 (원안 53.4·53.5) ⚙️
+
+Action 8개와 `decision_type` 10개를 **하나의 Action 목록**으로 합쳤다 (30.3). `decision_type`은 LLM이 고르지 않고 Action에서 DB가 정한다.
+
+| 원안 Action | 현재 | 단계 |
+|---|---|---|
+| `CREATE_CONTENT` (`CONTENT_CREATE`) | `create_content`, `vary_content` | V2a |
+| `SCHEDULE_POST` (`POST_SCHEDULE`) | `schedule_post` — **예약 시각 제안**이고 Post는 만들지 않는다. 시간대(`time:` ref)만 AI가 고르고 정확한 시각은 결정적 함수 `next_publish_slot`이 정한다 | V2b |
+| `UPDATE_STRATEGY` (`CONTENT_STRATEGY`·`OPTIMIZATION`) | `propose_strategy` — 항상 사람 승인 (HIGH) | V2b |
+| `START_EXPERIMENT` (`EXPERIMENT_PROPOSAL`) | `run_experiment` (MEDIUM) | Long-term |
+| `REPLY` (`FAN_REPLY`) | `reply_fan` (31장의 Fan Agent) | V2a (31.2) |
+| `WAIT`, `NO_ACTION` (`NO_ACTION`) | **`no_action` 하나.** "기다림"과 "아무것도 안 함"은 같은 결과다 | V2a |
+| `REQUEST_APPROVAL` | 없음 ⚙️. 승인 여부는 AI가 아니라 시스템이 정한다 (권한 수준 × 위험도, 30.9) | – |
+| `CAPTION_GENERATE` | Decision이 아니다. **Caption Agent(WF-005)**의 `caption_generation.v1` | MVP |
+| `MEMORY_PROPOSAL` | Decision이 아니다. **Memory Agent(WF-014)**의 `fan_memory.v1` (`fan_memories`가 기록) | V2a (31장) |
+| `RESOURCE_ADJUSTMENT` | **없음.** AI는 한도·권한 수준·정책·스위치를 바꾸지 못한다 (33.4 #5, 33.3 `CHANGE_AUTOMATION`). 대신 AI는 Context의 `resources`(39.8)를 보고 `no_action`을 고른다 | – |
+| 금지 Action (`RUN_SHELL`, `EXECUTE_PYTHON`, `CALL_API`, `SEND_HTTP_REQUEST`, `WRITE_FILE`, `DELETE_DATABASE`, `RUN_COMFYUI`, `PUBLISH_ANYTHING`) | **금지 목록을 두지 않는다.** 스키마에 그런 값·칸이 없고(`additionalProperties: false`, Action별 `params` 허용 키), `publish_post`는 Long-term Level 4에서도 사람 승인 범주 안에서만 (33.8) | 30.6, 33.3 |
+
+`schedule_post`가 원안과 다른 점: 원안 53.25는 `Decision → Approval → Post`로 AI가 Post를 만든다. 여기서 Post는 **Content Job → Asset → 캡션 초안(WF-005)** 경로에서만 생기고, AI의 예약 제안은 그 Post의 **게시 승인 요청**(`approvals.proposed_scheduled_at`)에 시각을 채워 둘 뿐이다. AI가 Post를 직접 만드는 경로가 없어서 승인 없는 게시 경로(11.8)를 우회할 수 없다.
+
+### 53.4 출력 형식과 칼럼 대응 (원안 53.6·53.7·53.10) ⚙️
+
+| 원안 | 현재 | 이유 |
+|---|---|---|
+| 한 번에 Decision 1개 | **`decisions` 배열 최대 5개** (`limits.agent.max_decisions_per_run`) | 한 번의 분석에서 여러 결정이 나온다 (30.6) |
+| `decision_type`, `action`, `persona_id`, `platform` (LLM이 채움) | `action`, `target_ref`, `params`(`platform` 포함)만 LLM이 채운다. `persona_id`는 Run에서, `decision_type`은 Action에서 | LLM이 남의 Persona ID를 쓸 수 없다 (36.1) |
+| `content_type: "VIDEO"`, `action_parameters` | `params.content_type: "image"`, Action별 허용 키 (`create_content`: `content_type`·`topic_category`·`visual_style`·`topic`·`platform`·`variants`·(선택)`workflow`). 다른 키가 있으면 그 Decision은 `invalid` | 30.6, 53.3. V1·V2a는 이미지만 게시 (28.9) |
+| `prompt_strategy` | **없음.** 프롬프트는 Content Job이 만들어진 뒤 WF-002가 Persona Context로 만든다 | 프롬프트 규칙·검증을 한 곳에 (12.9 `prompt_generation.v1`) |
+| `schedule_window` (자유 값) | `schedule_post`의 `window_ref`(`time:evening` 같은 Context ref) | 값이 Context 안에서만 나온다 |
+| `evidence: [{metric, baseline, observed, sample_size}]` — **LLM이 수치를 씀** | **LLM은 `evidence_refs`만** 낸다 (예 `["topic:fashion"]`). 수치(표본 수, 중앙값, 기준선, `delta_pct`)는 검증기가 Context에서 찾아 `ai_decisions.evidence`에 복사한다. 문장 칸(`reasoning_summary`)에는 숫자를 쓸 수 없다 | 29.15, 30.6. 원안 53.7의 "데이터 기반으로 판단"을 **숫자를 LLM이 만들 수 없게** 구현한다 |
+| `confidence` 0~1 | 같다 (CHECK 0~1). 구간은 53.5 | 30.7 |
+| `risk_level`, `requires_approval`, `expires_at` (**LLM이 씀**) | **LLM은 이 세 칸을 내지 않는다 ⚙️.** `risk_level`은 `private.evaluate_risk`(Action 기본값 + 상향 요인, 33.3), 승인 여부는 권한 수준 × 위험도 × 자동 조건(30.9), 만료는 시스템이 정한다 (53.6 3번) | LLM이 "LOW, 승인 불필요"라고 써서 통과하는 경로를 없앤다. Confidence ≠ Permission |
+| `user_id` | 없음. Persona 경유 | 10.21 |
+| `decision_version`, `prompt_version`, `model` | **Run(`decision` Job)의 `payload`에** 둔다 → **53.6 1번**. 스키마 버전은 출력의 `schema_version`(`ai_decision.v1`) | Run 하나에 Decision이 여러 개라 Decision마다 반복하지 않는다 |
+| `input_context`, `context_hash` | Run의 `payload.context`와 `payload.context_hash` (Decision 행에는 쓴 근거 `evidence`만) | 30.7. 해시는 **53.6 2번** |
+| `decision` (JSON 전체), `reasoning_summary`, `evidence` | `action`·`target_ref`·`params`(칸으로 풀어서), `reasoning_summary`(500자 이하, 숫자 없음), `evidence`(검증기가 복사한 값) | 30.7 |
+| `risk_level` `LOW·MEDIUM·HIGH·CRITICAL` | `low·medium·high·critical` + `risk_factors`(걸린 상향 요인) | 33.11 |
+| `requires_approval`, `approval_id` | `approval_mode`(`auto`·`human`), `approvals.ai_decision_id` FK. 칸 하나로 접히지 않는다 | 30.12 |
+| `status`, `result` | `status`(53.2), `status_reason`, `result`(만든 Content Job ID들·오류), `outcome`·`outcome_detail`(결과 평가, 30.11) | 30.7 |
+| `idempotency_key` | `decision_key` (24시간 안 중복) + Run의 멱등 키 `decision:{persona_id}:{platform}:daily:{날짜}` | 30.4, 30.10 |
+| `executed_at`, `expires_at` | 실행은 `state_transitions`(`approved → executed` 시각), 만료는 `approvals.expires_at` | 11.14. 같은 시각을 두 칸에 두지 않는다 |
+| `correlation_id` | 없음. Decision → `result.content_job_ids` → Content Job(`ai_decision_id`) → Asset → Post | 37.2, 30.14 |
+| `execution_job_id`, `content_job_id`, `post_id` | `content_jobs.ai_decision_id` FK가 거꾸로 이어 준다. Decision 쪽에는 `result`에 ID 목록 | 30.7 |
+| `error_code` | `status_reason`(이유 코드) | 30.8 |
+| (원안에 없음) | `agent`, `permission`(33.6 판정), `policy_version`, `risk_factors`, `target_ref`, `priority`(1~10, Agent Job 상한 6), `expected_outcome`, `run_job_id` | 33.11, 30.7 |
+
+원안 53.11의 **Chain-of-Thought를 저장하지 않는다**는 같다 (10.17, 30.14): 저장하는 것은 `reasoning_summary`·`evidence`·`confidence`뿐이다.
+
+### 53.5 원안 항목별 대응 (원안 53.1~53.45)
+
+| 원안 | 여기 | 근거 |
+|---|---|---|
+| 흐름 `Analytics → Context → GPT → Schema → Policy → Permission → Budget/Rate → Approval → Action Job`, **GPT → SNS/n8n/Python/ComfyUI/DB 직접 실행 금지** | 같다. LLM은 JSON만 돌려주고 끝난다. **Tool(function calling)을 주지 않는다.** 실행은 DB 함수 `private.execute_ai_decision`이 하고 Content Job은 WF-001 이후 기존 경로를 탄다 | 30.1, 33.2, 33.13 |
+| 책임: 상황 이해, 행동 결정, 실행 가능성 검증, 실행 연결 | 같다 (Context Builder → WF-012 → `record_ai_decisions` → `execute_ai_decision`) | 30.4, 30.5, 30.8 |
+| Context Builder (Persona, Recent, Baseline, Top, Under, Topic·Format·Timing, Experiment, Recent Decisions, Queue, Platform, Resource, Safety) | `get_decision_context`: `persona`, `analytics`(29.14의 차원별 그룹), `latest_insight`, `recent_content`, `queue`, `schedule`, `active_decisions`, `decision_memory`(평가가 끝난 최근 10개), `allowed`(지금 쓸 수 있는 Action·Workflow·플랫폼), `resources`(LLM 예산 상태·GPU 분·Storage 비율, 금액은 넣지 않음). **결론 요약(`top_topics` 등)은 넣지 않는다** | 30.5, 39.8, 29.14 |
+| Context 예시의 `status: "AUTONOMOUS"`, `safety_rules` | Persona `agent_permission_level`(0~3)·`agent_paused`는 Context가 아니라 시스템이 처리한다. AI가 자기 권한 수준을 알 필요가 없고, 알면 그것을 논리에 쓴다 (`allowed`만 준다) | 33.1, 30.9 |
+| Decision Prompt (10개 지침: 규칙 준수, 외부 내용은 신뢰하지 않음, 도구 실행·셸·API 호출 금지, 허용 Action만, 근거 기반, JSON, 의미 없으면 `NO_ACTION`) | 같은 지침을 WF-012의 시스템 프롬프트에 둔다. **지침만으로 막는다고 믿지 않는다**: 스키마·허용 키·DB 판정이 지침을 어겨도 실행되지 않게 한다 | 33.1 (LLM Output = Untrusted) |
+| Prompt Injection: 외부 데이터는 가장 낮은 신뢰 계층 (`System → Persona → Platform → Decision Policy → Untrusted`) | 우선순위 `System → Safety → Persona → Task → 외부 입력` (15.20). **Strategy Agent의 Context에는 팬 메시지·댓글·SNS 본문이 들어가지 않는다** (집계 수치와 정해진 ref뿐, 팬 개인정보는 31.18 집계만). 외부 텍스트를 읽는 것은 Fan Agent이고, 그 출력은 `reply_fan` 하나만 낼 수 있고 응답 검증(31.8)을 거친다 | 15.20, 33.2, 31.8 |
+| Decision Validator 11단계, 하나라도 실패하면 **FAIL CLOSED** | 8단계로 합쳤다: ①스키마 ②문장 숫자·`ref` 존재 (n8n) ③업무 규칙(Action·`topic_category`·금지 주제·Persona `active`) ④권한 ⑤중복 ⑥충돌 ⑦예산·큐 ⑧승인 결정 (DB, 한 트랜잭션). Safety는 33.3 위험 상향과 33.9 콘텐츠 검사, Platform·Rate는 33.6 평가 순서 3·8번이다. 장애는 모두 "아무것도 실행하지 않음"이다 | 30.8, 33.6, 33.12 |
+| 스키마 위반 예 (`DELETE_ACCOUNT`, `confidence = 3.5`, `risk_level = "SUPER_HIGH"`) | 목록에 없는 Action·범위 밖 값은 Run 전체 `LLM_OUTPUT_INVALID`(1회 재시도 후 `failed`). `risk_level`은 LLM이 내지 않는다 | 30.8, 30.13 |
+| Action Parameter Allowlist (`shell_command`·`file_path`·`api_url`·`access_token`·`workflow_json`·`python_code` 금지) | 같다. Action별 허용 키 표 밖의 키는 `invalid`. 그런 칸이 **스키마에 없다** | 30.6, 20.19 |
+| Decision Stability: `persona + decision_type + context_hash`로 중복 Decision 방지 | 두 겹이다. ① 결과 단위: `decision_key = {action}:{target_ref}:{핵심 params}`가 24시간 안에 `pending_approval`·`approved`·`executed`로 있으면 `duplicate` ② 입력 단위: **`context_hash`로 LLM 호출 자체를 건너뜀 → 53.6 2번** | 30.10, 53.6 |
+| Context Hash (canonical JSON → SHA-256) | `get_decision_context`가 DB에서 `jsonb`를 문자열로 만들어 해시한다 (`jsonb`의 키 순서는 고정). 시각 값은 빼고 계산 → **53.6 2번** | 53.6 |
+| Decision TTL (`CONTENT_CREATE` 6시간, `POST_SCHEDULE` 2시간, `FAN_REPLY` 5분, 실험 24시간) | **승인 대기 72시간 하나**(11.10, 33.7)이고, 팬 응답은 응답 창 마감(31.3). 72시간은 AI의 근거(어제 분석)가 낡기에 길다 → **Action별 TTL, 53.6 3번** | 30.12, 33.7 |
+| Autonomy Level L0~L5 (Manual, Recommendation, Draft, Low Risk Autonomous, Policy-Bounded, Bounded Full) | **0 Observe · 1 Recommend · 2 Create Content · 3 Generate+Schedule · 4 Generate+Publish · 5 Full Autonomous**. 원안 L2(Draft)·L3(저위험 자동)가 여기서는 2(Content Job 자동 생성, 게시는 승인)다. V2a 상한 2, V2b 3, 4·5는 Long-term. **Emergency Stop·하한·예산·Rate·Safety는 어떤 수준에서도 유지** | 15.19, 30.2, 33.4 |
+| Confidence `0.4/0.7/0.9` 4구간 (`VERY_HIGH` 포함), **Confidence ≠ Permission** | **Confidence ≥ 0.8 High / 0.6~0.8 Medium / < 0.6 Low** 3구간 ⚙️. 29.12와 기준을 하나로 맞췄다. 화면은 AI Confidence와 **근거의 표본 수준 중 낮은 쪽**을 보여 준다. Confidence ≠ Permission은 같다: 자동 승인은 Confidence 0.8 이상 **그리고** 표본 보통 이상 **그리고** \|`delta_pct`\| ≥ 20% **그리고** 충돌 없음이다. HIGH·CRITICAL은 Confidence가 0.99여도 자동 승인하지 않는다 (33.4 #2) | 30.9, 29.12 |
+| Risk Level 4단계와 예시 (CRITICAL은 자동 실행 금지) | 같은 4단계. **Action 이름만으로 정하지 않고** 상향 요인(민감 주제·광고·플랫폼 정책 위반 이력)을 본다. CRITICAL은 Action이 아니라 팬 대화의 위험 등급으로만 있고 자동 실행이 없다. 원안 예의 일부(일반 게시 예약 = MEDIUM, 대량 게시)는 Action 목록에 없다 | 33.3 |
+| Approval Router: `PENDING_APPROVAL → APPROVED/REJECTED`, 승인 뒤에만 Action Job | 기존 `approvals`에 `decision` 유형. `resolve_ai_decision`이 승인하면 **같은 함수 안에서** 실행한다. **수정 후 승인은 없다.** 반려하고 Operator가 직접 Create Content를 쓴다 (원안 53.35와 같음) | 30.12 |
+| AI → Content Job (`created_by: "AI_DECISION"`, `status: "PENDING"`) | `content_jobs`: `source = 'agent'`, `ai_decision_id`, `status = 'queued'`, `priority = min(priority, 6)`. 이후는 WF-001 | 30.11 |
+| AI → Post (`SCHEDULE_POST → Approval → Post`) | 53.3. AI는 Post를 만들지 않는다 | 30.11, 11.8 |
+| Decision Controller `[PA] 012 - AI Decision Controller` | **WF-012 AI Strategy Runner** (번호가 같다). 트리거 DB Webhook(`decision` Job)·매일 09:00·안전망, `claim_automation_job(decision)` → `agent_enabled`·권한 수준 확인 → `get_decision_context` → `[PA] LLM - Structured Call` → 1·2단계 검증 → `record_ai_decisions` → `complete_automation_job`. Decision Run은 별도 테이블 없이 `automation_jobs`의 `decision` Job | 30.15, 30.4 |
+| 실행 주기 (전략 6~12시간, 콘텐츠 1~6시간, 예약 1시간 …), Fan은 Event | **매일 1회(09:00) + 수동 [AI 전략 실행]**, Persona당 하루 3회·이벤트 6시간에 1회 상한. 이벤트 3종(`VIRAL_DETECTED`·`UNDERPERFORMANCE`·`QUEUE_EMPTY`)은 Long-term WF-015. 팬 응답은 이벤트 구동 (31장) | 30.4, 32.2 |
+| Decision Cooldown (전략·최적화 12시간, 실험 24시간) | 정책 `cooldown_hours`: `create_content`·`vary_content` 24시간, **`propose_strategy` 336시간(14일)**. 짧은 시간에 전략을 뒤집는 문제는 14일 냉각으로 막는다 | 33.5, 32.5 |
+| Decision Budget (하루 콘텐츠 10·게시 5·실험 1·LLM 100) | `limits.agent`: Agent Content Job 하루 10, 생성 이미지 하루 50, Persona당 큐 3, **AI 전용 LLM 호출 하루 50**(전체 한도와 분리해 AI가 기본 시스템을 막지 못하게), 자동 승인 100, Run당 Decision 5. **AI는 게시하지 않으므로 "하루 게시"는 AI 한도가 아니다.** 한도에 걸리면 우선순위 순으로 통과하고 나머지는 `blocked`(`RATE_LIMITED`). 원안의 "`NO_ACTION` 또는 `REQUEST_APPROVAL`로 처리"는 `blocked`와 승인 대기로 대응 | 30.10, 15.18 |
+| Resource-aware (GPU Queue·Availability, 하루 남은 콘텐츠, LLM 예산, Storage) | Context `resources`·`queue`. Worker가 Offline이면 `create_content`를 자동 승인하지 않고 승인 대기. 상태가 `limit_reached` 이상이면 "콘텐츠 생성 Decision은 승인 대기가 된다"를 Context로 알려 `no_action`을 고르게 한다 | 39.8, 30.10 |
+| `NO_ACTION` 전략 (데이터 부족, 최근과 동일, 큐 과다, 예산 부족, 변화 없음, 실험 중, Persona PAUSED, 위험 불확실, 승인 미완료) | `no_action`은 정상 종료 상태다. 기준선 없음·데이터 오래됨은 **LLM을 부르지 않고** Run `done`("데이터 부족"). `agent_paused`·권한 수준 0·`agent_enabled = false`면 Run 자체를 만들지 않는다 | 30.5, 30.4, 33.10 |
+| API `POST /ai/decisions/evaluate`, `GET /ai/decisions`, `GET …/{id}`, `POST …/approve`·`reject`·`execute` | Supabase RPC: `request_decision_run`, `ai_decisions` 조회(RLS), `get_ai_decision_detail`, `resolve_ai_decision(approve·reject)`. **`execute` 없음** (승인 = 실행). 별도 REST API를 만들지 않는다 | 30.15 |
+| Frontend `/ai-decisions` (필터·목록), Detail, Approval UI (Raw JSON 편집 불가) | 같다. 필터 Persona·상태·Action·기간(Risk 필터는 두지 않는다 — Action이 위험도를 거의 정한다), Detail은 결정·왜·근거·신뢰도·제안 내용·검증·승인·실행·결과 순서. 충돌한 Decision은 나란히 | 30.16 |
+| `aiDecisionRepository.ts`, Hook 5개 | **Repository 층을 두지 않는다 ⚙️.** Hook이 Supabase를 부르고(`ai_decisions` 읽기, RPC mutation). `createDecision`·`executeDecision`은 Frontend에 없다 (LLM·실행은 서버에서만) | 18.7, 30.15 |
+| Security: LLM Output = Untrusted, Prompt에 비밀값 금지, SNS Token은 Context에서 제외 | 같다. 모든 Context RPC는 칸을 명시해 고르고(`select *` 금지) Vault를 읽지 않으며, LLM에 보내기 직전에 `private.redact_jsonb`를 한 번 더 적용한다. **AI는 자격 증명이 하나도 없다** | 33.9, 33.1 |
+| RLS (`auth.uid() = user_id`) | Persona 경유. Operator는 자기 Persona의 `ai_decisions`를 **읽기만** 한다. 상태 변경은 RPC만 (11.12). 쓰기는 `service_role`의 `record_ai_decisions`뿐 | 30.7, 0005 패턴 |
+| Logging: Context Build·GPT Call·Schema·Policy·Permission·Approval·Action·Execution·Result를 `correlation_id`로 연결 | 두지 않는다. 연결은 Run Job → `execution_logs`(`LLM` 단계에 모델·토큰, `execution_ref`) → `ai_decisions.run_job_id` → `result.content_job_ids` → Content Job → Asset → Post. 판정 결과는 `permission`·`policy_version`·`risk_factors`, 상태 변화는 `state_transitions` | 30.14, 33.11 |
+| Error 13개 (`AI_INVALID_JSON` … `AI_SAFETY_BLOCKED`), Unknown → FAIL CLOSED | Run 단위: `LLM_OUTPUT_INVALID`(JSON·스키마, 1회 재시도), `TIMEOUT`·`TEMPORARY_API_ERROR`·`RATE_LIMIT`(재시도). Decision 단위(재시도 없음): `invalid`(`AI_DECISION_INVALID`), `blocked`(`PERMISSION_DENIED`·`RATE_LIMITED`), `duplicate`. 원안의 `AI_SAFETY_BLOCKED`는 33.3 위험 상향 → 승인 대기 | 30.13, 33.12 |
+| Retry (30초·2분·5분), Invalid JSON·정책 위반·미지원 Action·안전 위반은 재시도 안 함 | 일시 오류는 DB 기본 재시도(20.11). **JSON 형식 오류만 1회 재시도**한다 (어디가 틀렸는지 알려 주고 다시 받음, 같은 오류가 반복되면 `failed`). 정책·권한·미지원 Action·안전은 Decision을 `invalid`·`blocked`로 끝내고 다시 묻지 않는다. 원안의 "JSON 오류도 재시도 안 함"보다 한 번의 기회를 준다 | 30.13, 20.11 |
+| 테스트 (Schema, Security, Policy, Stability, Resource, Approval, Reliability, Tenant) | 아래 표 | 30.18, 33.16 |
+| E2E `Metrics → Analytics → Context → GPT → Decision → 검증 → 승인 → Content Job → Asset`, Lineage 추적 | 30.18 E2E: 시드 게시물 20개 + 24h Snapshot → 분석 → [AI 전략 실행] → 승인 → Content Job(`source = 'agent'`) → 생성 → 게시 승인 → 24h 수집 → `evaluate_ai_decisions` → 다음 Run의 `decision_memory`. 추적: `ai_decisions → content_jobs.ai_decision_id → assets → posts` | 30.18, 30.14 |
+| Autonomous Decision Loop 연결 (Observe → Analyze → Decide → Execute → Measure → Learn) | 32장. Learn = 결과 평가(`outcome`: 같은 Persona 기준선 대비 24h 비율, **인과 효과가 아님을 화면에 명시**)와 실험(34장) | 32.1, 30.11 |
+| 최종 AI Layer 구조 | 같다 | 30.1, 32.1 |
+| "GPT는 실행자가 아니라 의사결정자", Decision ≠ Permission ≠ Execution | 같다. 33.1이 같은 문장으로 시작한다 | 33.1 |
+
+**원안 53.42의 테스트 대응**
+
+| 원안 | 30.18·33.16에 있는 것 | 없는 것 |
+|---|---|---|
+| Schema (Valid·Invalid JSON, 필드 누락, enum, confidence) | 잘못된 JSON·빠진 칸, 허용 안 된 `params` 키 | – |
+| Security (Prompt·Tool Injection, 비밀값 추출, 미지원 명령) | 목록에 없는 Action, 허용 안 된 `params` 키, `redact_jsonb`, Fan Agent 출력에 `create_content`, 응답에 송금·링크 요구. 인젝션은 **모델 행동이 아니라 검증기·DB가 막는지**를 검증한다: 가짜 LLM이 악성 JSON(`shell_command` 키, 남의 `persona_id`, `risk_level: "low"`)을 돌려줘도 실행되지 않음 | **`risk_level`·`requires_approval`을 LLM이 쓰면 무시/거부** (53.4에서 이 칸을 없앴으므로 테스트로 고정) |
+| Policy (PAUSED, Emergency Stop, 금지 콘텐츠, High Risk) | 전역 정지 중 `EMERGENCY_BLOCK`, 민감 주제 HIGH 상향, Level 3의 `publish_post` `DENY`, 하한 위반 정책 저장 거부 | – |
+| Stability (중복 Context·Decision, 만료, Cooldown) | 같은 날 매일 실행 두 번(Job 1개), 24시간 `decision_key` 중복, 승인 대기 72시간 `expired`, 반려 Decision 재실행 `DENY` | 같은 Context로 LLM 호출 생략, Action별 TTL → **53.6** |
+| Resource (예산, GPU 큐, 게시 한도, LLM 한도) | `create_content` 20개 한도, `max_queued` 초과·Worker Offline, AI 전용 LLM 한도, `agent_enabled = false` | – |
+| Approval (필요, 승인, 반려, 만료) | Level 1·Confidence 0.4 승인 대기, 승인 → Content Job, 만료 | – |
+| Reliability (타임아웃, 5xx, 깨진 응답, 네트워크) | LLM 타임아웃·제공자 오류 → 재시도 후 `failed`, Operator의 Content Job은 정상 | – |
+| Tenant Isolation (사용자 A → B, Persona A → B) | 다른 Persona의 ID → `invalid` | **다른 계정의 `ai_decisions` 직접 select 0행·직접 쓰기 거부** — 50.5·51.5·52.4와 같은 접근 테스트를 0014에 더한다 |
+
+### 53.6 보강 ⚙️
+
+원안이 짚은 것 중 30·33장에 빠졌거나 약한 세 가지다. 모두 아직 만들지 않은 `ai_decisions`(0014)와 WF-012에 처음부터 넣으므로 **지금 할 일은 없다.** 구현 때 놓치지 않도록 30.17 작업 목록의 항목으로 더한다.
+
+| # | 항목 | 지금 설계 | 바꿀 곳 | 테스트 |
+|---|---|---|---|---|
+| 1 | **Run에 `model`·`prompt_version`·`schema_version` 기록** (원안 53.10·53.46 "Prompt Versioning, Model Configuration") | 정책은 `policy_version`으로 재현된다 (33.5). 그런데 **같은 Decision을 낸 프롬프트와 모델**은 어디에도 남지 않는다. 모델은 `execution_logs`의 `LLM` 단계에 있지만 프롬프트는 n8n Workflow JSON 안에 있어서, 프롬프트를 고친 뒤에는 "이 Decision은 어떤 지침으로 나왔나"를 알 수 없다. 평가(`outcome`)를 쌓아도 프롬프트 변경의 영향을 가를 수 없다 | WF-012가 LLM을 부르기 전에 Run Job `payload`에 `prompt_version`(Workflow 안의 상수, 예 `strategy.2026-10-a`. 프롬프트를 고칠 때 올린다), `model`(`llm_models`에서 읽은 값), `schema_version`(`ai_decision.v1`)을 기록한다. `get_ai_decision_detail`이 이를 함께 돌려주고, Detail의 "제안 내용" 아래에 작게 보여 준다. 새 칸은 없다 (Decision마다 반복하지 않는다) | Run 완료 뒤 `payload`에 세 값이 있음, 프롬프트 상수를 바꾸면 다음 Run의 `prompt_version`이 바뀜 |
+| 2 | **같은 입력이면 LLM을 부르지 않는다** (원안 53.19·53.20 `context_hash`) | 중복은 결과 단위(`decision_key`)로만 막는다. 입력이 달라지지 않았는데도 [AI 전략 실행]을 다시 누르거나(수동) Long-term의 이벤트 Run(6시간 간격)이 돌면 LLM을 한 번 더 부르고, 결과가 `duplicate`로 버려진다. 호출 한도(`daily_llm_calls` 50)와 비용만 쓴다 | `get_decision_context`가 `context_hash`를 함께 돌려준다: Context에서 **`data_as_of`·`period`·생성 시각 같은 시각 값을 뺀** `jsonb`를 문자열로 만들어 SHA-256 (jsonb는 키 순서가 고정이라 같은 내용이면 같은 문자열). Run `payload`에 `context_hash`를 저장하고, 같은 Persona·플랫폼의 **가장 최근 `done` Run**의 해시와 같고 그 Run이 `agent.context_unchanged_hours`(기본 24시간) 안이면 LLM을 부르지 않고 Run을 `done`(사유 "변화 없음")으로 끝낸다. 직전 Run이 `failed`였으면 건너뛰지 않는다 | 같은 Context로 두 번째 Run → LLM 호출 0회·`done`, 시각만 다르면 건너뜀, 지표가 바뀌면 호출, 직전 Run `failed`면 호출 |
+| 3 | **Action별 만료 시간 (TTL)과 중복 판정의 정합** (원안 53.21) | 승인 대기는 모든 Action이 72시간이다 (11.10·33.7). 어제의 분석으로 만든 `create_content`가 사흘 뒤에 승인되면 그 사이 큐·기준선·전략이 바뀐 상태로 실행된다. 또 `decision_key` 중복 창은 24시간인데 승인 대기는 72시간이라, **24시간이 지나면 같은 키의 새 Decision이 또 만들어져 낡은 것과 새 것이 함께 승인 대기**가 된다 | 정책 문서(33.5)의 Action마다 **`ttl_hours`**를 둔다 (기본 72): `create_content`·`vary_content`·`pause_content` 24, `schedule_post` 6, `run_experiment` 48, `propose_strategy` 72 (냉각 14일은 별개). 승인 행의 `expires_at`을 이 값으로 정하고 `expire_approvals`(5분)가 그대로 만료시킨다. **중복 판정은 시간과 상관없이 "아직 만료되지 않은 `pending_approval`·`approved`"를 같은 키로 본다** (`executed`·`rejected`는 24시간). 팬 응답은 지금처럼 응답 창 마감 (31.3). 하한은 두지 않는다 (TTL을 줄이는 것은 항상 안전하다) | `create_content` 24시간 방치 → `expired`·실행 없음, 낡은 Decision이 대기 중이면 같은 키의 새 Decision은 `duplicate`, 만료 뒤에는 새로 생성 |
+
+- **원안 53.10의 `executed_at`·`expires_at`**: 새 칸을 만들지 않는다. 실행 시각은 `state_transitions`, 만료 시각은 `approvals.expires_at`이다 (53.4).
+- **원안 53.24의 Content Job `status: "PENDING"`**: 실제 상태는 `queued`다 (11.3). `created_by`는 `source = 'agent'`와 `ai_decision_id`로 대응한다.
+
+### 53.7 실행 순서 (44.8)
+
+| # | 할 일 | 누가 | 통과 |
+|---|---|---|---|
+| 1 | Sprint 3 완료: 게시물 20개 이상 + 24h Snapshot이 쌓여 기준선이 생긴다 (G3 관문, 주 7개 게시 4주 연속). 데이터가 없으면 Run은 "데이터 부족"으로 끝난다 | 사람 | 52.5, 44.4 |
+| 2 | **Sprint 4 (M9)**: `ai_decisions` 마이그레이션(`ai_decisions`, `content_jobs.ai_decision_id`, `decision` job_type·부모 제약 예외, `approvals.ai_decision_id`·`decision` 유형, `personas.agent_permission_level`, `app_settings.agent`·`limits.agent`, `agent_policy_versions`, `request_decision_run`·`resolve_ai_decision`·`get_ai_decision_detail`·`get_decision_context`·`record_ai_decisions`·`private.execute_ai_decision`·`evaluate_ai_decisions`, `performance_analyses`·`get_analytics_context`). **53.6 1~3번 반영** | Claude Code | 30.17 V2a, 33.16 V2a |
+| 3 | WF-011(분석), WF-012(결정), `ai_decision.v1` 검증기, 가짜 LLM(고정 JSON)으로 먼저. 가짜 LLM에 악성 출력 세트를 넣어 53.5의 보안 테스트 | Claude Code | 30.18 실패 표 |
+| 4 | Lovable: `/ai-decisions`, Detail, Approvals "AI 결정" 탭, AI 긴급 정지, Persona AI 권한 수준, `/ai-activity` | 사람 + Lovable | 30.16 |
+| 5 | 권한 수준 **1(Recommend: 전부 승인 대기)** 로 시작, 실제 LLM, 첫 결정 → 승인 → Content Job → 생성 → 게시 → 평가까지 한 바퀴 (E2E) | 사람 | 30.18 E2E, 44.8 |
+| 6 | 안정되면 Operator가 **2(Content Job 자동 생성, 게시는 승인)** 로 올린다. 3 이상은 V2b 이후 | 사람 | 30.2, 32.10 |
+
+**한 번도 AI가 게시하지 않는다**는 점이 V2a의 안전 조건이다. 권한 수준 2에서도 AI가 하는 것은 Content Job을 만드는 것까지이고, 게시는 항상 사람의 Post 승인이다 (28.13, 33.4).
+
+### 53.8 완료 판단
+
+| 항목 | 상태 |
+|---|---|
+| 설계: Context, 출력 스키마, 검증 순서, 권한×위험도, 정책 버전, 하한, 정지, Fail Closed, 평가, 화면, 테스트 | ✅ (30·33장) |
+| 53.6 1~3번을 30.17 작업 목록에 반영 | ❌ (0014 만들기 전에) |
+| `ai_decisions`·WF-012·`/ai-decisions`·권한 수준 1 E2E | ❌ Sprint 4 |
+| 권한 수준 2 이상, 일정·전략 제안, 실험, 이벤트 Run | ❌ V2b·Long-term |
+
+원안 53.47의 결론("GPT는 실행자가 아니라 의사결정자이고 `Decision ≠ Permission ≠ Execution`")에 동의한다. 이 시스템에서 그 세 칸은 **LLM이 쓰는 JSON → DB 판정(`record_ai_decisions`) → 승인 후 `execute_ai_decision`**으로 서로 다른 주체가 맡는다. LLM이 권한과 위험도, 승인 여부, 만료까지 쓰지 못하게 한 것(53.4)이 그 분리를 구조로 만든다.
+
+### 53.9 원안 조정
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 이 장의 성격 | 새 구현 명세 (구현 Prompt 없음) | 설계된 Decision Engine의 대응·빈틈·실행 순서 | 30·33장이 같은 원안을 이미 반영, 구현은 V2a |
+| 상태 | 10개 (`GENERATED`·`VALIDATED`·`EXECUTING` 포함) | 11개 (`invalid`·`blocked`·`duplicate`·`no_action`·`superseded` 포함, 앞의 셋은 없음) | 검증과 실행이 한 트랜잭션이라 중간 상태가 남지 않는다 |
+| Action | 8개 + Decision Type 10개 | Action 8개 한 목록 (`no_action`이 `WAIT` 포함, `REQUEST_APPROVAL` 없음), `decision_type`은 Action에서 계산 | 같은 정보를 두 칸에 두지 않음 |
+| Caption·Memory·Resource Decision | Decision Type | Caption Agent(WF-005), Memory Agent(WF-014), Resource는 AI가 못 바꿈 | 33.2, 33.4 |
+| 출력 | Decision 1개, LLM이 `risk_level`·`requires_approval`·`expires_at`·수치 `evidence`를 씀 | `decisions[]` 5개, LLM은 `action`·`target_ref`·`params`·`priority`·`confidence`·`reasoning_summary`·`evidence_refs`·`expected_outcome`만 | LLM이 권한·위험을 쓰지 않게, 숫자를 만들지 않게 |
+| `prompt_strategy` | 있음 | 없음 | 프롬프트는 WF-002 |
+| Confidence 구간 | 4구간 (0.4·0.7·0.9) | 3구간 (0.6·0.8), 29.12와 통일 | 기준 하나 |
+| Decision TTL | 6시간·2시간·5분·24시간 | Action별 `ttl_hours`(기본 72, `create_content` 24 등) | 53.6 3번, 일 단위 루프에 맞춤 |
+| 중복 방지 | `persona + type + context_hash` | `decision_key`(결과) + `context_hash`(LLM 호출 생략) | 53.6 2번 |
+| Autonomy Level 이름 | L0 Manual ~ L5 Bounded Full | 0 Observe ~ 5 Full Autonomous | 15.19, PRD 8.10 |
+| Controller | `[PA] 012 - AI Decision Controller` | WF-012 AI Strategy Runner | 번호 일치, 이름만 |
+| 실행 주기 | 전략 6~12시간 등 | 매일 1회 + 수동, 이벤트는 Long-term | 30.4 |
+| 예산 | 하루 콘텐츠 10·게시 5·실험 1·LLM 100 | Agent Job 10·이미지 50·큐 3·AI LLM 50·자동 승인 100·Run당 5 | AI는 게시하지 않음, 공용 한도 보호 |
+| Post 연결 | AI가 Post 생성 | AI는 예약 시각 제안만 | 승인 없는 게시 경로 차단 |
+| API | REST 6개 (`execute` 포함) | RPC (`execute` 없음) | 승인 = 실행 |
+| Repository 층, Hook 5개 | 있음 | Hook이 Supabase를 부름 | 18.7 |
+| 저장 칸 | `user_id`, `decision_version`, `prompt_version`, `model`, `input_context`, `context_hash`, `executed_at`, `expires_at`, `correlation_id`, `execution_job_id`, `content_job_id`, `post_id`, `error_code` | 대부분 Run·`approvals`·`state_transitions`·FK로 대체. `prompt_version`·`model`·`context_hash`는 Run `payload` (53.6 1·2번) | 같은 정보를 두 곳에 두지 않음 |
+| Logging | `correlation_id`로 9단계 연결 | Run Job → `execution_logs` → `ai_decisions` → Content Job FK | 37.2 |
+| JSON 오류 재시도 | 안 함 | 1회 (오류를 알려 주고 다시 받음) | 한 번의 형식 실수로 하루 Run이 사라지지 않게 |
+| Cooldown | 12시간·24시간 | 정책 `cooldown_hours`(24시간), 전략 제안은 14일 | 32.5 |
+| 보강 | – | `model`·`prompt_version` 기록, `context_hash`로 LLM 호출 생략, Action별 TTL (53.6) | 원안이 짚음 |
+| 다음 단계 | Fan Interaction → Autonomous Controller → Self Optimization → Multi-Persona (원안은 번호를 정하지 않음) | 31·32·35·36장(설계 완료), `fan`(0015, Sprint 5)부터 | 44.8, 44.9 |
