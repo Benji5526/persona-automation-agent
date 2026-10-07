@@ -14002,3 +14002,180 @@ Supabase  generation = done, content_jobs = ready, assets = generated ─▶ Rea
 | Index 6개 | 6개 | `(persona_id, created_at desc)` 하나 (+ V1 `sha256`) | `user_id` 칸 없음, 쓰지 않는 index는 쓰기만 느림 |
 | 오류 코드 | 10개 | 13.12·47.3 코드 | 구현된 이름, RLS는 존재를 알리지 않음 |
 | 다음 단계 | 51 Post & SNS Publishing | 28장 (Sprint 2, 44.6) | 45.10 |
+
+---
+
+## 51. Post & SNS Publishing System — 원안 대응과 실행 ✅
+
+> 원안 51의 게시 계층(Asset → Post → 승인 → 예약 → n8n → SNS Adapter → `external_post_id` → 성과)은 **설계가 끝나 있고 구현은 V1(Sprint 2·3)이다**: 28장(SNS 연동·게시)이 같은 원안을 이미 반영했고, 41~43장(예약 게시)이 예약·선점·복구·재시도를 정했다. 그 밖의 근거는 10.9·10.10(테이블), 11.8·11.10(상태), 12.8(Adapter 계약), 15.6·15.11(비밀값·콘텐츠 리스크), 29장(성과), 33장(권한), 44.6·44.7(실행 순서)이다. 지금 코드에 있는 것은 `posts`·`social_accounts` **테이블 구조**(0001), 상태 전이 트리거와 읽기 전용 RLS(0002·0005), 캡션 초안(`create_post_draft`)까지다. 이 장은 원안 대응, 원안이 짚어 새로 찾은 빈틈 세 가지, 실행 순서를 정한다. 원안과 다른 곳은 ⚙️로 표시하고 51.8에 모았다.
+>
+> **원안 51.60·51.61의 구현 Prompt는 그대로 쓰지 않는다.** 원안 스키마(`user_id`, `asset_id on delete set null`, 평문 토큰 칸, 칸 수십 개), `claim_due_posts()`, Python `SocialAdapter` 클래스, Repository 층, `/posts/new`로 만들면 이미 정한 28·41~43장과 어긋난다. Claude Code용은 44.6의 Sprint 2 표와 51.5의 보강, Lovable용은 44.6의 Phase C·P·S(아직 `lovable_master_prompt.md`에 없고, 단계를 시작하기 전에 Claude Code가 쓴다)를 쓴다.
+
+### 51.1 구현 상태 (원안 51.62)
+
+| 원안 완료 기준 | 상태 | 근거 |
+|---|---|---|
+| `posts` Production Schema | 구조는 있음 (0001). 칸 대응은 51.3. V1 칸(`origin`·`late_policy`·`scheduled_timezone`)은 `scheduler` 마이그레이션 | 10.10, 41.12 |
+| `social_accounts` Production Schema | 구조는 있음 (0001, 토큰은 Vault secret id). OAuth·Vault 함수는 `social_accounts` 마이그레이션 (0010) | 10.9, 28.4, 28.6 |
+| RLS | 읽기만 직접 허용, `draft`·`rejected` Post의 캡션·해시태그만 직접 수정. 나머지는 RPC (0005) | 51.4. **교차 계정 자동 테스트가 없다 → 51.5 3번** |
+| Index | 완료 (`posts_persona_id_idx`, `posts_asset_id_idx`, `posts_social_account_id_idx`, `posts_due_idx`). `(platform, external_post_id)` Unique는 `publishing`(0011) | 51.4 |
+| 멱등 (`post:{post_id}`) | 설계 완료 (`publish:{post_id}` Job 키, `automation_jobs.idempotency_key` Unique는 0001에 있음) | 14.17, 43.8 |
+| Post 상태 전이 | 트리거 있음 (`posts_enforce_transition`, 9개 상태). 승인 경로는 `publishing` 마이그레이션 | 11.8, 0002 |
+| Atomic Claim | 완료 (`claim_automation_job`, 11.5). Post 단위 `claim_due_posts`는 만들지 않음 | 43.3 |
+| Retry, Recovery, 중복 방지 | 설계 완료. `fail_automation_job`·`recover_stale_jobs`는 MVP에 있고 `submitted_at`·`verify_only`는 `publishing` 마이그레이션 | 43.8, 43.9 |
+| Platform Adapter, Instagram, X | 설계 완료 (n8n 하위 Workflow). 구현 Instagram은 Sprint 2, X는 Sprint 3 | 28.2, 28.9, 44.6, 44.7 |
+| 게시 전 검사, `external_post_id`·`permalink`, 게시 확인 | 설계 완료 (`check_publish_ready` 12개) | 28.8, 43.4 |
+| Frontend (Posts, Post Detail, Social, Asset → Post, 예약, 상태, 오류) | 설계 완료. Lovable Phase C·P·S 프롬프트는 단계 시작 때 작성 | 28.12, 42장, 44.6 |
+| Post → Performance, 수집 창 | 설계 완료. `performance_metrics`·WF-009는 `analytics_monitoring` 마이그레이션 (Sprint 3) | 29장, 28.11 |
+| OAuth, 토큰 보호, 자격 증명 비노출, 공식 API만 | 설계 완료. 빈틈 둘 → **51.5 1·2번** | 28.4, 28.6, 15.6 |
+| Correlation ID | 두지 않음 ⚙️ | 37.2, 51.4 |
+
+### 51.2 상태 대응 (원안 51.4·51.5) ⚙️
+
+| 원안 | 현재 (11.8) | 이유 |
+|---|---|---|
+| `DRAFT` | `draft` | |
+| (없음) | `pending_approval`, `rejected` | V1은 모든 게시를 사람이 승인한다. `draft`·`pending_approval`에서 `publishing`으로 가는 길이 없어서 승인 없는 Post는 구조적으로 게시될 수 없다 |
+| `APPROVED` | `approved` | `approvals`가 `approved`가 되면 DB 트리거가 바꾼다 (11.9 R6) |
+| `SCHEDULED` | `scheduled` | |
+| `PUBLISHING` | `publishing` | |
+| `PUBLISHED` | `published` | `external_post_id`가 있어야 한다 (CHECK) |
+| `FAILED` | `failed` | **최종 실패만.** 일시 실패는 `failed`가 아니다 |
+| `RETRY_WAIT` | **상태가 아님.** Post는 `publishing`이고 `publish` Job이 `pending` + 미래의 `run_after` | 43.2. 재시도 때 Post가 두 번 바뀌지 않는다 |
+| `CANCELLED` | `cancelled` (`published`를 뺀 모든 상태에서) | 원안은 `DRAFT`·`SCHEDULED`에서만이다. 승인 대기·승인·실패도 취소할 수 있어야 한다 |
+
+원안의 `FAILED → RETRY_WAIT → SCHEDULED`는 현재 `publishing`(`attempts`가 늘고 `run_after`가 미래) → 시간이 되면 같은 Job이 다시 선점된다. 최종 실패(`failed`) 뒤에 Operator가 [다시 시도]하면 `failed → scheduled`(11.8)다.
+
+### 51.3 칼럼 대응 (원안 51.3·51.7)
+
+| 원안 | 현재 | 이유 |
+|---|---|---|
+| `posts.user_id` | **없음.** Persona 경유 | Persona가 Tenant다 (10.21, 50.3과 같다) |
+| `asset_id uuid … on delete set null` (null 허용) | `asset_id not null … on delete restrict` | Asset 없는 Post는 게시할 수 없다. 지워서 게시 기록이 끊기지 않는다 (Rule 4) |
+| `persona_id … on delete cascade` | `restrict` | 지워서 기록이 사라지지 않게 |
+| `social_account_id … on delete set null` | nullable(MVP 초안), `restrict` | 제출·예약할 때는 필수 (11.8 Guard) |
+| `external_post_url` | `permalink` | 이미 있는 칸 |
+| `hashtags jsonb` | `hashtags text[]` (30개 이하, `#` 없이 저장하고 게시할 때 붙임) | 0001, 12.9 |
+| `media_metadata` | 없음. 규격은 `platform_specs`(41.5)와 Asset, 게시용 JPEG은 `generation_metadata.publish` | 같은 정보를 두 곳에 두지 않는다 |
+| `retry_count`, `max_retries`, `next_retry_at`, `last_error` | publish Job의 `attempts`·`max_attempts`·`run_after`·`error_message`, Post에는 마지막 오류 `error` | 재시도는 Job의 일이다 (43.3). Post Detail은 Job에서 읽는다 |
+| `platform_response` | publish Job `result`(checkpoint, 비밀값은 가림) | 43.8. 응답 전문을 Post에 쌓지 않는다 |
+| `idempotency_key` | Post에는 없음. Job의 `publish:{post_id}` | 실행 단위의 키다 (14.17) |
+| (원안에 없음) | `origin`(`pipeline`·`self_scheduled`), `late_policy`, `scheduled_timezone` (V1) | 41.3, 41.6 |
+| `social_accounts.user_id` | 없음 | 위와 같음 |
+| `access_token`, `refresh_token` (원안: "가능하면 암호화") | `access_token_secret_id`, `refresh_token_secret_id` = **Supabase Vault** secret id. 토큰은 테이블에 없다 | 28.6, 10.9 |
+| `status` 5개 (`ACTIVE`·`REAUTH_REQUIRED`·`DISABLED`·`ERROR`·`DISCONNECTED`) | `active`·`inactive` + `metadata.status_reason`, 화면 표시는 계산 | 28.5 |
+| `unique` 없음 | `unique (platform, account_id)` (**전역**) | 같은 SNS 계정이 두 Persona·두 사용자에게 연결되면 안 된다 → **51.5 1번** |
+
+### 51.4 원안 항목별 대응 (원안 51.1~51.59)
+
+| 원안 | 여기 | 근거 |
+|---|---|---|
+| 흐름 `Asset → Post Draft → Approval → Schedule → n8n → Adapter → Publish → External ID → Performance`, "Lovable은 관리, n8n은 orchestration, Adapter만 SNS에 게시" | 같다. Frontend는 SNS API·n8n을 부르지 않는다 | 28.1, 43.1 |
+| Asset과 Post 분리, 1:N | 같다 (`assets 1 ─ N posts`) | 10.10, 50.4 |
+| Adapter 패턴, `SocialAdapter` 클래스(`validate_account`·`validate_media`·`publish`·`get_post`·`delete_post`) | **n8n 하위 Workflow** `[PA] SNS - {Platform} - {Operation}`, 공통 입출력 12.8 (`operation`, `checkpoint`, 정규화된 `error`). `validate_media` = 게시 전 검사 5·6번(`platform_specs`), `delete_post`는 만들지 않는다(AI에게 주지 않는 Action, Operator가 플랫폼 앱에서). 브라우저 플랫폼(Likey·Fantrie, 조건부)의 Python Adapter도 같은 `PublishResult` 모양이다 | 28.2, 43.5, 15.19 |
+| Adapter의 책임·비책임 | 같다 (AI 판단·캡션 생성·Persona 전략은 Adapter 밖) | 12.8 |
+| Instagram: 공식 Meta API만 (미디어 컨테이너 → 게시 → Media ID), 브라우저 자동화 금지 | 같다. `media` → `status_code` 확인 → `media_publish` → `permalink` 조회. 브라우저 게시는 **공식 API가 없는** Likey·Fantrie에만, 조건을 갖춘 뒤 켠다 (41.7) | 28.9, 41.7 |
+| X: 공식 API, 미디어 업로드 → 게시 | 같다 (V1 후반). X API에는 중복 방지 키가 없어서 게시 호출 직전 `submitted_at`을 저장하고, 확인 불가면 `UNCONFIRMED`로 사람이 확인한다. API 이용 등급·요금은 구현 때 확인 | 41.5, 43.8 |
+| Platform Registry (`enabled`·`adapter`), 향후 youtube·threads·likey·fantrie | `app_settings.platform_specs`(규격·채널·`verifiable`)와 `platform_controls`(켜짐), 플랫폼 CHECK 값. Likey·Fantrie는 이미 V1 후반 조건부로 정했다. TikTok은 CHECK 값만 있고 지원하지 않는다 | 41.5, 42장, 44.6 `scheduler` |
+| Publish Request `{post_id, platform, social_account_id}`, n8n이 임의 Caption·URL을 전달하지 않음 | `{ job_id }` 하나. Job이 `post_id`를 갖고, 캡션·Asset·계정은 DB에서 읽는다 | 43.4, 12.8 |
+| 게시 Flow `Claim → Validate → Load Account → Load Asset → Signed URL → Adapter → Publish → Verify → Update` | 43.4의 6단계: `claim_automation_job` → (`verify_only`면 확인) → `check_publish_ready` → `mark_post_publishing` → Publish(checkpoint) → `complete_publish`. **Signed URL 대신 공개 URL의 게시용 JPEG 사본**이다 | 43.4, 28.9. 50.4의 버킷 결정과 한 묶음 |
+| `claim_due_posts()` (`FOR UPDATE SKIP LOCKED`) | **만들지 않는다 ⚙️.** WF-008이 예약 시각이 된 Post에 Job을 만들고(키 `publish:{post_id}`라 몇 번 돌아도 1개), 실행자가 Job을 **한 건씩 선점**한다. 여러 건을 한꺼번에 선점하면 뒤의 Job은 Heartbeat 없이 `processing`이 되어 5분 뒤 회수된다 | 43.3 |
+| Idempotency `post:{post_id}`, 이미 성공했으면 다시 게시 안 함 | `publish:{post_id}` Job 키 + `external_post_id`가 있는 Post는 재게시 안 함(검사 9번) + `(platform, external_post_id)` Unique | 14.17, 43.8 |
+| Crash Recovery: 게시 성공 뒤 n8n이 죽으면 External Post를 확인하고, 있으면 `PUBLISHED`, 없으면 Retry | 규칙 1: 되돌릴 수 없는 호출 **직전**에 checkpoint(`submitted_at`)를 DB에 쓴다. 규칙 2: `submitted_at`이 있으면 다시 게시하지 않고 `verify_only`로 확인 (찾음 → 완료, 못 찾음 → Instagram만 자동 이어가기, 나머지는 `UNCONFIRMED`로 사람이). 원안의 "PUBLISHING 10분 초과"는 `publish` Heartbeat 제한 5분 + pg_cron 1분이다 | 43.8, 11.6 |
+| Publish Verification (`external_post_id` 받은 뒤 다시 조회) | Instagram: `permalink`·`timestamp` 조회(28.9 4번). 게시 뒤 조회 실패는 게시 실패가 아니라 확인 재시도다 | 28.9, 43.8 |
+| Caption·Hashtag 저장, AI는 `Candidate → Validator → Draft`, LLM이 SNS API를 직접 부르지 않음 | 같다. WF-005가 `caption_generation.v1`로 초안, 검사는 `check_publish_ready` 7번(길이·해시태그 수·금지 표현·광고 표기) | 28.7, 12.9, 15.19 |
+| 화면 `/posts`, `/posts/new`, `/posts/:id`, `/settings/social-accounts` | `/posts`, `/posts/:id`, `/social`(탭), `/scheduler`, `/approvals`. **`/posts/new`는 두지 않는다 ⚙️.** 새 Post는 파이프라인 초안(WF-005) 또는 예약 폼이다. [Save Draft] 없이 `schedule_own_media`가 한 번에 승인·예약한다 | 28.12, 42장, 18.3 |
+| Post Editor (Persona, Asset, Platform, Account, Caption, Hashtags, Publish Now/Schedule) | 초안·반려 Post는 Detail에서 캡션·해시태그를 직접 수정(`revise_post`). 예약 폼(42.7)은 Asset Library에서 Asset을 고르고 플랫폼·계정·캡션·시각·시간대·늦은 게시 정책을 받는다. [지금 게시]는 `publish_post_now`(승인된 Post만) | 41.3, 12.4, 42.7 |
+| Post List 열 (Preview, Persona, Platform, Caption, Status, Scheduled, Published, External ID) | Thumbnail, Persona, 플랫폼, 캡션 앞부분, 상태, 예약, 게시 시각, **참여율**. External ID 대신 Detail의 `permalink` [게시물 열기] | 28.12 |
+| Post Detail (… Retry Count, Last Error, Performance) | 같다. 시도 횟수는 publish Job의 `attempts / max_attempts`, 오류는 Post `error`와 Job, 실행 기록, 성과 Snapshot 그래프 | 28.12, 17.12 |
+| `scheduled_posts`(기존 예약 시스템)와 `posts`(canonical)를 연결 | **`scheduled_posts` 테이블을 만들지 않았다.** 처음부터 `posts`가 정본이라 연결할 것이 없다. 예약 경로는 `posts.origin` | 43.13 |
+| AI 생성물 게시 순서 (`Decision → Content Job → Asset → Approval → Post → Schedule → Publish`), MVP에서 `Generate → Publish` 금지 | 같다. V1에 AI 게시는 없다 | 28.13, 11.8 |
+| Autonomous Publishing (`Decision → Permission → Risk → Budget → Post …`), HIGH·CRITICAL은 사람 | V2 이후. 자동 게시(Level 4)는 Long-term이고, 광고·민감 주제·URL·`@`언급 등 10개 차단 범주에 하나라도 걸리면 사람이 승인한다 | 33.8, 33.6 |
+| Publishing Permission (`Persona Active? Account Active? Token Valid? Asset Approved? Platform Enabled? Schedule Valid? Budget? Rate Limit?`) | **V1은 DB 함수 `check_publish_ready` 12개**: 긴급 정지, Persona `active`, 계정 `active`·토큰, Post `approved`·Approval, Asset이 `archived`·`rejected`가 아님, 규격, 캡션, 하루 한도, 중복, Persona 간 중복 경고, 늦은 게시, 계정 한도·간격. 예산은 사람이 승인하는 V1에 없고 V2의 정책 평가 8번(33.6)이다. **"Asset Approved?"는 `approved`가 아니라 `archived`·`rejected`가 아님**이다 (50.4의 Operator 결정과 같다) | 28.8, 43.4, 33.6 |
+| Rate Limit (`current_usage`·`limit`·`reset_at` 추적) | 플랫폼이 수치를 주므로 따로 저장하지 않는다. Instagram `content_publishing_limit` 조회, `RATE_LIMIT` 응답(`retry_after`), 하루 게시 한도(검사 8·12번)는 `posts`의 오늘 게시 수로 센다 | 28.9, 43.4 |
+| Retry 5분 / 15분 / 60분, 최대 3회 | **API 채널(Instagram·X)은 30초 → 2분 → 5분**, 최대 3회. 5분·15분·60분은 **브라우저 채널**의 간격이다. 재시도 가능 오류는 `NETWORK_ERROR`·`TIMEOUT`·`TEMPORARY_API_ERROR`·`RATE_LIMIT`·`MEDIA_PROCESSING`. ±10% jitter | 28.10, 43.9 |
+| 재시도 금지 (`INVALID_TOKEN`·`ACCOUNT_DISABLED`·`PERMISSION_DENIED`·`INVALID_MEDIA`·`POLICY_VIOLATION`·`INVALID_PLATFORM`) | `TOKEN_EXPIRED`·`INVALID_AUTH`(계정 `inactive`), `POLICY_ERROR`, `INVALID_MEDIA`, `WORKFLOW_INVALID`, `MISSED_WINDOW`, `UNCONFIRMED`. Post는 `failed`이고 화면이 해결 방법을 보여 준다 | 43.9, 17.12 |
+| `system_errors` 기록 (`service`·`error_type`·`message`·`retryable`·`severity`, `post_id`·`persona_id`·`social_account_id`·`correlation_id`) | `system_errors`는 `fail_automation_job`이 남긴다. Post·계정은 `automation_job_id` → Job의 `post_id`·계정으로 따라간다. `severity`·`correlation_id` 칸은 두지 않는다 ⚙️ | 43.9, 37.3 |
+| Correlation ID `corr_xxx`를 Lovable → … → SNS까지 | 두지 않는다 ⚙️. 추적은 Post → publish Job(`post_id`) → `execution_logs`(`execution_ref`) | 37.2, 47.2 |
+| Post → Performance, `[PA] 010 - Performance Collector`, 수집 1h·6h·24h·48h·7d | **WF-009**(010은 Notification). 게시 성공 때 `analytics` Job 5개(`analytics:{post_id}:{시간}`)를 예약하고 10분 주기로 선점해 `[PA] SNS - {platform} - Metrics` → `record_metrics`. 같은 시점은 한 번만 저장 (`(post_id, snapshot_hours)` Unique) | 28.11, 14.15 |
+| 지표 정규화, `raw_metrics` | `views`·`likes`·`comments`·`shares`·`saves`·`reach`·`profile_visits`·`followers_delta` (플랫폼이 안 주면 `NULL`), 원본은 `raw_metrics`. 플랫폼이 주는 공식 참여율도 `raw_metrics`에 보존 | 29.5 |
+| Engagement Rate = `(likes+comments+shares+saves) / reach × 100`, 분모가 없으면 임의 계산 안 함 | 같은 정신이고 더 엄격하다. `reach`가 있으면 reach 기준, 없으면 `views` 기준(`engagement_rate_basis`로 기록), 둘 다 없으면 `NULL`. **기준이 다른 값끼리는 비교하지 않는다.** 수집 실패는 0이 아니라 행 없음 | 29.5, 29.4 |
+| 성과 UI, "아직 없음" 안내, 가짜 지표 금지 | 같다 (Snapshot 그래프, 없으면 "아직 성과 데이터가 없어요"). Likey·Fantrie는 성과를 가져올 수 없다는 안내 | 29.18, 41.5 |
+| SNS Account UI, 계정 연결 OAuth, Frontend에 토큰 저장 금지 | `/social`. Lovable → `create_oauth_state`(1회용·10분) → 플랫폼 → **n8n 콜백**(앱 비밀값은 n8n Credential) → 장기 토큰 → `validate_account` → `upsert_social_account`(Vault) → Lovable. 브라우저는 토큰을 만지지 않는다 | 28.4 |
+| Token Refresh: 게시 중 만료되면 갱신 후 **한 번 재시도**, 갱신 실패면 `REAUTH_REQUIRED` | **게시 중 갱신은 두지 않는다 ⚙️.** WF-016이 매일 돌며 **만료 7일 전에** 갱신하고, 실패하면 계정을 `inactive`(`token_expired`)로 하고 알린다. 게시 시점에 이미 만료됐으면 `TOKEN_EXPIRED`(재시도 없음)이고 사람이 다시 연결한다. 만료된 Instagram 장기 토큰은 갱신할 수 없는 것으로 알려져 있어(구현 때 최신 문서로 확인) 게시 중 갱신은 만료 직전의 좁은 틈에만 도움이 된다 | 28.6 |
+| Social Account 상태 5개 | `active`·`inactive` + `status_reason`(`token_expired`·`token_revoked`·`account_restricted`·`operator_disabled`). 화면은 `token_expires_at`으로 "곧 만료"를 계산 | 28.5 |
+| `postRepository.ts`·`socialAccountRepository.ts`, Hook 6개 | **Repository 층을 두지 않는다 ⚙️.** Hook이 Supabase를 부르고, 변경은 RPC mutation (`revise_post`·`submit_post_for_approval`·`schedule_post`·`publish_post_now`·`cancel_post`·`retry_scheduled_post`·`schedule_own_media`). 같은 쿼리가 여러 Hook에 쓰이면 쿼리 빌더 파일에 둔다. Realtime은 `posts`·`approvals`·`social_accounts` | 18.7, 42장, 28.12 |
+| Workflow `[PA] 006 Post Dispatcher`, `007 Post Retry Handler`, `008 Post Recovery Monitor` | **WF-008 Scheduled Publisher**(1분)가 Job을 만들고 **WF-007 SNS Publisher**가 게시한다. Retry Handler는 DB `fail_automation_job`, Recovery Monitor는 pg_cron `recover_stale_jobs` + 확인 실행 (n8n이 멈춰도 복구가 돌아야 한다). 번호 006은 Error Handler라 쓸 수 없다 | 43.14, 20.3 |
+| 금지: Frontend 토큰, 하드코딩 비밀값, SNS 비밀번호, **브라우저 쿠키 긁기**, Git·n8n JSON의 자격 증명 | 같다. 토큰은 Vault, 앱 비밀값은 n8n Credential만, Frontend에는 publishable key뿐. 브라우저 게시(조건부)는 Operator가 보이는 브라우저에서 직접 로그인한 **PC의 로컬 세션**만 쓰고 서버·n8n·DB로 옮기지 않는다 | 15.6, 20.16, 28.6, 41.7 |
+| Index 6개 | `persona_id`·`asset_id`·`social_account_id`·`scheduled_at`(부분, `scheduled`)은 있다. `(platform, external_post_id)` Unique는 `publishing`(0011), `(persona_id, platform, published_at desc)`(게시됨)는 `analytics_monitoring`(0013). `user_id` 칸이 없고, `status` index는 `posts_due_idx` 부분 인덱스가 대신한다. 멱등 Unique는 Job 쪽 | 28.14, 29.13 |
+| RLS `user_id = auth.uid()` (Post, Social Account), 토큰은 backend-only | `persona_id in (소유한 Persona)`. `posts`는 읽기 + `draft`·`rejected`의 캡션·해시태그·`is_sponsored` 수정만, 삽입·삭제 정책 없음. `social_accounts`는 읽기만, **토큰은 읽을 수 없다**: Vault는 `service_role`만 읽고(`get_social_account_token`), 테이블의 secret id 칸은 uuid일 뿐이다 (0005 주석) | 0005, 28.6 |
+| Asset → Post 만들기, 플랫폼·계정·캡션·예약만 입력 | Asset Detail의 [게시 요청](파이프라인 초안이 있을 때)·[예약](`schedule_own_media`, **Asset이 `approved`일 때**, 41.3). 예약 폼이 Asset을 미리 채운다 | 17.10, 42.7 |
+| 한 Asset으로 여러 플랫폼, `post_id ≠ asset_id`, 캡션은 복사해서 저장하고 플랫폼마다 수정 | 같다. 같은 Asset의 Post는 플랫폼마다(같은 플랫폼에도) 독립이다. 두 번째 플랫폼은 예약 폼에서 기존 Post의 캡션을 채워 열어(`복제`, 42.4) 고친다. 캡션은 Post마다 `posts.caption`에 저장 | 10.10, 41.6, 42.4 |
+| Content Repurposing (Instagram → X → TikTok 자동) | 이후. MVP·V1은 수동 | – |
+| 게시 KPI (게시 수, 실패 수, 성공률, 평균 게시 지연, 재시도율, 토큰 오류율) | Social 개요(오늘 게시·예약·실패·평균 참여율), SLO 게시 성공 ≥ 98%(37.11), `publish_delay`(P50·P95, `published_at − scheduled_at`, 41.11), 재시도율 `attempts > 1`, 토큰 오류는 `system_errors`의 `TOKEN_EXPIRED` 수. 모두 DB에서 계산한다 | 28.12, 37.11, 41.11 |
+| 최종 폐쇄 루프 (`Performance → Analysis → Decision → Content Job → Asset → Approval → Post → Schedule → Publish → Performance`) | 같다 (32장). 첫 바퀴는 V2 | 32장, 28.13 |
+
+### 51.5 보강 ⚙️
+
+원안이 짚은 것 중 현재 설계에 빠졌거나 확인되지 않은 세 가지다. 1·2번은 **아직 적용하지 않은 `social_accounts` 마이그레이션(0010)에 처음부터 넣고**(적용한 파일은 고치지 않는다), 3번은 지금 한다.
+
+| # | 항목 | 지금 | 바꿀 곳 | 테스트 | 시점 |
+|---|---|---|---|---|---|
+| 1 | **계정 연결의 소유 충돌·재연결 규칙** (원안 51.6·51.41) | `social_accounts`는 `unique (platform, account_id)`이 **전역**이다. 그런데 `upsert_social_account`가 이미 있는 행을 만났을 때의 규칙이 설계에 없다. "있으면 덮어쓴다"로 구현하면 **다른 사용자가 같은 SNS 계정을 연결하는 순간 남의 연결·토큰을 가져가거나**, 거부하면서 메시지로 "이미 다른 사람이 연결했다"를 알려 준다 | `upsert_social_account`(0010): ① 같은 `(platform, account_id)`가 있고 **같은 Persona**면 토큰(Vault)·`token_expires_at`·`username`을 갱신하고 `active`로 되돌린다 (재연결). ② **다른 Persona 소유(다른 사용자 포함)**면 거부(`PT409`, 메시지는 "이미 연결된 계정" 하나로, 누구 것인지 알리지 않음)하고 `security_events`에 남긴다. ③ 같은 사용자의 **다른 Persona**도 거부한다 (한 SNS 계정은 한 Persona). 새 Vault secret은 먼저 만든 뒤 id를 바꾸고 이전 secret은 지운다 | 같은 Persona 재연결 → 같은 행·`active`, 다른 사용자·다른 Persona 연결 시도 → `PT409` + 기존 행·토큰 불변 | 0010 |
+| 2 | **연결 해제 시 토큰 삭제와 진행 중인 Post** (원안 51.43·51.50) | 설계의 [연결 해제]는 `inactive`로 바꾸는 것뿐이다. Vault의 Access·Refresh Token이 남고 WF-016이 계속 갱신할 수도 있으며, 그 계정을 쓰는 예약 Post는 게시 시점에 가서야 `TOKEN_EXPIRED`로 실패한다 | Operator RPC `disconnect_social_account(p_social_account_id)`(0010): ① `scheduled`·`publishing` Post가 그 계정에 있으면 거부(`PT409`, "먼저 예약을 취소하세요") ② `status = 'inactive'`, `status_reason = 'operator_disconnected'` ③ **Vault secret 삭제**, secret id 칸을 비움 ④ 가능한 플랫폼은 토큰 폐기 호출(하위 Workflow, 구현 때 확인). WF-016은 secret이 없는 계정을 건너뛴다. 다시 연결하면 1번 경로다 | 예약 Post가 있으면 거부, 해제 뒤 `get_social_account_token`이 빈 결과, 해제한 계정으로는 Post 제출·예약 불가(검사 3번) | 0010 |
+| 3 | **Post·Social Account 접근 자동 테스트** (원안 51.52·51.53·51.60의 테스트) | 지금 `posts` 테스트는 `test_caption_draft_then_post_publish_rolls_up` 하나다. 읽기만 허용·`draft`/`rejected`만 수정이라는 0005의 정책과 상태 전이 트리거가 자동으로 확인되지 않는다. 승인 없는 게시 불가라는 V1의 핵심 불변식도 마찬가지다 | `tests/db`에 더한다: ① 다른 계정의 `posts`·`social_accounts`를 select하면 0행 ② 직접 `insert`·`delete`, `status`·`asset_id`·`scheduled_at` 직접 `update`는 권한 거부 ③ `published`·`scheduled` Post의 캡션 직접 수정은 거부 ④ `draft`·`pending_approval`에서 `publishing`·`published`로 가는 전이는 `PT409` ⑤ 다른 Persona의 Asset을 가리키는 Post는 만들 수 없다 (`persona_isolation` 트리거, 36.12) | 위 다섯 가지 | F0 (첫 `db push` 전, 45.6·50.5 1번과 함께) |
+
+- **원안 51.60의 테스트 항목 대응**: Post CRUD(읽기·캡션 수정 = 위 ①②③, 만들기는 `create_post_draft`·`schedule_own_media`), RLS·교차 계정(3번), 상태 전이(3번 ④ + V1에서 `submit_post_for_approval`·`resolve_approval`·`schedule_post`), 멱등·중복 게시 방지(43.15의 가짜 Adapter 경우), 계정 검증(`validate_account`, 28.15 실패 목록), 재시도·복구(43.15, 43.8의 확인 실행), Asset 관계(`posts_asset_id` `restrict`, 보관 Guard).
+- **원안 51.46의 "React → Instagram API 금지"**는 Lovable Phase 6 점검 항목에 이미 있다 (Supabase 외 호출 없음, `webhook`·`/v1/jobs` 문자열 검색, 27.7 S1).
+
+### 51.6 실행 순서 (44.6)
+
+| # | 할 일 | 누가 | 통과 |
+|---|---|---|---|
+| 1 | 51.5 3번 (테스트) | Claude Code | `pytest tests -q` 통과 |
+| 2 | **Sprint 2 ① M6 계정 연결**: Meta 앱·권한 심사·테스트 계정, AI 라벨 정책 확인. `social_accounts` 마이그레이션(**51.5 1·2번 포함**), `[PA] SNS - Instagram - {Connect, ValidateAccount}`, WF-016, Phase C | 사람 + Claude Code | 테스트 계정 연결, 같은 계정을 다른 Persona가 연결하려 하면 거부, 해제하면 Vault 토큰이 없다 |
+| 3 | **② M7 게시 기반**: `publishing` 마이그레이션(`approvals`, `check_publish_ready` 1~10번, `submit_post_for_approval`·`resolve_approval`·`schedule_post`·`publish_post_now`·`cancel_post`, `submitted_at`·`verify_only`), WF-007·008, `[PA] SNS - Instagram - Publish`, WF-010 최소판, 긴급 정지, Phase P | Claude Code + 사람 | 43.15의 Instagram 경우(가짜 Adapter) 전부 통과 |
+| 4 | **③ M7b 예약**: `scheduler` 마이그레이션, 채널 결정, Phase S | Claude Code | 41.12 |
+| 5 | **관문 G2 → ④ 실제 Instagram** (테스트 계정 → 실제 계정) | 사람 | 계정 연결 → 업로드 → 예약 → 게시 → `published`, `publishing_enabled`를 끄면 멈춤 |
+| 6 | Sprint 3: AI 생성물 승인 게시(`review_asset`·Phase R), X, Reels, 성과 수집(WF-009, 52장) | Claude Code + Lovable | 44.7, 28.15 E2E |
+
+**실제 게시 전에 정해 둘 두 가지는 이미 대기 중이다**: AI 생성물 표기(44.6의 "AI 표기 (결정 대기)")와 게시 전 Asset 승인 의무화(50.4의 Operator 결정).
+
+### 51.7 완료 판단
+
+| 항목 | 상태 |
+|---|---|
+| `posts`·`social_accounts` 구조, 상태 전이 트리거, 읽기 전용 RLS, `create_post_draft` | ✅ (M1) |
+| 설계: 게시 흐름, 선점, 복구, 재시도, Adapter 계약, 성과 수집 | ✅ (28·41~43장) |
+| 51.5 3번 | ❌ F0 |
+| 51.5 1·2번, OAuth, 승인 게시, Instagram Adapter | ❌ Sprint 2 (G2 전) |
+| X, Reels, 성과 수집, 감시 | ❌ Sprint 3 |
+
+원안 51.63의 결론("`Persona → Content Job → Asset → Post → Performance → AI Decision`이 이어진다")에 동의한다. 앞의 네 고리는 FK로 이미 이어져 있고(`posts.asset_id`, `performance_metrics.post_id`), 마지막 고리(성과 → AI Decision)는 29.14와 30장이 정했다.
+
+### 51.8 원안 조정
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 이 장의 성격 | 새 구현 명세 | 설계된 게시 계층의 대응·빈틈·실행 순서 | 28·41~43장이 같은 원안을 이미 반영, 구현은 V1 |
+| 구현 Prompt | Claude Code·Lovable용 | 쓰지 않는다. 44.6 표 + 51.5 | 원안 스키마·`claim_due_posts`·Repository는 설계와 어긋남 |
+| 스키마 | `user_id`, `set null`, 칸 수십 개, 평문 토큰 | Persona 경유, `restrict`, 재시도·응답은 Job, 토큰은 Vault | 51.3 |
+| Post 상태 | 8개 (`RETRY_WAIT` 포함) | 9개 (`pending_approval`·`rejected` 포함, `RETRY_WAIT` 없음) | 11.8, 재시도는 Job의 `pending` |
+| 즉시 게시 | `DRAFT → PUBLISHING`도 가능했던 원안 | 승인된 Post만 | V1 사람 승인 |
+| Adapter | Python `SocialAdapter` 클래스 | n8n 하위 Workflow + 12.8 공통 형식 (브라우저는 Python Adapter) | 9.22, 28.2 |
+| `claim_due_posts()` | Post 선점 | Job 선점 (WF-008이 Job 생성) | 43.3 |
+| Idempotency | `post:{post_id}` (Post) | `publish:{post_id}` (Job) + `submitted_at` checkpoint | 14.17, 43.8 |
+| 복구 | "PUBLISHING 10분 초과 → 조회" Workflow | 5분 Heartbeat + pg_cron + 확인 실행, Workflow 없음 | 11.6, 43.14 |
+| Retry 간격 | 5·15·60분 | API 30초·2분·5분, 브라우저 5·15·60분 | 43.9 |
+| Token Refresh | 게시 중 갱신 후 1회 재시도 | WF-016 만료 7일 전 갱신, 만료되면 재연결 | 28.6 |
+| Workflow 번호·이름 | 006 Dispatcher, 007 Retry, 008 Recovery, 010 Performance | 008 Scheduled Publisher, 007 SNS Publisher, 009 Performance Collector, 010 Notification | 14.3, 20.3, 43.14 |
+| `scheduled_posts` 연결 | `scheduled_posts` → `posts` | 처음부터 `posts` | 43.13 |
+| 화면 | `/posts/new`, `/settings/social-accounts`, [Save Draft] | `/scheduler` 예약 폼, `/social`(탭) | 28.12, 42장 |
+| Repository 층 | `postRepository`, `socialAccountRepository`, Hook 6개 | Hook이 Supabase를 부름 | 18.7 |
+| `Asset Approved?` | 게시 전 검사 | `archived`·`rejected`가 아님 (의무화는 Operator 결정) | 28.8, 50.4 |
+| Rate Limit 추적 | `current_usage`·`limit`·`reset_at` | 플랫폼 조회 + `RATE_LIMIT` + 오늘 게시 수 계산 | 28.9 |
+| `severity`·`correlation_id` | 칸 | 두지 않음 | 37.2, 37.3 |
+| 서명 URL | 게시마다 발급 | 공개 URL의 게시용 JPEG 사본 (비공개 전환 시 함께 변경) | 28.9, 50.4 |
+| Social Account 상태 | 5개 | `active`·`inactive` + `status_reason` | 28.5 |
+| 보강 | – | 소유 충돌 규칙, 연결 해제 시 토큰 삭제, 접근 테스트 (51.5) | 원안이 짚음 |
+| 다음 단계 | 52 Analytics & Performance Pipeline | 29장 (설계 완료), `analytics_monitoring`(0013, Sprint 3) | 44.7 |
