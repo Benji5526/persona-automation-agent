@@ -1,5 +1,7 @@
 # PRD: persona-automation-agent
 
+> **프로필 안내 (2026-10-07):** 이 프로젝트의 활성 구현 대상은 **Personal Edition**(사용자 1명)이다. 이 문서의 SaaS 지향 내용(조직·다중 사용자·고객별 한도·Multi-Persona 자율 운영 등)은 삭제하지 않고 보존한다. 경계와 섹션별 프로필 지도: [architecture/saas.md](architecture/saas.md), 현재 구조: [architecture/personal.md](architecture/personal.md), GPU 선택(Local/Cloud): TECH_DESIGN 56장. 충돌하면 TECH_DESIGN 56장이 우선한다.
+
 | 항목 | 내용 |
 |---|---|
 | 상태 | v1.0 1차 완성 (기술 설계 단계로 이동) |

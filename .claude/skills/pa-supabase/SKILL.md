@@ -29,3 +29,8 @@ Migration → RLS + grants → Index → tests/db → generated types (supabase 
 - `supabase/verify_production.sql` still passes (add checks for new indexes/policies).
 - Storage: `media` is public (generated assets, no list policy), `persona-private` is private (reference images, signed URLs); paths never come from the frontend (TECH_DESIGN 21.14).
 - Realtime: add only the tables the UI subscribes to (TECH_DESIGN 21.15).
+
+## Personal Edition
+
+- Additive migrations only (next: 0010). Settings: `app_settings.app_mode = 'personal'`, `app_settings.active_worker` (`null` = no restriction, default). `worker_status` gets `target` and `provider`. Do **not** create SaaS tables (`organizations`, `memberships`, `subscriptions`, `persona_members`, per-customer limits) or rename `users.role` values.
+- The claim functions enforce `active_worker` for generation jobs inside the DB (TECH_DESIGN 56.4).

@@ -4,6 +4,8 @@
 > 설계의 정본은 [TECH_DESIGN.md](TECH_DESIGN.md)이고, 이 문서는 그 위에 **범위의 선**을 긋는다. 설계와 충돌하는 곳은 ⚙️로 표시했고 아래 "열린 결정"에 모았다.
 > 체크리스트: [MVP_CHECKLIST.md](MVP_CHECKLIST.md) · Claude Code 규칙: [../CLAUDE.md](../CLAUDE.md) · Skill: `.claude/skills/pa-*`
 
+> **Personal Edition 기준:** 이 문서의 MVP v1.0은 **Personal Edition**(사용자 1명, OWNER ≡ `users.role='admin'`)의 범위다. GPU는 설정에서 고르는 Execution Target(Local/Cloud)이고 Frontend는 GPU 인프라를 모른다. 구조: [architecture/personal.md](architecture/personal.md), TECH_DESIGN 56장.
+
 ## 0. 용어: 이 문서의 "MVP v1.0"
 
 기술 설계(40.4)는 단계를 **MVP(M0~M5) → V1(M6~M8) → V2a(M9~)** 로 나눈다. 이 문서의 **MVP v1.0은 그 셋을 이은 하나의 목표**다.
@@ -41,7 +43,7 @@ Persona → Content Job → n8n → Python → ComfyUI → Asset → Approval �
 | 4 | Content Job 생성 (`queued`) | 46장 |
 | 5 | n8n이 Content Job을 선점 (Atomic Claim, 중복 없음) | 20.5, 49장 |
 | 6 | Python 브릿지가 Job을 처리 | 19장, 47장 |
-| 7 | ComfyUI에서 RTX 5080으로 이미지 생성 | 25.6, 48장 |
+| 7 | ComfyUI에서 GPU(Local 또는 Cloud)로 이미지 생성 | 25.6, 48장 |
 | 8 | 결과가 Supabase Storage에 저장, Asset이 DB에 등록 | 19.15, 50장 |
 | 9 | Asset 승인·반려 (반려 사유 저장) | 50.5 3번 |
 | 10 | Post 생성, **Instagram 또는 X 중 최소 1개**에 게시 | 28·41~43장, 51장 |
@@ -126,7 +128,7 @@ TikTok, YouTube, Likey, Fantrie, 브라우저 게시, 영상·음성 생성, 라
 ## 5. 아키텍처
 
 ```text
-Lovable → Supabase (Auth / DB / Storage / Realtime) → n8n → Python (127.0.0.1) → ComfyUI (RTX 5080)
+Lovable → Supabase (Auth / DB / Storage / Realtime) → n8n → Python (127.0.0.1) → ComfyUI (활성 Execution Target의 GPU: Local 또는 Cloud)
 LLM = 의사결정 계층에서만 (Context → Decision → Validator)
 ```
 

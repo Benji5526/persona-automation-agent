@@ -8,7 +8,7 @@ description: Use when changing or reasoning about the overall persona-automation
 ## The stack
 
 ```text
-Lovable → Supabase → n8n → Python bridge (127.0.0.1:8000) → ComfyUI (127.0.0.1:8188) → RTX 5080
+Lovable → Supabase → n8n → Python bridge (127.0.0.1:8000) → ComfyUI (127.0.0.1:8188) → GPU (local or cloud worker)
 ```
 
 LLM path (decision layer only): `Context → LLM → structured JSON → validation (n8n early, DB final) → permission → approval → Job`.
@@ -36,3 +36,9 @@ Supabase is the **source of truth**. n8n holds no state of its own; a workflow t
 ## Before changing
 
 1. Read the existing implementation. 2. Check the Scope Lock. 3. Pick the matching `pa-*` skills (SNS change → supabase + sns-publishing + testing + security; AI decision → supabase + ai-decision + testing + security; generation → python-execution + comfyui + supabase + testing + security). 4. Plan the migration and tests first.
+
+## Personal Edition (CURRENT PRODUCT MODE = PERSONAL)
+
+- Personal is the implementation target (one real user, OWNER = `users.role='admin'`). SaaS design is preserved in `docs/architecture/saas.md`; do **not** implement multi-user, organizations, billing, quotas, per-customer GPU or scaling unless explicitly asked. Do not delete SaaS docs or tables.
+- The GPU is an **Execution Target** (local or cloud worker), chosen by `app_settings.active_worker`; workers pull jobs; the bridge interface and code are the same for both. Never hard-code a GPU model. See `docs/architecture/execution-targets.md`, TECH_DESIGN 56.
+- Manual Generate and autonomous generation share one path: Content Job → n8n → active worker.

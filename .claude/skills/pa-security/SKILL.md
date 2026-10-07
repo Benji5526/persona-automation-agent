@@ -30,3 +30,10 @@ Emergency stop (global / platform / persona)                                  Fa
 - Logs: redact secrets (`redact`, `private.redact_jsonb`); no message bodies for fans.
 - Public media bucket: unguessable UUID paths, no list policy, writes by `service_role` only. If paid-subscription content is involved, revisit (TECH_DESIGN 50.4).
 - Review changes with `/security-review` in addition to this checklist.
+
+## Personal Edition
+
+- Keep auth and RLS even with one user (Google OAuth, allow-list of one email, `Persona → owner`). Do not add multi-tenant policies.
+- **Rented GPU risk:** the cloud worker gets its own Supabase secret key; revoke/rotate it when the pod ends; keep keys out of pod volumes and logs.
+- ComfyUI is never exposed (any target). In pull mode the bridge needs no inbound port; do not publish it.
+- The frontend never holds GPU URLs, keys or pod ids.

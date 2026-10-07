@@ -27,7 +27,7 @@ requested later, one phase at a time.
 The app is the CONTROL CENTER of a pipeline that already exists:
 
   Lovable (this app) → Supabase (source of truth) → n8n (orchestration)
-    → Python bridge on a local PC → ComfyUI → RTX 5080 → Supabase Storage → back to this app
+    → Python bridge (on the local PC or a cloud GPU pod) → ComfyUI → GPU → Supabase Storage → back to this app
 
 The app shows state and sends commands. It never generates images, never calls an LLM,
 never runs workflows. It talks ONLY to Supabase: tables, RPC functions, Storage, Realtime.

@@ -8,7 +8,7 @@ Lovable ─RPC─▶ Supabase ──DB Webhook──▶ n8n (원격 서버, Dock
                   │ Worker RPC            ├─▶ LLM (Claude API 또는 가짜 LLM)
                   │                       │
                   └──── Python 브릿지 ◀── Cloudflare Tunnel + Access ─┘
-                        (로컬 PC, 127.0.0.1:8000) ──▶ ComfyUI (127.0.0.1:8188) ──▶ RTX 5080
+                        (로컬 PC, 127.0.0.1:8000) ──▶ ComfyUI (127.0.0.1:8188) ──▶ GPU (Local 또는 Cloud)
                         └── 완료 콜백 ──▶ n8n WF-004
 ```
 

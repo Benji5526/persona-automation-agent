@@ -35,3 +35,9 @@ Calls ComfyUI, the Python bridge, n8n, SNS APIs or an LLM; holds `service_role`,
 ## Review checklist (Phase 6)
 
 No call to anything but Supabase; searching the code for `sb_secret`, `service_role`, `8188`, `/v1/jobs`, `webhook` finds nothing.
+
+## Personal Edition
+
+- One real user (OWNER). Do not build organization, team, billing or tenant screens; `app_settings.app_mode = 'personal'`.
+- Execution Target: show a settings card listing registered workers (`worker_status`: target, provider, online, GPU name/VRAM as reported) and let the admin choose the active one (`active_worker`). The frontend never receives or sends GPU URLs, keys or pod ids, and never calls the bridge.
+- Manual **Generate** = `create_content_job` RPC (then Realtime). Show a banner when the active worker is offline and jobs are pending.

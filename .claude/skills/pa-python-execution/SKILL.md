@@ -1,6 +1,6 @@
 ---
 name: pa-python-execution
-description: Use when changing the Python bridge in app/ (FastAPI /v1, GPU worker, ComfyUI client, output validation, Storage upload, asset registration) or its tests in tests/bridge. Local RTX 5080 execution layer.
+description: Use when changing the Python bridge in app/ (FastAPI /v1, GPU worker, ComfyUI client, output validation, Storage upload, asset registration) or its tests in tests/bridge. Local execution layer.
 ---
 
 # Python execution layer (bridge)
@@ -30,3 +30,11 @@ POST /v1/jobs { job_id } → claim_automation_job → build from DB rows → Wor
 ## Tests
 
 `tests/bridge` runs against a real local Postgres and a fake ComfyUI: `PYTHONUTF8=1 .venv/Scripts/python -m pytest tests/bridge -q`. Add a test for every new error path (claim race, timeout, OOM downscale, lock loss, bad output).
+
+## Personal Edition: local and cloud workers
+
+- The same code runs on the local PC and in a cloud GPU pod. Only `.env` differs: `EXECUTION_TARGET` (`local`|`cloud`), `WORKER_ID` (e.g. `python:local-1`, `python:runpod-1`), `PULL_JOBS`. `COMFY_URL` is always `127.0.0.1` (ComfyUI never exposed).
+- **Pull** (TECH_DESIGN 56.3): when idle and ComfyUI is up, claim the next generation job (`claim_next_automation_job`). Never claim when ComfyUI is down (attempts must not grow). The DB decides who may claim (`active_worker`); do not re-implement that check in Python.
+- Report GPU name/VRAM from ComfyUI `/system_stats` (never configure or hard-code a GPU model) and report `target`/`provider`.
+- Reject a workflow whose `requirements.min_vram_gb` exceeds the worker's VRAM with `WORKFLOW_UNSUPPORTED_ON_TARGET` (not retryable) before calling ComfyUI.
+- Cloud pods use a dedicated Supabase secret key that is revoked after the pod ends. No inbound port is needed in pull mode.

@@ -31,3 +31,8 @@ ComfyUI down (before and during generation) · bridge timeout · GPU OOM · miss
 ## Done means
 
 Tick `docs/MVP_CHECKLIST.md` section 1 for the feature. Tests passing is necessary, not sufficient. Report failing tests with their output; never hide them. Do not use `skip` / `only` / stub tests as evidence.
+
+## Personal Edition
+
+- Use GPU-neutral ids in tests (`python:local-1`, `python:cloud-1`); never assert a specific GPU model.
+- Required tests: only the **active worker** can claim generation jobs (others get an empty result; other job types unaffected); pull loop claims when idle, does not claim while ComfyUI is down (attempts stay 0), does not claim while busy; switching the active worker lets pending jobs run on the new one; unregistered worker ids cannot be set active; `min_vram_gb` refusal is non-retryable.

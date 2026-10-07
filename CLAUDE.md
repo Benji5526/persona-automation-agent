@@ -1,5 +1,15 @@
 # CLAUDE.md — persona-automation-agent
 
+```text
+CURRENT PRODUCT MODE = PERSONAL
+
+PERSONAL MODE IS THE ACTIVE IMPLEMENTATION TARGET.
+SAAS ARCHITECTURE IS PRESERVED AS A FUTURE EXTENSION (docs/architecture/saas.md).
+DO NOT IMPLEMENT SAAS COMPLEXITY UNLESS EXPLICITLY REQUESTED.
+```
+
+The only real user is one person (OWNER = `users.role = 'admin'`). Do not add multi-user, organizations, teams, billing, plans, customer quotas, per-customer GPU/workers, scaling infrastructure, or multi-region. Do not delete the SaaS-oriented design documents or the existing schema; keep extension points documented only. Details: `docs/architecture/personal.md`, TECH_DESIGN 56.
+
 Rules for Claude Code in this repository. Read this first, then the documents it points to.
 
 ## 0. Sources of truth (read before changing anything)
@@ -29,8 +39,12 @@ The MVP prioritizes reliability, observability, safety and deterministic executi
 ## 2. Architecture
 
 ```text
-Lovable / React → Supabase → n8n → Python FastAPI bridge (127.0.0.1) → ComfyUI → RTX 5080
+Lovable / React → Supabase → n8n → Python FastAPI bridge (127.0.0.1) → ComfyUI → GPU (Execution Target: local or cloud)
 ```
+
+Lovable = Control Center · Supabase = Source of Truth · n8n = Orchestrator · Python = Execution Service · ComfyUI = Generation Engine · LLM = Decision Engine.
+
+**Execution Target.** The GPU is never hard-coded (no "RTX 5080" in code, config or tests): the worker reports its GPU from ComfyUI `/system_stats`. The admin picks the active worker (`app_settings.active_worker`: local or cloud); only that worker may claim generation jobs (enforced by the DB). Workers **pull** jobs from the DB (`PULL_JOBS`); the bridge interface (`POST /v1/jobs`) and code are identical for local and cloud. The frontend never knows GPU URLs, keys or pods; manual Generate = `create_content_job` RPC → n8n → active worker (the same path as autonomous generation). ComfyUI is never exposed to the internet. See `docs/architecture/execution-targets.md`.
 
 The LLM is the runtime intelligence layer (the provider is one sub-workflow; currently Anthropic Claude). Claude Code is the development assistant.
 
@@ -136,7 +150,7 @@ Use official APIs; no browser automation where an official API exists. Publishin
 
 ## 17. Autonomy levels
 
-Per-persona `agent_permission_level` 0 Observe, 1 Recommend (everything needs approval), 2 Create Content, 3 Generate + Schedule, 4 Generate + Publish, 5 Full (TECH_DESIGN 15.19, 30.9). **MVP v1.0: default 0, start at 1, maximum 2.** Fan replies use a separate `fan_reply_level`. No level bypasses policy, budget, rate limits or Emergency Stop.
+OWNER = `users.role = 'admin'` (single owner; no role rename). Per-persona `agent_permission_level` 0 Observe, 1 Recommend (everything needs approval), 2 Create Content, 3 Generate + Schedule, 4 Generate + Publish, 5 Full (TECH_DESIGN 15.19, 30.9). **MVP v1.0: default 0, start at 1, maximum 2.** Fan replies use a separate `fan_reply_level`. No level bypasses policy, budget, rate limits or Emergency Stop.
 
 ## 18. When the architecture must change
 

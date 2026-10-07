@@ -1,5 +1,7 @@
 # Technical Design: persona-automation-agent
 
+> **프로필 안내 (2026-10-07):** 이 프로젝트의 활성 구현 대상은 **Personal Edition**(사용자 1명)이다. 이 문서의 SaaS 지향 내용(조직·다중 사용자·고객별 한도·Multi-Persona 자율 운영 등)은 삭제하지 않고 보존한다. 경계와 섹션별 프로필 지도: [architecture/saas.md](architecture/saas.md), 현재 구조: [architecture/personal.md](architecture/personal.md), GPU 선택(Local/Cloud): 56장. 충돌하면 56장이 우선한다.
+
 | 항목 | 내용 |
 |---|---|
 | 기준 문서 | [PRD v1.0](PRD.md) |
@@ -14924,3 +14926,123 @@ Instagram ─ Webhook (서명 검증) + 10분 안전망 Polling ─▶ n8n WF-01
 | 전송 확인 | 확인 불가면 `HUMAN_REVIEW` | `submitted_at` 체크포인트 + `verify_only` + `UNCONFIRMED` (55.6 3번) | 43.8과 같은 규칙 |
 | 사람이 고친 문장 | 수정해도 Safety 검증 | 결정적 검사 셋(비밀값·`never_claim`·길이·창), URL·연락처는 경고 (55.6 4번) | 사람의 의도 존중 |
 | 다음 단계 | 56. Autonomous Controller | WF-015 Autonomous Operation Controller (32장, V2b·Long-term) | 32.2 |
+
+---
+
+## 56. Personal Edition과 Execution Target (Local ↔ Cloud GPU) ✅
+
+> 이 프로젝트의 실제 사용자는 지금 **한 명**이다. 그래서 구현 대상을 **Personal Edition**으로 정하고, 1~55장의 SaaS 지향 설계는 **지우지 않고 보존**한다 (`docs/architecture/saas.md`). 이 장은 ① 두 프로필의 경계, ② GPU를 특정 장비에 고정하지 않는 **Execution Target**, ③ 클라우드 GPU에 맞는 **pull 방식 디스패치**를 정한다. 코드는 이 장을 따라 단계적으로 바꾼다 (56.8). 1~55장의 본문은 수정하지 않는다. 충돌하는 곳은 이 장이 우선한다 ⚙️.
+
+### 56.1 프로필: Personal과 SaaS
+
+| | **PERSONAL (활성)** | SAAS (보존, 구현 안 함) |
+|---|---|---|
+| 사용자 | 1명 (`users` 1행) | 여러 명, `organizations`·`memberships`·`subscriptions` |
+| 역할 | **OWNER ≡ `users.role = 'admin'`** (Operator + Admin 권한을 모두 가짐). DB 값은 바꾸지 않는다 | operator / admin / 조직 역할 (36.2 `persona_members`) |
+| 로그인 | Google OAuth → Supabase Auth, **가입 허용 목록에 본인 이메일 하나** (24.3) | 초대·가입·플랜 |
+| RLS | 그대로 유지 (`Persona → 소유자`). 복잡한 멀티테넌트 정책은 만들지 않는다 | `organization_id`·`tenant_id`·`membership` 확장 |
+| GPU | 설정에서 고르는 **Execution Target** (56.2) | 고객별 GPU Pool·워커 |
+| 한도 | 하루 한도 몇 개 (15.18) | 고객별 Quota·플랜 한도 |
+
+- **프로필은 `app_settings.app_mode`(`personal`, 기본) 한 칸으로만 기록**한다. 코드에 `if app_mode` 분기를 흩뿌리지 않는다. 프로필이 하는 일은 ① 기본값(가입 허용 목록 1개, 한도) ② Lovable이 보여줄 기능 목록(`capabilities`: `multi_user`·`organizations`·`billing` = `false`)이 전부다. 지금 SaaS 화면은 존재하지 않으므로 코드 변경은 거의 없다.
+- **Personal에서 만들지 않는 것**: 조직·팀·멤버·워크스페이스 전환·테넌트 관리·구독·과금·플랜 한도·초대·팀 권한·고객별 GPU/n8n/ComfyUI·수평 확장·로드 밸런서·다중 리전·API Gateway·Kubernetes·Redis(필요가 입증될 때만)·Message Queue(n8n + Supabase Job 큐로 충분하다).
+- **1~55장의 프로필 지도**는 `docs/architecture/saas.md`에 둔다: ACTIVE(9~14, 15 핵심, 17~29, 41~54), LATER(30~33 핵심, 31·55 팬, 32), DEFERRED(34·35 실험·최적화, 36 Multi-Persona, 37-A·38·39의 Incident·SLO·오프사이트 백업·비용 모델).
+
+### 56.2 Execution Target
+
+**Execution Target = 일을 실행하는 장소(워커 한 대).** 지금은 두 가지다.
+
+| Target | 위치 | 비고 |
+|---|---|---|
+| `local` | 내 PC의 Python 브릿지 + ComfyUI (`127.0.0.1`) | 이 PC는 RTX 3070 8GB다 (SDXL 계열) |
+| `cloud` | 렌탈 GPU Pod **안의** 같은 Python 브릿지 + ComfyUI (`127.0.0.1`) | 첫 공급자는 Runpod 하나 |
+
+- **GPU 모델을 어디에도 고정하지 않는다.** 모델명·VRAM은 설정값이 아니라 **워커가 ComfyUI `/system_stats`로 보고**한다 (`worker_status.gpu`). "RTX 5080"이라고 적었는데 실제는 3070인 일이 생기지 않게 한다. 문서·코드·테스트의 `rtx5080` 표기는 GPU 중립 이름(`python:local-1`)으로 바꾼다 (PRD·TECH_DESIGN 본문은 그대로 두고 이 장이 우선한다).
+- **워커 등록부는 기존 `worker_status`** (`id`, `kind`, `comfyui_ok`, `gpu`, `queue_size`, `last_seen_at`, `models`)다. 칸 두 개만 더한다: `target`(`local` / `cloud`), `provider`(`local` / `runpod` …). 워커가 상태 보고(`report_worker_status`)에 함께 보낸다.
+- **GPU Provider(누가 빌려주나)는 메타데이터와 생명주기 어댑터**다. Python 쪽 인터페이스는 시그니처만 둔다: `status()`, `start()`, `stop()`, `idle_shutdown()`. 지금은 시작·종료를 사람이 직접 하므로 `LocalProvider`는 아무것도 하지 않고, `RunpodProvider`는 만들지 않는다. 필요한 상태 표시(온라인·꺼짐·사용 가능)는 `worker_status.last_seen_at`·`comfyui_ok`로 이미 된다.
+- **Frontend는 GPU 인프라를 모른다.** Lovable이 아는 것은 워커 목록(`target`·`provider`·온라인 여부)과 활성 워커 하나뿐이다. ComfyUI·브릿지 주소, 키, Pod ID는 DB에도 Frontend에도 두지 않는다 (워커의 `.env`와 n8n Credential에만 있다).
+- Python 실행 인터페이스(`POST /v1/jobs`, Job 선점, 결과 등록)는 **Local이든 Cloud든 같다.** 애플리케이션은 어느 쪽인지 몰라도 된다.
+
+**활성 워커 선택** ⚙️: `app_settings.active_worker`(워커 `id` 문자열 또는 `null`)로 정한다. 설정 화면의 "Execution Target ◉ Local ○ Cloud"는 이 값을 바꾸는 admin 동작이다 (`update_app_setting`).
+
+- `null`이면 제한 없음 (지금 동작과 같다, 기본값). 값이 있으면 **그 워커만 generation Job을 선점할 수 있다.** 다른 워커의 `claim_next_automation_job`·`claim_automation_job`(generation)은 **빈 결과**다. 선점은 DB 함수가 강제한다 (워커 코드가 아니라).
+- Job에 Target을 고정하지 않는다. 대기 중인 Job은 **활성 워커가 바뀌면 그 워커가 가져간다.** 그래서 "꺼진 Target에 갇힌 Job"을 옮기는 별도 동작이 필요 없다.
+- 활성 워커가 오프라인(`last_seen_at` 90초 초과)이면 generation Job은 `pending`으로 기다린다. Lovable이 "Cloud GPU가 꺼져 있어요 · 대기 3건" 배너를 보여준다 (생성 대기 시간 알림은 37.6의 큐 적체 규칙).
+
+### 56.3 pull 방식 디스패치 ⚙️
+
+20.9·25.5의 **push**(n8n이 `POST https://브릿지/v1/jobs`)는 로컬 PC 하나에는 맞지만 클라우드 GPU에는 맞지 않는다: Pod마다 주소가 바뀌고, 브릿지를 인터넷에서 부를 수 있게 해야 한다. 그래서 **워커가 DB에서 직접 가져가는 pull**을 기본으로 한다.
+
+```text
+브릿지(워커)  every PULL_INTERVAL_SEC(5)
+   ├ 이미 실행·대기 중인 Job이 있으면 건너뜀 (GPU 동시성 1)
+   ├ ComfyUI가 꺼져 있으면 선점하지 않음 (attempts가 늘지 않게, push의 503과 같은 이유)
+   └ claim_next_automation_job('generation', WORKER_ID) → 성공하면 기존 대기열에 enqueue
+```
+
+- **브릿지의 나머지(검증·ComfyUI·업로드·Asset 등록·Heartbeat·회수)는 그대로다.** 추가되는 것은 위의 가져가기 루프와 설정 `PULL_JOBS`·`PULL_INTERVAL_SEC` 뿐이다.
+- **push는 호환용으로 남긴다** (`POST /v1/jobs`와 WF-003). 로컬 개발·기존 테스트가 그대로 돈다. pull이 켜진 워커는 WF-003이 보내는 요청도 같은 DB 선점을 거치므로 중복 실행이 없다.
+- **pull을 쓰면 브릿지는 인터넷에서 오는 요청을 받을 필요가 없다.** Cloud Pod는 Supabase로 나가는 연결만 있으면 되고, Cloudflare Tunnel·Access·`X-Bridge-Token` 노출을 클라우드에서는 쓰지 않는다 (브릿지는 Pod 안 `127.0.0.1`).
+- Content Job → 프롬프트 생성(WF-002) → generation Job 생성까지는 지금과 같고 **n8n 구성은 바뀌지 않는다.** pull을 쓰는 환경에서 WF-003(push)은 꺼 둘 수 있다. 수동 [생성]과 자동 생성은 **같은 경로**(Content Job → WF-001 → generation Job → 활성 워커)를 쓴다.
+- 지연: 가져가기 간격(기본 5초)만큼 시작이 늦다. 개인 사용에는 허용 범위다.
+
+**수동 [생성]** ⚙️: Lovable은 Python API를 부르지 않는다. [생성] = `create_content_job` RPC → 위 경로 (결정: 브라우저에 브릿지 토큰·주소를 둘 수 없다, 15.6·18.1). 프롬프트를 직접 쓰면 LLM 단계(WF-002)를 건너뛴다 (20.8).
+
+### 56.4 DB 변경 (`0010`, 추가만) ⚙️
+
+| 변경 | 내용 |
+|---|---|
+| `app_settings.app_mode` | `'personal'` (기본). 읽기 전용 표시용 |
+| `app_settings.active_worker` | `null`(기본) 또는 워커 id. admin이 `update_app_setting`으로 바꾼다. **등록되지 않은(`worker_status`에 없는) id는 거부** |
+| `worker_status.target`, `provider` | nullable 두 칸 + CHECK (`target in ('local','cloud')`). `report_worker_status`가 `info`의 `target`·`provider`를 저장 |
+| `claim_automation_job`, `claim_next_automation_job` | generation Job에 한해 `active_worker`가 있고 `p_worker`와 다르면 **빈 결과**. 다른 job_type(`prompt`·`caption`·`publish` …)은 영향 없음 |
+| `get_app_settings` | 반환 키에 `active_worker`·`app_mode` 추가 (admin) |
+
+적용한 마이그레이션(0001~0009)은 고치지 않는다. 모든 칸은 기본값으로 **지금 동작을 그대로 유지**한다 (`active_worker = null`).
+
+### 56.5 클라우드 워커 배포와 능력 검사
+
+- **배포**: Pod 안에서 브릿지와 ComfyUI를 같이 띄운다 (Docker 이미지). `COMFY_URL=http://127.0.0.1:8188` (브릿지 설정 검증이 localhost만 허용하므로 Cloud에서도 ComfyUI가 밖으로 열리지 않는다). 시작·종료는 사람이 한다. `idle_shutdown`은 시그니처만 둔다.
+- **`.env`**: `EXECUTION_TARGET=cloud`, `WORKER_ID=python:runpod-1`, `PULL_JOBS=true`, `SUPABASE_URL`, `SUPABASE_SECRET_KEY`. 로컬은 `EXECUTION_TARGET=local`, `WORKER_ID=python:local-1`.
+- **Workflow 능력 검사**: Registry의 Workflow에 선택 칸 `requirements.min_vram_gb`를 둔다. 워커가 자기 VRAM(`/system_stats`)보다 큰 요구의 Workflow를 받으면 ComfyUI를 부르기 전에 `WORKFLOW_UNSUPPORTED_ON_TARGET`(재시도 없음)으로 실패한다. 예: 3070 8GB에서 약 16GB의 `flux1-dev-fp8`. 이때 Operator는 활성 워커를 Cloud로 바꾸고 [실패한 단계만 다시 실행]한다.
+- **모델·LoRA는 Target마다 따로 설치**한다 (`worker_status.models`). Persona 설정의 모델 드롭다운은 **활성 워커의 목록**을 보여주고, 신원 LoRA가 없으면 경고한다. 자동 복사는 하지 않는다. 없으면 `MODEL_NOT_FOUND`/`LORA_NOT_FOUND`다.
+
+### 56.6 보안 (렌탈 GPU)
+
+- **클라우드 워커 전용 secret key를 따로 만든다.** 렌탈 머신에 키를 두는 위험이 있으므로 Pod를 끝내면 그 키를 폐기·교체한다 (15.6의 "n8n용·Python용 key 분리"를 Local용·Cloud용으로 한 번 더 나눈다). 근본 해결(워커가 서명 URL로만 Storage에 쓰기)은 Personal 범위 밖이다.
+- ComfyUI는 어느 Target에서도 `127.0.0.1`에만 열고 인터넷에 노출하지 않는다. pull에서는 브릿지도 밖으로 열 필요가 없다.
+- 로그에 비밀값을 남기지 않는다 (`redact`). Pod의 볼륨·로그에도 키를 남기지 않는다.
+
+### 56.7 Lovable 화면 (설정)
+
+설정에 **Execution Target** 카드를 둔다 (admin).
+
+```text
+Execution Target
+ ◉ Local   python:local-1   ● 온라인   RTX 3070 · VRAM 8GB
+ ○ Cloud   python:runpod-1  ○ 꺼져 있음   (마지막 보고 3시간 전)
+대기 중인 생성 3건 · 활성 워커가 꺼져 있으면 시작 후 자동으로 진행돼요.
+```
+- 목록은 `worker_status`(읽기)에서, 선택은 admin 설정 변경으로 한다. GPU 모델·VRAM은 워커가 보고한 값을 그대로 보여준다.
+- Lovable은 주소·키·Pod 정보를 받지도 보내지도 않는다.
+
+### 56.8 구현 순서
+
+| 단계 | 내용 |
+|---|---|
+| **A** | 문서·CLAUDE.md·Skill 개정, `rtx5080` 표기 일반화 (코드 없음) — 이 장과 `docs/architecture/*` |
+| B | 마이그레이션 `0010`과 DB 테스트 (선점 gating, `active_worker` 검증, 다른 job_type 영향 없음) |
+| C | 브릿지: `EXECUTION_TARGET`·`WORKER_ID`·`PULL_JOBS`, pull 루프, 상태 보고 필드, `min_vram_gb` 검사, 기본 `WORKER_ID`·테스트 ID를 GPU 중립으로 |
+| D | Lovable 설정 카드(Phase 프롬프트), n8n은 WF-003(push)을 pull 환경에서 끄는 안내만 |
+| E | 클라우드 이미지(브릿지 + ComfyUI)와 런북, 클라우드 전용 키 |
+
+**남은 사전 조건은 Phase 0이다**: Supabase 새 프로젝트, 생성 PC(이 PC는 SDXL 계열), ComfyUI 실행 (PHASE0.md). 다른 세션이 시작한 pull 루프 코드(`pull_loop`, `PULL_JOBS`)는 이 장의 56.3을 따른다. 주석의 "Solo 프로필"은 **Personal**로 통일한다.
+
+### 56.9 확정한 결정 (2026-10-07)
+
+| # | 결정 | 이유 |
+|---|---|---|
+| 1 | 수동 [생성]은 `create_content_job` RPC → n8n → 활성 워커. Lovable → Python 직접 호출은 만들지 않는다 | 비밀 노출 규칙, 수동·자동이 같은 경로 |
+| 2 | 디스패치는 **pull**, push는 호환용 유지 | 클라우드 Pod에 맞고 inbound가 필요 없다 |
+| 3 | OWNER ≡ `users.role = 'admin'`, DB 값 변경 없음 | RPC 체크·테스트·SaaS 확장 매핑이 그대로 |
+| 4 | Local = 이 PC(RTX 3070 8GB), Cloud = Runpod 하나 | 큰 모델은 Cloud, 능력 검사로 사고 방지 |

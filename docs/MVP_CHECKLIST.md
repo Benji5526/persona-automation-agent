@@ -36,7 +36,7 @@
 | 4 | Content Job 생성 (`queued`) | 1 | 27.4 | ☐ |
 | 5 | n8n Claim (Atomic, 중복 없음) | 1 | 27.6 D3, 49.5 3번 | ☐ |
 | 6 | Python 실행 (브릿지 선점 → 생성) | 1 | 25.6 | ☐ |
-| 7 | ComfyUI 생성 (RTX 5080) | 1 | 25.6, 48.8 | ☐ |
+| 7 | ComfyUI 생성 (활성 GPU: Local 또는 Cloud) | 1 | 25.6, 48.8 | ☐ |
 | 8 | Asset 업로드 (Storage) | 1 | 27.4 | ☐ |
 | 9 | Asset DB 등록 (lineage 칸 포함) | 1 | 27.3 확인 SQL, 50.3 | ☐ |
 | 10 | Asset 승인·반려 (사유) | 2 | 50.5 3번 | ☐ |

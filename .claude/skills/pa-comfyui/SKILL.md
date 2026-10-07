@@ -20,3 +20,8 @@ description: Use when working with ComfyUI generation in persona-automation-agen
 ## First generation
 
 Follow TECH_DESIGN 25.6 and 48.8: manual generation in ComfyUI → record the environment → bridge job without n8n → `ready` + one asset row.
+
+## Personal Edition: GPU-neutral
+
+- Never assume a GPU. Workflows may declare `requirements.min_vram_gb`; the worker refuses ones it cannot run (`WORKFLOW_UNSUPPORTED_ON_TARGET`). This PC is an RTX 3070 8GB (SDXL-class models); large models (e.g. ~16GB `flux1-dev-fp8`) belong on the cloud worker.
+- Models and LoRAs are installed per target (`worker_status.models`). The identity LoRA must exist on every target a persona may use; a missing file is `MODEL_NOT_FOUND`/`LORA_NOT_FOUND`, never auto-copied.

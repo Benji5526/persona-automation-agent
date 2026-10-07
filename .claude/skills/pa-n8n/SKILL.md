@@ -26,3 +26,9 @@ WF-001 Content Job Dispatcher · 002 Prompt Generator · 003 Generation Dispatch
 ## Checks
 
 Static validation of the JSON (valid JSON, node references, Code node syntax) and an end-to-end run with the fake LLM (`llm_mode = fake`) before enabling the real one.
+
+## Personal Edition
+
+- n8n does not know about GPUs. With pull workers, WF-003 (push to `POST /v1/jobs`) is optional and may be switched off; keep it for local compatibility. Both paths use the same DB claim, so no double execution.
+- Manual Generate and AI decisions both create a Content Job and take the same WF-001 → WF-002 path.
+- No SaaS features (per-customer workers, tenant routing).
