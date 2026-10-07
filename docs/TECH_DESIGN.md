@@ -13651,3 +13651,166 @@ Phase 3은 n8n·브릿지 없이 만든다 (22.22). 화면에서 만든 Job이 �
 | 환경 기록 | 기록한다 | 첫 실제 생성 때 runbook에 손으로, 자동 파일은 V1 | 38.8 |
 | 실행 순서 | ComfyUI → 체크포인트 → Workflow 제작 → 수동 → LoRA → 신원 → JSON → Registry → Python → Asset | 수동 생성 → 기록 → F0·Supabase → 브릿지 첫 생성 → 범위 조정 → 계열 결정 → (Flux 템플릿) → 신원 LoRA | 템플릿은 있고, 파이프라인 확인과 제품 결정을 나눔 |
 | 다음 단계 | 49 n8n 생성 파이프라인 | 44.5 4~6번 (WF-001~006은 작성됨) | M3 |
+
+---
+
+## 49. n8n Production Generation Workflow — 원안 대응과 첫 자동 실행 ✅
+
+> 원안 49의 Orchestration Layer(Dispatcher → 생성 호출 → 결과 → 재시도 → 오류 처리)는 **이미 설계·구현되어 있다** (M3: `n8n/pa_*.json`). 원안과 가장 많이 겹치는 곳은 **14장과 20장**이고, 20.21에 Workflow 구성·Trigger·상태 값·재시도·Monitor의 조정 이유가 있다. 그 밖의 근거는 11장(상태·선점·회수), 19장(브릿지), 21.15(Realtime), 27장(테스트), 37장(감시)이다. 이 장은 원안 대응, 원안이 짚어 새로 찾은 빈틈 세 가지, 첫 자동 실행(Sprint 1 5·6번)의 확인 항목을 정한다. 원안과 다른 곳은 ⚙️로 표시하고 49.8에 모았다.
+
+### 49.1 구현 상태 (원안 49.1~49.5, 49.39·49.40)
+
+원안의 원칙("n8n은 판단하거나 이미지를 생성하지 않는다. 작업을 찾아 안전하게 Python 실행 계층에 전달하고 상태를 관리한다")은 20.1과 같다. 원안 49.39의 구현 요구 26개와 49.40의 체크리스트는 다음과 같이 나뉜다.
+
+| 원안 요구 | 상태 | 근거 |
+|---|---|---|
+| Pending Job 조회, Atomic Claim, Automation Job 생성, 한 번에 한 건 생성 | 완료 | WF-001·002, `claim_content_job`·`claim_next_automation_job`, 브릿지 단일 Worker (20.5, 20.15) |
+| Python 호출 (ID만, 임의 Prompt·Workflow·경로 금지), `202` 비동기 | 완료 | WF-003 `POST /v1/jobs` (`job_id`만), 브릿지 `202` (20.9) |
+| 성공·실패 감지, 재시도 판정, 영구 오류 구분, Backoff, 최대 횟수, 최종 실패 | 완료 (n8n이 아니라 DB와 브릿지가 한다) | `fail_automation_job`, `app_settings.retry_backoff_seconds` (20.11, 14.11) |
+| `execution_logs`, `system_errors`, 오류 분류 | 완료 | WF-006, `log_execution` (20.12, 20.13) |
+| 멈춘 Job 회수 | 완료 | `recover_stale_jobs`, pg_cron 1분 (11.6) |
+| **크래시 뒤 Asset 존재 확인, 중복 생성 방지** (원안 49.29) | **일부** | 선점·잠금으로 Job 중복은 막지만, 등록 뒤 완료 전에 죽은 Job을 다시 돌리면 Asset이 또 생긴다 → **49.5 1번** |
+| Credential 사용, Workflow JSON에 비밀값 금지 | 완료 | 20.16, `N8N_BLOCK_ENV_ACCESS_IN_NODE` (15.9) |
+| Content Job `generating → ready`, Asset `generated`, Lovable Realtime | 완료 (DB 트리거와 Realtime) | 11.9 R1, 21.15, 17.7 |
+| 단계별 소요 시간 (원안 49.35) | **일부** | `COMFYUI_WAIT`·`COMPLETE`만 `duration_ms`가 있다 → **49.5 2번** |
+| 동시 Dispatcher에서도 Claim은 하나 (원안 49.37) | **테스트가 순차** | 같은 연결에서 순서대로 두 번 호출하는 것만 확인한다 → **49.5 3번** |
+| **원격 n8n 설치, Credential, import, DB Webhook, 실제 E2E, 실패 경로 실행** | **남음** | 20.20의 ❌ 세 줄, 49.7 |
+
+원안 완료 기준 중 **코드 쪽은 49.5의 세 가지를 빼고 끝났다.** 남은 것은 실제 실행이다.
+
+### 49.2 원안 흐름과 지금 흐름 (원안 49.1·49.4·49.41)
+
+원안의 상태 이름(`PENDING → GENERATING → GENERATED`, `CLAIMED → RUNNING → SUCCEEDED`)은 실제 상태 값으로 바뀐다 (11.3, 11.4, 20.21).
+
+```text
+Lovable ─ create_content_job ─▶ Supabase  content_jobs = queued
+                                    │ DB Webhook (+ 1분 안전망)
+                                    ▼
+[PA] 001  claim_content_job            queued → generating
+          create_automation_job(prompt)
+                                    ▼
+[PA] 002  claim → (LLM) → save_prompt_parts
+          create_automation_job(generation)   키 generation:{content_job_id}:{run_number}
+          complete(prompt)
+                                    ▼ DB Webhook (+ 1분 안전망)
+[PA] 003  POST /v1/jobs { job_id } ─▶ 브릿지 202   (n8n Execution은 여기서 끝)
+                                    ▼
+브릿지    claim_automation_job → ComfyUI → RTX 5080 → 검증 → Storage
+          register_asset → complete_automation_job   (Heartbeat 30초)
+                                    ▼ DB 트리거 (Rollup)
+Supabase  generation = done, content_jobs = ready, assets = generated ─▶ Realtime ─▶ Lovable
+                                    ▼ 브릿지 콜백
+[PA] 004  Asset을 DB에서 다시 확인 → caption Job → [PA] 005
+```
+
+원안과 다른 점은 둘이다. **상태를 바꾸는 쪽이 DB(트리거·RPC)와 브릿지**이고, **n8n은 단계 사이를 잇기만 한다.** n8n이 죽어도 Job은 DB에 남고, 다시 켜지면 안전망이 이어서 처리한다 (20.4).
+
+### 49.3 Workflow 대응 (원안 49.3·49.4·49.30)
+
+| 원안 | 현재 | 비고 |
+|---|---|---|
+| [PA] 001 Content Job Dispatcher | WF-001 `pa_001_content_job_dispatcher.json` | Schedule(5초) 대신 DB Webhook + 1분 안전망 (20.4) |
+| [PA] 002 Image Generation | WF-002 Prompt Generator + WF-003 Generation Dispatcher | 프롬프트 만들기와 Python 호출을 나눔. Persona·Parameter·LoRA 조립은 브릿지가 DB에서 (20.8) |
+| [PA] 003 Generation Monitor | 만들지 않음 | 브릿지가 DB에 직접 기록하고 콜백, 멈춘 작업은 Heartbeat 회수 (20.9) |
+| [PA] 004 Retry Handler | 만들지 않음 | DB `fail_automation_job` 하나가 n8n·Python 모두의 재시도를 정한다 (20.11) |
+| [PA] 005 Error Handler | WF-006 `pa_006_error_handler.json` | 번호만 다르다. 005는 Caption Generator가 이미 쓴다 (14.3) |
+| (원안에 없음) | WF-004 Result Handler, WF-005 Caption Generator, `pa_llm_structured_call` | 결과 처리와 캡션 초안 |
+
+원안 49.30의 "Failed → Retryable? → Backoff → PENDING"은 Workflow 노드가 아니라 `fail_automation_job` 안의 분기다 (20.11).
+
+### 49.4 원안 항목별 대응 (원안 49.5~49.38)
+
+| 원안 | 여기 | 근거 |
+|---|---|---|
+| Dispatcher는 5~10초마다 Schedule | DB Webhook으로 즉시, 1분 Schedule은 안전망 ⚙️ | 20.4. 5초 Polling은 일이 없어도 한 달에 약 52만 번 실행된다 |
+| 조회 `status = 'pending'`, `priority DESC, created_at ASC` | Content Job은 `queued`, 순서는 같다. 조회한 Job은 반드시 Claim을 거친다 | 20.5, 18.6 |
+| 한 번에 1 Job만 Claim (RTX 5080 Concurrency = 1) | WF-001은 `queued`를 10건까지 선점해 prompt Job을 만들고(LLM은 병렬 가능), **GPU 동시성은 브릿지 대기열이 1로 묶는다** ⚙️ | 20.15. n8n에서 1건만 보내면 GPU가 놀 때가 생긴다 |
+| `claim_pending_content_job()` + `FOR UPDATE SKIP LOCKED` | `claim_content_job(id)`는 `queued → generating`을 한 문장으로, `claim_next_automation_job`은 `FOR UPDATE SKIP LOCKED` | 20.5. 0행이면 다른 Worker가 가져간 것이라 조용히 끝난다 |
+| Automation Job: `IMAGE_GENERATION`, `worker`, `attempts`, `max_attempts` | job_type `prompt`·`generation`·`caption`, `worker`(`n8n`·`python`), `attempts`, `max_attempts` | 20.6, 10.15 |
+| 상태 `PENDING / CLAIMED / RUNNING / SUCCEEDED / RETRY_WAIT / DEAD` | `pending / processing / done / failed`, 재시도 대기는 `pending` + 미래의 `run_after` | 11.4, 20.11 |
+| Idempotency `generation:{automation_job_id}` | `generation:{content_job_id}:{run_number}` ⚙️. Job을 만들기 **전에** 키가 있어야 하므로 Automation Job ID는 쓸 수 없다. 같은 키면 기존 Job을 돌려준다. 브릿지는 선점으로 중복 호출을 거부한다 (`409`) | 20.6, 19.7 |
+| `POST 127.0.0.1:8000/jobs/generate` + Bearer, 본문 ID 3개 | `POST /v1/jobs`, `X-Bridge-Token` + Cloudflare Access, `job_id` 하나. Content Job·Persona는 선점한 Job 행에서 읽는다 | 20.9, 47.2 |
+| 클라우드 n8n ↔ 로컬 Python은 VPN·Tailscale, `0.0.0.0` 공개 금지 | Cloudflare Tunnel + Access Service Token. 브릿지는 `127.0.0.1`에만 바인딩, 공유기 포트는 열지 않는다 | 20.17, 15.7·15.13 |
+| `202 Accepted`, 상태는 Monitor가 확인 | `202`는 같다. Monitor 대신 DB 직접 기록 + 콜백 + Heartbeat | 20.9 |
+| 성공 시 n8n이 `SUCCEEDED`·`GENERATED` 확인 | n8n은 쓰지 않는다. Rollup 트리거가 Content Job을 `ready`로 바꾸고, WF-004는 콜백 값을 믿지 않고 Asset을 DB에서 다시 조회한다 | 11.9 R1, 20.10 |
+| Content Job `Generating → Generated`를 Realtime으로 표시 | `content_jobs`·`automation_jobs`·`assets` Realtime, 이벤트를 받으면 쿼리 무효화 | 21.15, 18.8 |
+| 재시도 가능·금지 오류 목록 | 코드 이름만 다르다 (`COMFYUI_UNAVAILABLE` → `COMFY_UNREACHABLE` 등). 대응표는 20.11 | 13.12, 20.11 |
+| Retry 30초 / 2분 / 5분 | `[30, 120, 300, 900]`. 기본 `max_attempts = 3`이라 **대기는 두 번(30초, 2분)** ⚙️ | 20.11. 원안 49.20은 3차 Retry(5분)까지 쓰는데 49.9·49.39는 최대 3회 시도라 서로 어긋난다. 49.39를 따른다 |
+| OOM은 Python이 1회 Fallback, 그래도 실패하면 일반 정책 | 같은 값으로 1회 재시도 → 3번째 시도에서 후보 수를 반으로. 그래도 실패하면 `failed` | 19.12, 27.5 F7 |
+| Error Handler: 분류 → `system_errors` → `execution_logs` → Automation Job → Content Job | WF-006은 `CLAIM` 기록으로 Job을 찾아 `fail_automation_job`을 부르고, Content Job은 Rollup이 바꾼다 | 20.12, 11.9 R2 |
+| `system_errors`에 `severity`·`correlation_id`·`content_job_id` | `service`·`error_type`·`error_code`·`retryable`·`resolved`·`persona_id`·`automation_job_id`는 있다. 나머지는 두지 않는다 ⚙️ | 37.3, 37.14 |
+| Correlation ID `corr_{uuid}`를 전체에 전달 | 두지 않는다 ⚙️. 뿌리 행(Content Job) → FK → `execution_logs`, ComfyUI는 `execution_ref` | 37.2, 47.2 |
+| 실행 단계 `DISPATCH`·`CLAIM`·`AUTOMATION_CREATE`·`PYTHON_REQUEST`·`GENERATION_START`·`GENERATION_COMPLETE`·`ASSET_READY`·`JOB_COMPLETE` | n8n: `DISPATCH`(prompt Job 생성), `CLAIM`, `LLM`, `COMPLETE`, `N8N_ERROR`. 브릿지: `BUILD`, `COMFYUI_QUEUE`, `COMFYUI_WAIT`, `VALIDATE`, `UPLOAD`, `COMPLETE`. `PYTHON_REQUEST`는 n8n 실행 기록에만 있다 | 20.13, 19.16 |
+| n8n crash 뒤 복구: Supabase가 정본, Recovery Monitor | 별도 Monitor 없이 안전망(1분)과 pg_cron 회수 | 20.4, 11.6, 27.6 R1 |
+| Stale 기준 "RUNNING 1시간 업데이트 없음" | Heartbeat 30초마다, generation은 3분 지나면 stale (n8n Job은 2분) ⚙️. 원안 기준보다 훨씬 빠르게 알고, 정상 생성은 Heartbeat가 와서 오판하지 않는다 | 11.6 |
+| Stale이면 Python·ComfyUI 상태와 Asset을 확인한 뒤 재실행 | Python·ComfyUI 상태는 보지 않는다 (죽은 Worker를 조회할 곳이 없고, 늦게 살아난 Worker는 `locked_at` 불일치로 결과가 버려진다). **Asset 확인이 빠져 있다** | 11.6, **49.5 1번** |
+| n8n Credential에 Supabase·Python API, JSON에 비밀값 금지 | 같다. `PA Supabase`(n8n 전용 secret key), `PA Bridge`, 노드의 환경 변수 접근 차단 | 20.16, 15.6 |
+| n8n에는 테이블별 최소 권한 (읽기·쓰기 나눔) ⚙️ | Supabase의 secret key는 `service_role`이라 RLS를 우회하므로 **테이블 단위로 줄일 수 없다.** 대신 SQL 노드가 없고(PostgREST 호출만), 상태를 바꾸는 일은 Worker RPC 함수로 한다. n8n용·Python용 key를 따로 만들어 유출 때 하나만 폐기한다. 프런트는 publishable key만 쓴다 | 15.6, 12.5, 27.7 S1 |
+| Queue Fairness (Priority·Quota·Age·Persona 공정성) | MVP는 단순 Queue, V2에서 같은 우선순위 안에서 오늘 GPU를 가장 적게 쓴 Persona의 Job을 먼저 | 36.4 |
+| 지표: Queue Size, Running, Success, Failure, Retry, Dead, 평균 생성 시간 | n8n이 따로 추적하지 않고 DB에서 계산한다. MVP는 27.3의 확인 SQL, V1은 `monitoring_metrics`(5분마다)와 SLO | 37.5, 37.11 |
+| 지연 시간 분해 (대기 + 요청 + 생성 + 검증 + 업로드) | 대기와 생성은 이미 있고 검증·업로드가 빠졌다 | **49.5 2번** |
+| 첫 E2E (Lovable → … → Realtime → Preview) | 27.4의 기대 상태 표, 27.8 최종 인수 | 27.4, 44.5 6~8번 |
+| 실패 E2E: ComfyUI 종료, 잘못된 Model, Python 종료, n8n 재시작, 중복 Dispatcher | F1·F2(ComfyUI), F4(없는 모델), R2·R3(브릿지), R1(n8n), D1~D3(중복) | 27.5, 27.6. 동시 Dispatcher는 **49.5 3번** |
+| Lovable은 Generation Status, Automation Job, Progress, Error, Asset만 | 진행은 **단계로** 보여준다 (가짜 %를 만들지 않음). Job Detail의 타임라인과 경과 시간 | 17.7 |
+| "Generation time: 48.2s" | `COMPLETE` 기록의 `duration_ms` (브릿지가 `BUILD`부터 완료까지 잰 값) | 49.5 2번 |
+| Claude Code 구현 Prompt (Workflow 5개) | 같은 내용이 M3로 구현됨. 새 구현 Prompt는 쓰지 않는다. 시험 단계는 49.6 | 16.8 |
+
+### 49.5 보강 (F0) ⚙️
+
+원안이 짚은 것 중 코드에 없는 세 가지다. 모두 작은 변경이고, 1번은 **첫 자동 실행 전에** 한다.
+
+| # | 항목 | 지금 | 바꿀 곳 | 테스트 | 시점 |
+|---|---|---|---|---|---|
+| 1 | **재실행 전 Asset 확인** (원안 49.28·49.29) | 브릿지는 선점한 Job을 곧바로 `BUILD`부터 실행한다. `register_asset`은 성공했는데 `complete_automation_job` 전에 PC가 꺼지거나 응답을 잃으면(27.6 R3·R5), Job이 `pending`으로 돌아가 다시 생성하고 **새 UUID로 Asset이 또 생긴다.** `register_asset`의 `on conflict (id) do nothing`은 같은 ID일 때만 막는다 | `worker._run` 맨 앞(조립 전)에서 `assets where automation_job_id = job.id`를 조회한다. 있으면 생성하지 않고 그 ID들로 `complete_automation_job`을 부르고 `RECOVERED` 단계를 기록한다. 완료 조건이 "Asset 1개 이상"이라(11.4) 일부만 등록된 경우도 완료로 본다. "확인 없이 재생성하지 않는다"는 원안 49.29의 원칙을 `recover_stale_jobs`가 아니라 **선점한 뒤의 실행 지점**에 둔다. 회수·재시도·단계 재시도가 모두 이 길을 지나기 때문이다 | 가짜 DB에 Asset이 있는 generation Job을 선점시키면 ComfyUI를 한 번도 부르지 않고 `done`이 되고 Asset 수가 그대로다 (`tests/bridge`). Asset이 없으면 기존 동작 | F0, 첫 실제 E2E 전 |
+| 2 | **단계별 소요 시간** (원안 49.35) | `COMFYUI_WAIT`·`COMPLETE`에만 `duration_ms`가 있다. 검증·업로드 시간은 알 수 없다 | `VALIDATE`·`UPLOAD`의 `succeeded` 기록에 `duration_ms`를 더한다. 대기는 generation Job의 `started_at - created_at`(첫 선점까지), 총 시간은 Content Job의 `completed_at - created_at`으로 새 칸 없이 계산한다 | 가짜 ComfyUI로 한 번 돌려 `BUILD`~`COMPLETE` 단계의 `duration_ms`가 합리적인지 확인 | F0 (37.5의 P50·P95는 V1) |
+| 3 | **동시 선점 테스트** (원안 49.37 "중복 Dispatcher") | `claim_content_job`·`claim_automation_job`의 테스트는 같은 연결에서 순서대로 두 번 부른다. `FOR UPDATE SKIP LOCKED`와 한 문장 UPDATE가 실제 동시 호출에서도 맞는지는 확인하지 않는다 | `tests/db`에 새 연결 둘을 동시에 열고(Barrier로 같은 시각에 호출) 같은 `queued` Content Job과 같은 `pending` generation Job을 선점시키는 테스트를 더한다 | 어느 쪽이든 정확히 1개만 행을 돌려받고 나머지는 빈 결과 | F0 |
+
+- **1번이 막지 못하는 것**: ComfyUI가 아직 그 Job의 prompt를 실행 중일 때 브릿지가 다시 시작하는 경우다. 이때는 ComfyUI에 같은 작업이 두 번 들어갈 수 있다. 브릿지는 시작할 때 ComfyUI 대기열을 보지 않는다. 지금은 한 PC·한 Worker이고 새 선점은 Heartbeat 회수 뒤에만 일어나므로(최소 3분), 드문 경우로 보고 **실제 운영에서 한 번이라도 나오면** 시작할 때 대기열을 비우는 것을 정한다.
+- **원안의 Python Job 상태 확인은 하지 않는다**: Python(브릿지)이 죽었으면 그 Job을 물어볼 곳이 없고, 상태의 정본은 DB이기 때문이다 (19.4).
+
+### 49.6 실행 순서 (44.5 4~8번)
+
+| # | 할 일 | 누가 | 통과 |
+|---|---|---|---|
+| 1 | 49.5 1~3번 + 테스트 | Claude Code | `pytest tests -q` 통과 |
+| 2 | 도메인, Named Tunnel, Access Service Token (25.5) | 사람 | 토큰 없으면 차단 (44.5 4번) |
+| 3 | n8n 서버 (VPS, `docker compose up`), Credential 입력, import·활성화, DB Webhook 2개, 백업 timer (26.3, n8n_guide) | 사람 + Claude Code (배포 파일) | `verify_production.sql` 15~17 |
+| 4 | 가짜 LLM으로 **화면 없이** 파이프라인: SQL로 `queued` Content Job을 만든다 (44.5 6번, 27.4 표와 대조) | 사람 + Claude Code | 사람 손 없이 `ready`, 중복 검사 0행 |
+| 5 | 실패·복구·중복 (27.5 F1·F2·F4, 27.6 D1~D3·R1~R3·R5) | 사람 | 각 표의 기대값. **R3·R5는 49.5 1번 확인 포함** (Asset 수가 늘지 않는지) |
+| 6 | Lovable에서 만든 Content Job으로 같은 경로 (44.5 7·8번) | 사람 | 27.8 |
+
+원안 49.36의 14단계 E2E는 4번(Lovable 없이)과 6번(Lovable 포함)을 합친 것이다.
+
+### 49.7 완료 판단
+
+| 항목 | 상태 |
+|---|---|
+| WF-001~006 + LLM 하위 Workflow 작성 | ✅ (M3) |
+| 49.5 1~3번 | ❌ F0 |
+| 원격 n8n, Credential, Webhook 연결 | ❌ 49.6 2·3번 |
+| 가짜 LLM + 실제 브릿지 E2E, 실패·복구 시험 | ❌ 49.6 4·5번 |
+| 실제 LLM | ❌ 44.5 9번 |
+
+원안 49.36의 "이 테스트 하나가 가장 중요하다"에 동의한다. 이 E2E가 통과해야 Sprint 1 파이프라인이 사람 손 없이 돈다고 말할 수 있다.
+
+### 49.8 원안 조정
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 이 장의 성격 | 새 구현 명세 | 구현된 Orchestration의 대응·빈틈·실행 순서 | M3 완료, 14·20장이 같은 원안을 이미 대응 |
+| Workflow | 5개 (Dispatcher, Image Generation, Monitor, Retry, Error) | 001·002·003·004·005·006 + LLM 하위 | 14.3, 20.21 |
+| Trigger | 5~10초 Schedule | DB Webhook + 1분 안전망 | 20.4 |
+| 상태 이름 | `PENDING/CLAIMED/RUNNING/SUCCEEDED/RETRY_WAIT/DEAD/GENERATED` | `queued/pending/processing/done/failed`, Content Job `ready` | 11장 |
+| Monitor, Retry Handler | Workflow | 없음. DB 함수 + 브릿지 직접 기록 + Heartbeat | 20.9, 20.11 |
+| Python 요청 | ID 3개, Bearer, `/jobs/generate` | `job_id` 하나, `X-Bridge-Token` + Access, `/v1/jobs` | 47.2 |
+| 원격 접근 | VPN·Tailscale | Cloudflare Tunnel + Access | 15.13 |
+| 동시 선점 수 | Dispatcher가 1건만 | Dispatcher는 여러 건, 브릿지가 GPU 1로 묶음 | 20.15 |
+| 재시도 횟수 | 49.20은 3회 대기, 49.39는 최대 3회 시도 | 3회 시도(대기 2번), 세 번째 대기(5분)는 `max_attempts`를 올릴 때만 | 원안 내부 불일치, 49.39 채택 |
+| Stale 기준 | 1시간 | Heartbeat 3분 (generation) | 11.6 |
+| 재실행 전 확인 | Python·ComfyUI 상태, Asset | **Asset만**, 선점한 뒤 실행 지점에서 (49.5 1번) | 죽은 Worker를 조회할 수 없다, 모든 재실행 경로가 지나는 곳 |
+| 심각도, Correlation ID | `severity`·`correlation_id` | 두지 않음 | 37.2, 37.3 |
+| n8n 최소 권한 | 테이블별 | key 분리 + SQL 노드 없음 + Worker RPC | `service_role`은 RLS 우회 |
+| 지표 | n8n이 추적 | DB에서 계산 | 37.5 |
+| 진행 표시 | `progress: 0.65` | 단계 표시 | 17.7, ComfyUI는 정확한 %를 모른다 |
+| 다음 단계 순서 | 50 Asset Management → 51 SNS Publishing → 52 Scheduled Publishing → 53 Analytics → 54 AI Decision | 같다 (Sprint 2의 게시 → 예약 순서와 일치, 44.6). 45.10의 표는 51·52가 반대인데 이 순서가 맞다 | 44.6 |
+| 다음 단계 | 50 Asset Management | 11.7, 17.10, 22.12 (DB 완료, Lovable Phase 4) | 45.10 |
