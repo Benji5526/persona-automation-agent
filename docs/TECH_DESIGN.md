@@ -1874,6 +1874,8 @@ workflows/
 | `output` | 기대하는 결과 종류와 MIME, 크기 범위(`min_bytes`, `max_bytes`. `max_bytes`는 `media` 버킷 한도 이하, 47.3) |
 | `oom_fallback` | GPU 메모리 부족 시 해상도를 낮춰 재시도해도 되는지 (13.12) |
 
+> ⚙️ 버전 규칙 (48.4): 노드 구조를 바꾸면 새 ID(`…_v2`)로 새 파일을 만든다. Parameter 기본값·범위나 노드 안의 고정값만 바꾸면 같은 ID에서 `version`을 올린다. 새 ID로 옮길 때는 Persona와 끝나지 않은 Job을 먼저 옮긴 뒤 이전 ID를 끈다. 아직 켜지 않은 초안은 같은 ID에서 바꿔도 된다.
+
 ### 13.4 Workflow 단계별 도입
 
 | 단계 | Workflow |
@@ -1882,6 +1884,8 @@ workflows/
 | **V1** | `upscale_v1`, `video_generation_v1` (Image-to-Video) ⚙️, Advanced Character Reference, Style Reference, FaceSwap 고도화 |
 | **V2** | Video Upscale, Video Processing |
 | **Long-term** | Autonomous Workflow Selection, Workflow Optimization, Model·LoRA Selection, Generation Experimentation |
+
+> ⚙️ 위 템플릿의 기본값은 SD 계열 기준이다 (CFG 7, Negative Prompt). Flux 계열도 같은 템플릿에 `cfg = 1`을 주면 돈다 (ComfyUI가 guidance 3.5를 기본으로 넣는다). guidance를 조절하고 CFG 실수를 막으려면 Flux용 템플릿을 새 ID로 더한다 (48.2). `faceswap_v1`은 모델 계열과 무관하다.
 
 ### 13.5 Workflow별 규격
 
@@ -1903,7 +1907,7 @@ Checkpoint → LoRA Loader → CLIP / UNET → KSampler → Image
 Input Image → VAE Encode → KSampler (denoise) → VAE Decode → Output Image
 ```
 
-**character_reference_v1: Character Reference.** 캐릭터 외형 일관성을 유지한다. 내부 구현은 IP-Adapter 등 Reference 기반 노드로 바꿀 수 있고, 상위 API는 노드 이름을 몰라도 된다.
+**character_reference_v1: Character Reference.** 캐릭터 외형 일관성을 유지한다. 내부 구현은 IP-Adapter 등 Reference 기반 노드로 바꿀 수 있고, 상위 API는 노드 이름을 몰라도 된다. (⚙️ 노드를 바꾸면 새 ID로 옮긴다, 48.4)
 
 ```text
 Character Reference → Reference Encoder → Prompt Conditioning → Generation
@@ -2046,7 +2050,7 @@ ComfyUI에 보내기 전에 Python이 검증한다. 하나라도 실패하면 Co
 | Model·LoRA 존재 | ComfyUI `GET /object_info/{노드 이름}`이 돌려주는 선택 가능 목록에 파일명이 있는지 확인 (결과는 5분 캐시) |
 | 입력 이미지 존재 | 참조한 `asset_id`·`persona_asset_id`가 같은 Persona 소속이고 Storage에 파일이 있음 |
 | 자리표시자 | 템플릿의 `{{…}}`가 모두 채워짐 |
-| 출력 노드 | 템플릿에 SaveImage 같은 저장 노드가 있음 |
+| 출력 노드 | 브릿지가 따로 검사하지 않는다 ⚙️. 저장 노드가 없으면 ComfyUI가 `/prompt`에서 400(`prompt_no_outputs`)을 돌려주고 `WORKFLOW_INVALID`가 된다 (48.7) |
 
 > AI가 Workflow를 고르게 되는 Long-term 단계에서도 같은 검증을 거친다. Registry에 없거나 `enabled = false`인 Workflow는 거부한다.
 
@@ -3682,7 +3686,7 @@ GPU 작업은 정확한 진행률을 알 수 없다. **가짜 %를 만들지 않
     "lora_persona_asset_id": "…",
     "lora_strength": 0.75,
     "face_ref_persona_asset_id": "…",
-    "default_params": { "width": 1024, "height": 1536, "steps": 30, "cfg": 7 },
+    "default_params": { "width": 1024, "height": 1280, "steps": 30, "cfg": 7 },
     "style": "photorealistic"
   }
 }
@@ -3690,7 +3694,7 @@ GPU 작업은 정확한 진행률을 알 수 없다. **가짜 %를 만들지 않
 
 - 성격은 슬라이더(0~1)와 태그를 함께 쓴다. 말투는 드롭다운과 표현 목록으로 입력한다.
 - `age_group`은 **성인 연령대만** 고를 수 있다 (`20s`, `30s`, `40s+`) (15.11).
-- Visual Identity 화면: Base Model·Default Workflow 드롭다운(`comfy_workflows`), LoRA 선택(`persona_assets` 중 `lora`), LoRA 강도, Face·Style Reference 업로드(`persona-private`, 15.5. 파일을 먼저 올리고 성공한 뒤 행을 만든다. 행 저장이 실패하면 올린 파일을 지운다 ⚙️ 45.6).
+- Visual Identity 화면: Base Model·Default Workflow 드롭다운(`comfy_workflows`), LoRA 선택(`persona_assets` 중 `lora`), LoRA 강도, Face·Style Reference 업로드(`persona-private`, 15.5. 파일을 먼저 올리고 성공한 뒤 행을 만든다. 행 저장이 실패하면 올린 파일을 지운다 ⚙️ 45.6). 기본 해상도는 프리셋 셋(세로 4:5 1024×1280, 정사각 1024×1024, 가로 3:2 1536×1024) 중 하나로 고른다 ⚙️ (48.3).
 - **테스트 이미지 생성:** `[테스트 이미지 생성]`은 별도 기능이 아니라 `metadata = {"purpose": "visual_test"}`인 `draft` Content Job을 INSERT한 뒤 `submit_content_job`을 부른다 (`create_content_job`에는 `metadata` 인자가 없다, 23.4). 결과는 같은 화면 미리보기 칸에 표시하고, Asset Library 기본 필터에서는 숨긴다.
 
 ### 17.9 Content Jobs · Create Content · Job Detail
@@ -3721,6 +3725,7 @@ GPU 작업은 정확한 진행률을 알 수 없다. **가짜 %를 만들지 않
 | 후보 수 | MVP | 1~4 |
 | 우선순위 | MVP | 낮음(1) / 보통(5) / 높음(8) / 긴급(10) |
 | 플랫폼 | MVP | Caption 초안용 |
+| 해상도 ⚙️ | MVP | Persona 기본 / 세로 4:5 / 정사각 / 가로 3:2 프리셋만. 임의 값 입력 없음. 선택한 Workflow 범위 안의 것만 보이고, 해상도 Parameter가 없으면 숨김 (48.3) |
 | 예약 | V1 | 생성 시각 예약 (46.3). 게시 시각은 Post에서 정한다 |
 
 원안의 "Approval: Required/Optional" 선택은 넣지 않는다 ⚙️. V1의 모든 게시물은 승인이 필수이고(PRD 2번), 선택권은 V2 자동 승인 정책에서 다룬다.
@@ -3741,7 +3746,7 @@ Job #129 · Gina · 이미지 생성                        ● 생성 중
 ────────────────────────────────────────────────────────────
 내용   주제: 도쿄 야경 · Workflow: image_generation_lora_v1
        프롬프트 구성: subject Gina · location Tokyo at night · style photorealistic
-       파라미터: 1024×1536 · steps 30 · cfg 7 · seed 182937
+       파라미터: 1024×1280 · steps 30 · cfg 7 · seed 182937
 ────────────────────────────────────────────────────────────
 결과   [img] [img] [img] [img]
 ────────────────────────────────────────────────────────────
@@ -3806,7 +3811,7 @@ GPU 메모리가 부족해서 생성하지 못했어요.
 | error_code | 화면 문장 | 제안 행동 |
 |---|---|---|
 | `COMFY_UNREACHABLE`, 브릿지 `503` | 로컬 생성 PC에 연결할 수 없어요. PC와 ComfyUI가 켜져 있는지 확인해 주세요. 켜지면 자동으로 다시 시도해요. | Automation 화면 |
-| `OUT_OF_MEMORY` | GPU 메모리가 부족했어요. 해상도를 낮춰 자동으로 다시 시도하고 있어요. | 기다리기 |
+| `OUT_OF_MEMORY` | GPU 메모리가 부족했어요. 후보 수나 해상도를 줄여 자동으로 다시 시도하고 있어요. | 기다리기 |
 | `CUDA_ERROR` | GPU 오류가 났어요. ComfyUI를 다시 시작해야 할 수 있어요. | 실행 기록 |
 | `MODEL_NOT_FOUND`, `LORA_NOT_FOUND` | 생성에 필요한 모델 파일(…)을 찾지 못했어요. Persona의 Visual Identity 설정을 확인해 주세요. | Persona 설정으로 이동 |
 | `WORKFLOW_INVALID` | 선택한 Workflow 설정에 문제가 있어요. | 다른 Workflow로 다시 만들기 |
@@ -5636,8 +5641,8 @@ Header 배지는 원안의 4단계(HEALTHY·DEGRADED·ERROR·OFFLINE) 대신 3�
 | Default Workflow | 드롭다운 (`comfy_workflows`, `enabled = true`) | `visual_settings.default_workflow` |
 | Base Model | `worker_status.models.checkpoints` 드롭다운. 목록이 비었으면(브릿지가 아직 보고하지 않음) 파일 이름 입력 | `visual_settings.base_model` |
 | LoRA | `persona_assets` 중 `asset_type = 'lora'` 선택. 새 LoRA는 **파일 이름만 등록** (`worker_status.models.loras`에서 고르거나 입력) | `visual_settings.lora_persona_asset_id` |
-| LoRA 강도 | 슬라이더 0~1 | `visual_settings.lora_strength` |
-| 기본 Parameter | 해상도·steps·cfg (선택한 Workflow의 `params` 범위 안) | `visual_settings.default_params` |
+| LoRA 강도 | 슬라이더 0~1.5 (Registry 범위, 48.5) | `visual_settings.lora_strength` |
+| 기본 Parameter | 해상도는 프리셋(48.3), steps·cfg는 선택한 Workflow의 `params` 범위 안. Flux 계열이면 cfg 1 (48.2) | `visual_settings.default_params` |
 | Face·Style·Character Reference | 이미지 업로드 | `persona-private/persona/{id}/refs/{uuid}.{ext}` + `persona_assets` |
 | 스타일·외모 설명 | 텍스트 | `visual_settings.style`, `visual_settings.appearance` (LLM 프롬프트용, 20.8) |
 
@@ -5675,6 +5680,7 @@ Header 배지는 원안의 4단계(HEALTHY·DEGRADED·ERROR·OFFLINE) 대신 3�
 | 프롬프트 | **선택**, 4,000자. 비우면 파이프라인이 만든다 |
 | Negative 프롬프트 | 선택, 2,000자 |
 | 후보 수 | 1~4 |
+| 해상도 ⚙️ | 프리셋: Persona 기본 / 세로 4:5 / 정사각 / 가로 3:2 (선택한 Workflow 범위 안의 것만, 48.3) |
 | 플랫폼 | 선택 (`instagram` 기본) |
 | 우선순위 | 1~10 (기본 5. 화면에는 낮음·보통·높음·긴급) |
 | Workflow | 선택. 비우면 Persona 기본값 |
@@ -5705,7 +5711,7 @@ Gina · image · Instagram · 우선순위 보통 · 3분 전
 
 - **진행:** 17.7 단계 ⚙️. 원안의 `Created → Queued → Generating → Generated → Review → Approved → Published`는 MVP에서 승인·게시가 없으므로 위 단계로 바꾸고, V1에서 "캡션 → 승인 → 게시"를 뒤에 붙인다.
 - **실행 기록:** `state_transitions`와 `execution_logs`를 시간순으로 합친다. step 이름은 사람이 읽는 문장으로 바꾼다 (`COMFYUI_WAIT` → "ComfyUI에서 생성 중").
-- **실패 화면:** `src/lib/errors.ts`로 오류 코드를 문장으로 바꾼다 (17.12). 예: `OUT_OF_MEMORY` → "GPU 메모리가 부족했어요. 해상도를 낮춰 자동으로 다시 시도하고 있어요." + 시도 `2 / 3`. "기술 정보 보기"를 펼치면 오류 코드, 서비스, 재시도 가능 여부, 시도 횟수, 시각, Job ID를 보여준다. Stack Trace는 보여주지 않는다.
+- **실패 화면:** `src/lib/errors.ts`로 오류 코드를 문장으로 바꾼다 (17.12). 예: `OUT_OF_MEMORY` → "GPU 메모리가 부족했어요. 후보 수나 해상도를 줄여 자동으로 다시 시도하고 있어요." + 시도 `2 / 3`. "기술 정보 보기"를 펼치면 오류 코드, 서비스, 재시도 가능 여부, 시도 횟수, 시각, Job ID를 보여준다. Stack Trace는 보여주지 않는다.
 - **버튼:** 18.11 표. `failed`면 [처음부터 다시 실행](`retry_content_job`)과 [실패한 단계만 다시 실행](`retry_automation_job`) 둘 다 있다 ⚙️ (원안: [Retry] 하나).
 - **취소:** `cancel_content_job` RPC. DB가 하위 Job을 `cancelled`로 바꾸고, 브릿지는 결과를 버린다 (19.14). Frontend는 브릿지·n8n을 부르지 않는다.
 
@@ -6231,11 +6237,11 @@ Windows PC (RTX 5080, 일반 사용자 계정으로 실행 — 관리자 권한 
 19.20의 남은 항목 "실제 ComfyUI에서 `image_generation_v1` 1장 생성"을 **n8n과 LLM 없이** 확인하는 절차다. Supabase는 24.3 1~11까지 끝나 있어야 한다.
 
 1. 브릿지를 켜고 `http://127.0.0.1:8000/v1/health`가 `{"ok": true, "comfyui": true, …}`인지 확인한다. 콘솔에 Registry Workflow 목록이 나오고, 잠시 뒤 `comfy_workflows` 테이블에 동기화된다.
-2. SQL Editor에서 테스트 Persona를 만든다. `base_model`은 `models\checkpoints`에 실제로 있는 파일 이름이다.
+2. SQL Editor에서 테스트 Persona를 만든다. `base_model`은 `models\checkpoints`에 실제로 있는 파일 이름이다. `default_params`는 세로 4:5(1024×1280)이고 `cfg`는 SD 계열 7, **Flux 계열 1**이다 (48.2). Flux 템플릿을 더했다면 그 ID를 `default_workflow`에 넣는다.
    ```sql
    insert into public.personas (user_id, name, slug, description, visual_settings)
    select id, 'Bridge Test', 'bridge-test', 'test persona',
-          '{"default_workflow": "image_generation_v1", "base_model": "<checkpoint>.safetensors"}'::jsonb
+          '{"default_workflow": "image_generation_v1", "base_model": "<checkpoint>.safetensors", "default_params": {"width": 1024, "height": 1280, "cfg": 7}}'::jsonb
      from public.users where email = 'you@example.com'
    returning id;
    ```
@@ -6562,8 +6568,8 @@ select asset_id, count(*) from public.posts group by asset_id having count(*) > 
 | F3 없는 Workflow | `create_content_job(..., p_workflow => 'no_such_workflow')` (SQL, 화면은 목록만 허용) | `WORKFLOW_INVALID`(validation), 재시도 없이 generation `failed` → Content Job `failed` | `WORKFLOW_NOT_FOUND` |
 | F4 없는 Base Model | Persona `visual_settings.base_model`을 없는 파일 이름으로 | `MODEL_NOT_FOUND`, 바로 `failed` (실행 전 검증, ComfyUI에 보내지 않음) | – |
 | F5 없는 LoRA | `default_workflow = image_generation_lora_v1` + 없는 이름의 `lora` persona_asset | `LORA_NOT_FOUND`, 바로 `failed` | 같음 |
-| F6 시간 초과 | 브릿지 `.env`에 `JOB_TIMEOUT_SEC=20`, steps 80·해상도 2048로 생성 | `TIMEOUT` → ComfyUI 작업 정리 → `pending`(30초 → 2분) → 3번째도 실패하면 `failed`. 끝나면 900으로 되돌리고 브릿지 재시작 | `GENERATION_TIMEOUT` |
-| F7 GPU 메모리 부족 (선택) | 해상도 2048×2048 + 후보 4장 (OOM이 안 나면 건너뜀) | `OUT_OF_MEMORY` → 1회 같은 값으로 재시도 → 3번째 시도에서 후보 수를 반으로 줄임 (`generation_metadata.oom_downscaled = true`) → 그래도 실패하면 `failed` (19.12) | 해상도 축소 1회 |
+| F6 시간 초과 | 브릿지 `.env`에 `JOB_TIMEOUT_SEC=20`, steps 80·해상도 2048로 생성 (화면 프리셋에 없는 값이라 SQL로 Content Job `params`를 넣는다) | `TIMEOUT` → ComfyUI 작업 정리 → `pending`(30초 → 2분) → 3번째도 실패하면 `failed`. 끝나면 900으로 되돌리고 브릿지 재시작 | `GENERATION_TIMEOUT` |
+| F7 GPU 메모리 부족 (선택) | 해상도 2048×2048 + 후보 4장, SQL로 `params` (OOM이 안 나면 건너뜀) | `OUT_OF_MEMORY` → 1회 같은 값으로 재시도 → 3번째 시도에서 후보 수를 반으로 줄임 (`generation_metadata.oom_downscaled = true`) → 그래도 실패하면 `failed` (19.12) | 해상도 축소 1회 |
 | F8 LLM 출력 오류 (가짜 LLM) | 가짜 LLM 고정 JSON에서 `subject`를 지운 사본으로 바꿔 둔다 | `LLM_OUTPUT_INVALID`, prompt Job 재시도 후 `failed` → Content Job `failed`. 끝나면 되돌림 | – |
 | F9 LLM 하루 한도 | admin 설정에서 `daily_llm_calls_limit = 0` (`claude` 모드) | `reserve_llm_call` 거부 → `RATE_LIMITED`, Claude API는 호출되지 않음, `security_events`에 기록 | – |
 
@@ -6823,7 +6829,7 @@ claim_automation_job(publish) → CLAIM 기록
 
 **미디어 규격 문제와 해결 (V1 작업)**
 
-Instagram 피드 이미지는 **JPEG만**, 비율 **4:5 ~ 1.91:1**, 너비 320~1440px, 8MB 이하다 ([Meta 문서](https://developers.facebook.com/docs/instagram-platform/instagram-graph-api/reference/ig-user/media)). 현재 브릿지는 **PNG**, 기본 해상도 **1024×1536(2:3 = 0.67)**이라 그대로는 게시할 수 없다.
+Instagram 피드 이미지는 **JPEG만**, 비율 **4:5 ~ 1.91:1**, 너비 320~1440px, 8MB 이하다 ([Meta 문서](https://developers.facebook.com/docs/instagram-platform/instagram-graph-api/reference/ig-user/media)). 브릿지 출력은 **PNG**이고, 해상도는 Persona 기본값을 따른다 (Registry 기본 1024×1024, 화면 기본 프리셋 4:5, 48.3). PNG와 2:3 같은 비율은 그대로는 게시할 수 없다.
 
 | 문제 | 해결 | 위치 |
 |---|---|---|
@@ -11569,7 +11575,7 @@ Lovable 앱 코드는 Lovable 프로젝트(그리고 그것이 연결한 GitHub 
 원안 40.62의 Phase 1~10(44단계)는 16장 마일스톤과 같은 방향이다. 범위의 정본은 16장이고, **실행 순서(Sprint)·관문·사람과 도구별 작업 분리는 44장**이다 ⚙️. 지금 위치는 README의 진행 상황이다.
 
 ```text
-[완료]  PRD 1~8, 기술 설계 9~47
+[완료]  PRD 1~8, 기술 설계 9~48
 [완료]  M1 DB (로컬 테스트), M2 브릿지 (로컬 테스트), M3 n8n Workflow 작성
 [다음]  M0 환경 (Supabase·n8n 서버·Cloudflare·Lovable 계정 = 직접 작업)
         → 24장 Supabase 적용 → 25장 PC 연결 → 26장 n8n 배포
@@ -12611,10 +12617,10 @@ DB 복원 뒤의 대조(38장 `reconcile_after_restore`)도 이 확인 실행과
 
 **우선순위** ⚙️: 원안의 Reliability > Security > Observability > Data Quality > AI Intelligence 대신 **안전·보안 ≥ 실행 신뢰성 > 관측 > 데이터 품질 > AI 지능**으로 둔다. 둘이 부딪치면 이 시스템은 일관되게 "계속 돌기"보다 "멈추기"를 고른다: 감시가 멈추면 AI 자동 승인 중지(37.8), 판정할 수 없으면 거부(33.12 Fail Closed), 보안 확인 화면이면 브라우저 게시 즉시 중단(41.7 조건 4), 게시 여부가 불확실하면 사람 확인(43.8 `UNCONFIRMED`). 신뢰성을 보안 위에 두면 이 결정들과 어긋난다. 둘 다 AI 지능보다 위라는 점은 원안과 같다.
 
-**지금 위치** (2026-10-06)
+**지금 위치** (2026-10-07)
 
 ```text
-[완료]  PRD 1~8, 기술 설계 9~47
+[완료]  PRD 1~8, 기술 설계 9~48
 [완료]  M1 DB · M2 브릿지 (로컬 테스트 107개 통과), M3 n8n Workflow 작성
 [다음]  Sprint 1: M0 환경 → DB 적용 → [PC → n8n] ∥ [Lovable] → M5 (27장 E2E)
 ```
@@ -12705,7 +12711,7 @@ G1의 복원 시험 ⚙️: 38.13은 복원 검증·훈련을 V1에서 시작한
 |---|---|---|---|---|
 | 0 | 코드 | – | `pytest tests -q` 확인 (2026-10-06: 107개 통과). **36.12 MVP 수정**을 첫 `db push` 전에 한다 ⚙️: 브릿지의 `content_job.persona_id == job.persona_id` 검사, `automation_jobs`·`posts`의 Persona 일치 트리거(`persona_isolation` 마이그레이션), 격리 테스트, Foundation 보강 테스트(45.6), Content Job 보강 테스트(46.7), 47.3 보강(출력 파일 허용 목록, 출력 크기 상한, 보관 Persona 재실행 차단) | 전부 통과, 36.12 격리 테스트의 MVP 행 |
 | 1 | **M0 + DB 적용** | Supabase 프로젝트, Google OAuth Client(Google Cloud), 이메일 로그인 끔(새 사용자 가입 허용은 켬), `supabase link`·`db push`, 허용 목록 → **Lovable 프로젝트를 만들어 Supabase에 연결하고 빈 화면에서 Google 로그인**(또는 임시 페이지) → admin 지정, secret key 분리 (24.3) | 순서 안내, `verify_production.sql` 결과 해석 | `verify_production.sql` 1~14 |
-| 2 | PC (트랙 A) | 드라이버, ComfyUI(`127.0.0.1`), 체크포인트·LoRA, venv, `.env` 채우기 (25.3) | 설치 오류 분석 | `/v1/health` `ok` |
+| 2 | PC (트랙 A) | 드라이버, ComfyUI(`127.0.0.1`), 체크포인트(지금 있는 Flux면 CFG 1, 48.2), venv, `.env` 채우기 (25.3), ComfyUI 화면에서 수동 생성 (48.8). 베이스 모델 계열 결정과 신원 LoRA는 첫 생성 뒤 (48.8 6~8번) | 설치 오류 분석 | `/v1/health` `ok` |
 | 3 | 첫 생성 (n8n 없이) | 25.6의 SQL·호출 실행 | 결과 확인, 실패 분석 | Content Job `ready`, Asset 1행 |
 | 4 | 터널 | 도메인, Named Tunnel, Access Service Token (25.5) | – | 토큰이 없으면 차단 |
 | 5 | n8n 서버 | VPS, `docker compose up`, Credential 입력, import·활성화, DB Webhook 2개 (26.3, n8n_guide), **백업 timer 설치** (24.3 12번) | Workflow JSON·배포 파일 수정, `deploy/backup/backup.sh` MVP판 (하루 1회 DB 덤프 + n8n 볼륨, 서버 로컬 7일, 38.13) | `verify_production.sql` 15~17, 첫 백업 파일 |
@@ -13502,3 +13508,146 @@ Phase 3은 n8n·브릿지 없이 만든다 (22.22). 화면에서 만든 Job이 �
 | Python | 3.11+ | 3.12 | 25.3 |
 | 그 밖의 원안 항목 | 구조, API 경로, 상태, 멱등 키, Bearer, 클라이언트, 경로, 오류 코드 | 19.21 그대로 | 이미 대응됨 |
 | 다음 단계 | 48 ComfyUI Production Workflow | 13장 Registry 5개(MVP) + 25.6 실제 실행. ControlNet은 13.4 단계표에 없다 (도입하면 Registry에 Workflow를 더한다) | 13.3·13.4 |
+
+---
+
+## 48. ComfyUI Production Workflow — 원안 대응과 첫 실제 생성 준비 ✅
+
+> 원안 48의 Workflow 체계(Registry, 버전, Parameter 주입, Prompt 조립, 검증, Guardrail, 메타데이터)는 **이미 설계·구현되어 있다**: 13장(13.3 Registry ~ 13.14 Batch), `workflows/registry.json`과 템플릿 5개, `app/comfyui/`, `tests/bridge`. 이 장은 원안 대응, 원안이 짚어 새로 정하는 것 세 가지(해상도 프리셋, Workflow 버전 규칙, 생성 PC 구성 기록), 그리고 **이 PC를 확인하다 찾은 결정 사항**(베이스 모델 계열, 48.2)을 다룬다. 원안과 다른 곳은 ⚙️로 표시하고 48.9에 모았다.
+
+### 48.1 구현 상태 (원안 48.1~48.3, 48.38)
+
+원안의 MVP 그래프(Checkpoint → CLIP Text Encode ×2 → KSampler → VAE Decode → Save Image)는 `image_generation_v1`과 같다 (`CheckpointLoaderSimple`, `CLIPTextEncode`, `EmptyLatentImage`, `KSampler`, `VAEDecode`, `SaveImage`).
+
+| Workflow (13.4) | 노드 | Registry | 비고 |
+|---|---|---|---|
+| `image_generation_v1` | 위 그래프 | 켜짐 | 첫 실제 생성(25.6)에 쓴다. 두 계열 모두 된다 (48.2의 `cfg`) |
+| `image_generation_lora_v1` | + `LoraLoader` | 켜짐 | Persona 신원 LoRA |
+| `image_to_image_v1` | `LoadImage`, `VAEEncode`, `ImageScale` | 켜짐 | MVP (원안은 향후). `batch_size`가 없어 후보 수는 1장이다 |
+| `character_reference_v1` | `IPAdapterUnifiedLoader`, `IPAdapter` (Custom Node) | 꺼짐 | SD 계열 전용. 이 PC에는 노드만 있고 IPAdapter·CLIP Vision 모델 파일이 없다 |
+| `faceswap_v1` | `ReActorFaceSwap` (Custom Node) | 꺼짐 | 모델 계열과 무관. 이 PC에는 템플릿이 쓰는 `codeformer-v0.1.0.pth`가 없다 (GFPGAN만 있음). 원본 얼굴은 그 Persona의 `face_ref`만 (15.11) |
+
+원안 완료 기준(48.38) 중 **코드 쪽은 47.3 보강(F0)을 빼고 끝났다**: Registry·버전 기록, Parameter 검증, 임의 Workflow 차단, Seed·Prompt·메타데이터 저장, 실행 후 검증, Timeout, 업로드, Asset 등록. **남은 것은 실제 실행**이다: GPU 인식, 체크포인트 로딩, 첫 이미지, LoRA 적용, 신원 확인 (48.8).
+
+### 48.2 베이스 모델 계열 결정 ⚙️
+
+**확인한 것** (2026-10-07, 이 PC의 `D:\ComfyUI_windows_portable_nvidia`): ComfyUI 0.3.34, PyTorch 2.7.0+cu128(RTX 5080 지원). 체크포인트는 `flux1-dev-fp8.safetensors` 하나(16.06 GiB, 파일 메타데이터의 라이선스는 FLUX.1 [dev] Non-Commercial License)이고 LoRA는 없다. Custom Node로 `comfyui_ipadapter_plus`, `comfyui-reactor`, `comfyui_instantid`, `comfyui_controlnet_aux` 등이 있다 (IPAdapter·InstantID는 모델 파일 없음).
+
+**지금 템플릿과 Flux**: 템플릿의 기본값은 SD 계열 기준이다 (CFG 7, Negative Prompt). 그래도 `image_generation_v1`은 Flux.1-dev에서도 돈다. `CheckpointLoaderSimple`이 fp8 통합 파일을 읽고, ComfyUI가 Flux에 guidance 3.5를 기본으로 넣고, 빈 latent의 채널 수도 맞춰 준다. **단 `cfg`가 1이어야 한다.** CFG 7로 돌리면 결과가 망가지고, CFG 1에서는 Negative Prompt를 계산하지 않는다. 그래서 Flux를 쓰는 Persona는 `default_params.cfg = 1`이 필요하다. 이 값을 빠뜨리면 오류 없이 결과만 나빠지므로, **Flux용 템플릿을 새 ID로 더하는 것을 권한다**: CFG를 1로 고정하고 `FluxGuidance`로 guidance를 Parameter로 받고 Negative 칸을 없앤다 (48.4). 원안 48.15("숫자를 시스템 전체의 절대값으로 하드코딩하지 않는다")가 짚은 문제다.
+
+| | SDXL | Flux.1-dev |
+|---|---|---|
+| 템플릿 | 지금 것 그대로 (CFG 7) | 지금 것 + `cfg = 1`로 시작. 권장: Flux 템플릿(`image_generation_flux_v1`, `image_generation_flux_lora_v1`) |
+| 이미지→이미지 | `image_to_image_v1` | 같은 템플릿에 `cfg = 1` |
+| Character Reference | IPAdapter·InstantID 노드 있음 (모델 파일은 받아야 함) | 지금은 방법이 없다 (이미 꺼진 Workflow라 MVP 범위가 줄지는 않음) |
+| 신원 유지 | 신원 LoRA (SDXL용) | 신원 LoRA (Flux용으로 따로 학습) |
+| 얼굴 교체 | ReActor (모델과 무관) | 같음 |
+| 속도·VRAM (RTX 5080 16GB) | 빠르다 (체크포인트 약 6.5GB) | 느리다. ComfyUI가 확산 모델(fp8 약 11.9GB)과 T5(약 4.8GB)를 따로 올리므로 샘플링 중에는 16GB에 들어갈 가능성이 크지만, 프롬프트마다 T5를 바꿔 올리는 시간이 든다 (실측 필요) |
+| 지금 설치 | 체크포인트를 받아야 한다 | 있음 |
+| 라이선스 | 모델마다 다르다 | FLUX.1 [dev]는 비상업 라이선스이고 결과물 사용 조건이 따로 있다. 유료 구독 플랫폼(Likey·Fantrie)에 쓰려면 **사람이 확인**한다. ReActor·InstantID가 쓰는 InsightFace 모델에도 비상업 조건이 있어 함께 확인한다 |
+
+- **결정은 Operator가 한다.** 품질·신원 방식·속도·라이선스가 걸린 제품 결정이다. 다만 **파이프라인 확인(25.6)은 결정 전에 해도 된다.** 지금 있는 Flux로 `cfg = 1`을 주면 된다. 계열 결정은 **신원 LoRA를 만들기 전에** 한다. LoRA는 베이스 모델 계열에 묶여서, SDXL용 LoRA는 Flux에 쓸 수 없고 반대도 같다.
+- SD1.5는 선택지에서 뺀다. 해상도 프리셋(48.3)이 SD1.5 기준 해상도(512)의 2~3배라 맞지 않는다.
+- **두 계열을 함께 쓸 수도 있다.** Persona마다 `base_model`·`default_params.cfg`가 다르면 된다. 다만 지금은 막는 장치가 없다. 브릿지는 모델 파일이 있는지만 보므로, Flux Persona가 SD 기본값(CFG 7)으로 돌면 조용히 망가진다. 두 계열을 본격적으로 섞으면 Registry에 `family`(`sdxl`/`flux`) 칸을 두고, Persona의 계열과 맞는 Workflow만 보이게 하거나 브릿지에서 거부한다 (그때 정한다).
+
+### 48.3 해상도 프리셋 ⚙️ (원안 48.4·48.5·48.16·48.24·48.25)
+
+원안은 방향마다 Workflow를 따로 둔다(`portrait_v1`, `landscape_v1`, `square_v1`). 여기서는 **Workflow는 기능별로 두고, 해상도는 Parameter의 프리셋**으로 고른다. 해상도만 다른 파일을 두면 LoRA·이미지→이미지 변형마다 파일이 세 배로 늘고, 같은 수정을 여러 파일에 해야 한다.
+
+| 프리셋 | 크기 | 용도 |
+|---|---|---|
+| 세로 4:5 (화면 기본) | 1024×1280 | Instagram 피드 (4:5 ~ 1.91:1, 28.9) |
+| 정사각 | 1024×1024 | |
+| 가로 3:2 | 1536×1024 | |
+
+- **"기본"은 화면 기본값이다.** Registry 기본값은 그대로 1024×1024·CFG 7이고, 화면에서 고른 값은 Persona `default_params`(Visual Identity)나 Content Job `params`(Create Content)에 저장된다.
+- **화면은 프리셋만 보여준다** (원안 48.4의 "임의 해상도 입력 금지"). 선택한 Workflow의 `comfy_workflows.params`에 `width`·`height`가 있고 범위(`min`, `max`, `multiple_of`) 안에 드는 프리셋만 보여주고, 없으면 칸을 숨긴다 (`faceswap_v1`은 해상도 Parameter가 없다). Registry 범위를 줄이면(48.8) 범위를 벗어난 프리셋은 자동으로 숨는다.
+- 원안의 PORTRAIT 1024×1536(2:3)은 넣지 않는다. Instagram 피드 비율 범위 밖이라 게시 전 검사 6번에서 막힌다 (28.9). Likey·Fantrie용 2:3은 브라우저 게시(V1 후반)와 함께, 세로 9:16은 Reels(V1 후반, 41.5)와 함께 검토한다.
+- **Guardrail은 Registry가 Workflow마다 정한다** (13.3·13.10): 지금 512~2048, 8의 배수, steps 1~80, 후보 수(`batch_size`) 1~4. 원안의 "최대 1536, steps 50, batch 1"은 원안도 말하듯 예시다. 첫 실제 생성에서 VRAM·시간·품질을 재고 그 값으로 Registry 범위를 조정한다 (48.8). SDXL은 학습 해상도가 약 1MP라, 1024×1280(1.3MP)·1536×1024(1.6MP)의 품질도 이때 본다.
+- **후보 수**: MVP는 1~4다 (13.14, `content_jobs.variants`). 첫 시험은 1장으로 한다 (원안 48.25와 같은 출발점).
+- **OOM 2차 축소** ⚙️: 지금 Registry의 `oom_fallback.min_pixels`(786,432)로는 1024×1280과 1024×1024를 줄이지 않는다 (줄이면 768×960 = 737,280으로 하한 아래). 3:2 프리셋만 줄어든다. 그래서 `min_pixels`를 589,824(768×768)로 낮춘다 (F0, 48.4 규칙상 `version` 1.1). 화면 문구도 "후보 수나 해상도를 줄여"로 고친다 (17.12).
+
+### 48.4 Workflow 버전 규칙 ⚙️ (원안 48.6)
+
+13.3은 `version` 칸만 정했다. 원안대로 **덮어쓰지 않는 규칙**과, 그때의 전환 순서를 더한다.
+
+| 바꾸는 것 | 하는 일 |
+|---|---|
+| 노드 구조 (노드 추가·제거·연결) | **새 ID**(`…_v2`)로 새 파일을 만든다 |
+| Parameter 기본값·범위, 노드 안의 고정값 | 같은 ID에서 `version`을 올린다 (`1.0 → 1.1`) |
+
+- **전환 순서**: 새 ID 추가 → 그 Workflow를 쓰는 Persona의 `default_workflow`와 아직 끝나지 않은 Content Job의 `workflow`를 새 ID로 옮긴다 → 이전 ID를 `enabled: false`로 끈다. 먼저 끄면 그 ID를 쓰는 Job이 `WORKFLOW_INVALID`(재시도 없음)로 실패한다. 이전 ID는 지우지 않고 남겨서 과거 Asset을 재현할 수 있게 한다.
+- **예외**: `enabled: false`이고 그것으로 만든 Asset이 없는 초안(`character_reference_v1`, `faceswap_v1`처럼 아직 켜지 않은 것)은 같은 ID에서 노드를 바꿔도 된다. Registry 메모의 "Export(API)한 JSON으로 교체"가 이 경우다.
+- 13.1·13.5의 "내부 Node Graph를 바꿔도 상위 API는 그대로"는 여전히 맞다. Content Job은 Workflow ID만 알고, 노드를 바꾸면 위 순서로 새 ID에 옮긴다.
+- Asset의 `generation_metadata`에는 이미 `workflow`(ID)와 `workflow_version`이 있다 (13.9). 브릿지가 시작할 때 `comfy_workflows`에 동기화하므로 화면도 버전을 안다.
+- 새 템플릿은 SaveImage의 `{{filename_prefix}}`와 PNG 출력을 그대로 둔다. 출력 파일 허용 목록(47.3 2번)이 이 이름 규칙에 기댄다.
+
+### 48.5 모델과 LoRA (원안 48.7~48.9, 48.20·48.21, 48.26)
+
+- **모델 Registry는 따로 두지 않는다** ⚙️. 원안의 `model_id → 파일` 대신, Persona의 `visual_settings.base_model`에 ComfyUI 모델 파일 이름을 두고 **실행 전에 ComfyUI가 설치했다고 알려 준 목록과 대조한다** (13.10, `check_models`). 목록에 없는 이름은 `MODEL_NOT_FOUND`다. 이름이 ComfyUI 목록에서만 오므로 경로(`C:\…`, `../`)를 넘길 수 없다. 화면의 선택지도 같은 목록이다 (`worker_status.models`, 0008).
+- **LoRA**: `persona_assets`의 `lora` 행(이름 = LoRA 파일 이름)과 `visual_settings.lora_persona_asset_id`·`lora_strength`다. 강도 범위는 Registry의 0~1.5(기본 0.85)이고, 화면 슬라이더도 이 범위로 맞춘다 (22.9). 원안의 `metadata.lora_id`·`strength_model`·`strength_clip`이 이 칸들이다. Persona마다 따로라는 원안 48.9와 같다 (다른 Persona의 LoRA는 쓸 수 없다, 36.1).
+- **파일 관리**: 모델·LoRA 파일은 Git에 넣지 않는다 (`.gitignore`의 `*.safetensors`·`*.ckpt`). LoRA·참조 원본은 외장 디스크 사본이고(38.3), 모델 목록·체크섬 파일(`deploy/local/models.manifest.json`)과 Custom Node 고정(`comfy_nodes.lock`)은 V1이다 (38.8).
+- **생성 PC 구성 기록** ⚙️ (원안 48.19·48.20): V1의 자동 파일을 기다리지 않고, 첫 실제 생성 때 `docs/runbook.md`(44.5 11번)에 손으로 적는다. 드라이버, PyTorch·CUDA, ComfyUI 버전, Custom Node(이름·버전·용도·출처), 모델 파일(이름·크기·sha256)을 적는다. PC를 새로 구성할 때(38.8 D04·D10) 필요하다.
+
+### 48.6 Prompt, Negative, Seed, 메타데이터 (원안 48.10~48.14, 48.30)
+
+| 원안 | 여기 |
+|---|---|
+| 구조화 Prompt (subject, appearance, clothing, pose, expression, environment, lighting, camera, style) | `prompt_parts` (13.7): `subject → appearance → outfit → location → action → camera → lighting → mood → style` 순서로 Python이 조립한다. clothing = `outfit`, pose = `action`, expression = `mood`, environment = `location` |
+| Persona 신원이 우선 (48.11) | `subject`·`appearance`가 맨 앞이고, 신원 자체는 LoRA가 맡는다. Operator가 `prompt`를 직접 쓰면 그대로 쓴다 |
+| Negative = 공통 + Persona + Content | Persona 기본값(`content_rules.default_negative_prompt`) → Content Job → LLM 추가 항목 순서로 합치고 중복을 뺀다 (`build_negative`). 공통 목록은 새 Persona의 기본 Negative로 채운다 ⚙️. Flux 계열은 CFG 1이라 Negative가 효과가 없다 (48.2) |
+| Seed는 random, 실제 값 저장 | `seed = -1`이면 무작위, 실제 값은 `generation_metadata.seed` (13.9) |
+| 재현 메타데이터 (48.14·48.30) | `generation_metadata`: `workflow`, `workflow_version`, `model`, `lora`, `lora_strength`, `seed`, `steps`, `cfg`, `width`, `height`, `denoise`, `sampler`, `scheduler`, `prompt`, `negative_prompt`, `batch_index`, `comfy_prompt_id`, `oom_downscaled`. Flux 템플릿을 더하면 `guidance`도 남도록 브릿지의 메타데이터 목록(`builder.py`)과 테스트를 함께 고친다 |
+| `generation_mode` | 따로 두지 않는다. Workflow ID와 Registry `inputs`가 정한다 (`image_to_image_v1`이면 입력 이미지가 있다) |
+| `generation_time_ms` | `execution_logs`의 `COMFYUI_WAIT` 소요 시간이다. 화면은 거기서 읽는다 (같은 값을 두 곳에 두지 않는다) |
+
+### 48.7 검증과 Guardrail 대응 (원안 48.17~48.19, 48.23·48.24)
+
+원안 48.23의 실행 전 검사는 13.10과 같다: Workflow ID가 Registry에 있고 켜져 있음, JSON 형식(Registry를 읽을 때), 필요한 노드가 ComfyUI에 있음(없으면 그 Workflow를 끄고 `comfy_workflows`에 동기화), 모델·LoRA 존재, 허용된 Parameter만, 해상도·steps·CFG 범위.
+
+- **출력 노드**: 브릿지가 따로 검사하지 않는다 ⚙️. 저장 노드가 없으면 ComfyUI가 `/prompt`에서 400(`prompt_no_outputs`)을 돌려주고 브릿지는 `WORKFLOW_INVALID`(재시도 없음)로 처리한다. `OUTPUT_INVALID`는 저장 노드는 있는데 `type = output` 파일이 없을 때(PreviewImage만 있을 때 등)다. 13.10의 "출력 노드" 행을 이것으로 고쳤다.
+- 원안 48.18의 "LLM이 ComfyUI JSON 전체를 만들지 않는다"는 19.20 규칙 4·33.2와 같다.
+- Custom Node는 MVP에서 최소로 쓴다(원안 48.19). 켜진 세 Workflow는 기본 노드만 쓴다.
+
+### 48.8 실행 순서 (원안 48.31~48.33, 48.37)
+
+원안 48.37의 순서를 이 시스템에 맞춘다. 템플릿은 이미 있으므로 "Workflow 제작·JSON 저장·Registry 등록"은 "확인"이 된다. 1~2번은 ComfyUI만 쓰므로 Supabase 준비(3번)와 동시에 해도 된다.
+
+| # | 할 일 | 누가 | 근거 |
+|---|---|---|---|
+| 1 | ComfyUI 화면에서 **템플릿과 같은 노드 그래프**로 수동 생성: 체크포인트 로딩, GPU 인식, 세로 4:5 1장, 걸린 시간. 지금 있는 Flux면 CFG 1, SDXL이면 CFG 7 | 사람 | 원안 48.31, 48.2 |
+| 2 | 생성 PC 구성 기록 (48.5) | 사람 + Claude Code | 38.8 |
+| 3 | F0 보강(47.3, `min_pixels` 48.3) / Supabase 24.3 1~11번(F1·F2. 25.6의 SQL은 첫 로그인으로 생긴 `users` 행이 필요하다) | Claude Code / 사람 | 44.5 0·1번, 45.3 |
+| 4 | **브릿지로 첫 실제 생성** (n8n 없이): 1번과 같은 조건(Persona `default_params`에 1024×1280과 그 계열의 CFG)으로 `POST /v1/jobs` → Content Job `ready`, Asset 1행. 실패 경로(없는 모델)도 1번 | 사람 + Claude Code | 25.6, 원안 48.32 |
+| 5 | 실측(VRAM, 생성 시간, 품질)으로 Registry 범위 조정 (해상도·steps·후보 수 상한) | Claude Code | 48.3 |
+| 6 | **베이스 모델 계열 결정** (라이선스 확인 포함) | 사람 | 48.2 |
+| 7 | (Flux로 정하면) 화면에서 Flux 그래프 확인 → API 형식으로 내보내기 → 새 ID 템플릿(`{{filename_prefix}}`, PNG) → Registry 추가, 브릿지 메타데이터에 `guidance`, 테스트 | 사람 → Claude Code | 48.2, 48.4, 48.6 |
+| 8 | 신원 LoRA 준비·적용. 강도를 바꿔 가며 신원이 유지되는지 사람이 보고, 정한 강도를 Persona `visual_settings`에 적는다 | 사람 | 원안 48.26·48.27 |
+
+**실패했을 때** (원안 48.33): 원안의 순서(ComfyUI 단독 → Workflow 직접 실행 → 모델 → LoRA → VRAM → Python 연결 → Parameter 주입 → 출력 → 업로드)가 맞다. 브릿지 쪽은 `execution_logs`의 단계(`BUILD` → `INPUT_UPLOAD` → `COMFYUI_QUEUE` → `COMFYUI_WAIT` → `VALIDATE` → `UPLOAD` → `COMPLETE`)에서 멈춘 곳을 보고, 25.7 장애 대응을 따른다.
+
+### 48.9 원안 조정
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 이 장의 성격 | 새 구현 명세 | 구현된 Workflow 체계의 대응 + 첫 실제 생성 준비 | 13장, Registry 5개, `app/comfyui/` |
+| 베이스 모델 | 언급 없음 (Checkpoint) | 계열 결정(SDXL / Flux)을 신원 LoRA 전에. 파이프라인 확인은 지금 Flux로 CFG 1 | 템플릿은 SD 기본값, 이 PC에는 Flux 체크포인트만 있음, LoRA는 계열에 묶임 |
+| Flux 템플릿 | – | 권장 (CFG 고정, guidance Parameter, Negative 없음) | 지금 템플릿도 CFG 1이면 돌지만 실수를 막지 못함 |
+| Workflow ID | 방향별 `portrait_v1`·`landscape_v1`·`square_v1` | 기능별 ID + 해상도 프리셋 Parameter | 해상도만 다른 파일이 늘어나지 않게 |
+| 세로 기본값 | 1024×1536 (2:3) | 화면 기본 1024×1280 (4:5). Registry 기본은 1024×1024 | Instagram 피드 비율 (28.9) |
+| 해상도 입력 | 임의 값 금지 | 화면은 Workflow 범위 안의 프리셋만, 범위는 Registry가 강제 | 사용자 편의는 화면, 안전은 서버 |
+| Guardrail | 최대 1536, steps 50, batch 1 | Registry 범위 (Workflow마다), 실측 뒤 조정 | 원안도 "테스트 후 조정" |
+| OOM 축소 | – | `min_pixels`를 589,824로 (기본 프리셋에서도 축소되게) | 지금 값으로는 4:5·1:1을 줄이지 않음 |
+| Batch | 1 | 후보 수 1~4 + OOM 시 반으로 (13.14), 첫 시험은 1 | MVP 범위 (13.4) |
+| 버전 | 덮어쓰지 않기 권장 | 구조 변경은 새 ID + 전환 순서, 값 변경은 `version`만, 꺼진 초안은 예외 | 과거 Asset 재현, 대기 중 Job 보호 |
+| 모델 Registry | `model_id` → 파일 | ComfyUI 설치 목록과 이름 대조 | 경로를 넘길 수 없고, 목록을 두 벌 두지 않음 |
+| LoRA 메타데이터 | `lora_id`, 강도 두 개 | `persona_assets`(`lora`) + `visual_settings`, 강도 0~1.5 | 10.6, 17.8, Registry |
+| Prompt 구조 | 9개 칸 | `prompt_parts` 9개 칸 (이름 대응) | 13.7, 테스트로 고정된 순서 |
+| Global Negative | 따로 | 새 Persona의 기본 Negative로 | 칸을 늘리지 않음 |
+| `generation_mode` | 칸 | Workflow ID와 `inputs`로 | 같은 정보를 두 곳에 두지 않음 |
+| `generation_time_ms` | Asset 메타데이터 | `execution_logs` | 같음 |
+| 출력 노드 검사 | Python이 검사 | ComfyUI가 400으로 거부 → `WORKFLOW_INVALID` | 실제 동작에 맞춤 |
+| MVP 범위 | txt2img만 | 이미지→이미지 포함 (13.4), 첫 시험은 txt2img | PRD 7.2 |
+| 환경 기록 | 기록한다 | 첫 실제 생성 때 runbook에 손으로, 자동 파일은 V1 | 38.8 |
+| 실행 순서 | ComfyUI → 체크포인트 → Workflow 제작 → 수동 → LoRA → 신원 → JSON → Registry → Python → Asset | 수동 생성 → 기록 → F0·Supabase → 브릿지 첫 생성 → 범위 조정 → 계열 결정 → (Flux 템플릿) → 신원 LoRA | 템플릿은 있고, 파이프라인 확인과 제품 결정을 나눔 |
+| 다음 단계 | 49 n8n 생성 파이프라인 | 44.5 4~6번 (WF-001~006은 작성됨) | M3 |

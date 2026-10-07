@@ -293,8 +293,9 @@ and Success states.
   text input when the list is empty; warn if a saved name is not in the list);
   LoRA = select from this persona's persona_assets of type 'lora' plus "LoRA 이름 등록"
   (inserts a lora row by name, no upload; offer worker_status.models.loras as suggestions);
-  LoRA strength slider; default params must respect the selected workflow's params
-  (min, max, multiple_of, enum, and type int → integer steps);
+  LoRA strength slider 0-1.5; default resolution = one of the presets in TECH 48.3 that fit the
+  selected workflow's width/height params (hide the field if it has none); other default params
+  must respect the selected workflow's params (min, max, multiple_of, enum, and type int → integer steps);
   reference image upload (png/jpeg/webp, ≤50MB, uuid file name) into persona-private, shown
   with createSignedUrl (1 hour).
   [테스트 이미지 생성] = supabase.from('content_jobs').insert({ persona_id, content_type: 'image',
@@ -312,7 +313,10 @@ and Success states.
 /content-jobs/new: persona (required, active only), content type (only 'image' enabled),
   topic (required if prompt empty, ≤500), prompt (optional, ≤4000 — "비우면 AI가 만들어요"),
   negative prompt (optional), variants 1-4, platform (default instagram), priority
-  (낮음 1 / 보통 5 / 높음 8 / 긴급 10), workflow (optional, defaults to persona's).
+  (낮음 1 / 보통 5 / 높음 8 / 긴급 10), workflow (optional, defaults to persona's),
+  resolution preset (Persona 기본 / 세로 4:5 1024×1280 / 정사각 1024×1024 / 가로 3:2 1536×1024 →
+  params.width and params.height; no free input; omit both to use the persona default; show only
+  presets that fit the chosen workflow's params and hide the field if it has no width/height).
   Input images: show only when the chosen workflow's comfy_workflows.inputs has slots. For each
   slot offer its allowed sources ('asset' = one of this persona's assets, 'persona_asset' = a
   reference image of this persona, filtered by asset_types when given); required slots must be
@@ -331,7 +335,7 @@ and Success states.
   grid, caption draft (posts of these assets), execution timeline = state_transitions +
   execution_logs merged by time with Korean step labels.
   Failure: Korean sentence from src/lib/errors.ts (e.g. OUT_OF_MEMORY → "GPU 메모리가
-  부족했어요. 해상도를 낮춰 자동으로 다시 시도하고 있어요."), attempt "2 / 3", and a collapsible
+  부족했어요. 후보 수나 해상도를 줄여 자동으로 다시 시도하고 있어요."), attempt "2 / 3", and a collapsible
   "기술 정보 보기" (error code, service, retryable, attempts, time, job id).
   Buttons come only from src/lib/actions.ts:
     draft: 제출, 수정, 취소 | queued: 취소 | generating: 취소 |
@@ -451,7 +455,9 @@ Implement Phase 2 only: Persona management.
 - Visual Identity: workflow select from comfy_workflows, base model select from
   worker_status.models.checkpoints (text input if empty), LoRA select + "LoRA 이름 등록"
   (persona_assets row by name, no upload, suggestions from worker_status.models.loras), LoRA strength,
-  default params bounded by the workflow's params, reference image upload to bucket
+  default resolution as one of three presets (세로 4:5 1024×1280 default / 정사각 1024×1024 /
+  가로 3:2 1536×1024; no free width/height input; show only presets that fit the workflow's width/height params and hide
+  the field if it has none), steps and cfg bounded by the workflow's params, reference image upload to bucket
   'persona-private' at object path persona/{id}/refs/{uuid}.{ext} (no bucket prefix in the
   path) + persona_assets row with the same path, signed URL previews. Upload first and insert
   the row only after the upload succeeds; if the insert fails, remove the uploaded object.
