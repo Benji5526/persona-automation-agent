@@ -14179,3 +14179,169 @@ Supabase  generation = done, content_jobs = ready, assets = generated ─▶ Rea
 | Social Account 상태 | 5개 | `active`·`inactive` + `status_reason` | 28.5 |
 | 보강 | – | 소유 충돌 규칙, 연결 해제 시 토큰 삭제, 접근 테스트 (51.5) | 원안이 짚음 |
 | 다음 단계 | 52 Analytics & Performance Pipeline | 29장 (설계 완료), `analytics_monitoring`(0013, Sprint 3) | 44.7 |
+
+---
+
+## 52. Analytics & Performance Intelligence Pipeline — 원안 대응과 실행 ✅
+
+> 원안 52의 성과 파이프라인(수집 → 정규화 → Snapshot → 분석 → AI Context → AI Decision)은 **29장이 같은 원안을 이미 반영해 설계해 두었고, 구현은 V1(M8, Sprint 3)과 V2(M9, Sprint 4)다**: `performance_metrics` 테이블 자체가 아직 없다 (29.3, 21.16). 이 장은 29장의 대응, 원안과 다르게 두는 결정(Snapshot 칸, 점수 방식, 분류, Heatmap, Insight 상태), 원안이 짚어 새로 찾은 빈틈 세 가지, 실행 순서를 정한다. 근거는 29장 외에 10.11(테이블), 12.8·12.9(Adapter 출력·AI 출력), 28.11(수집), 30장(Decision), 34·35장(실험·최적화), 36.8(시간대), 37장(감시), 44.7(실행 순서)이다. 원안과 다른 곳은 ⚙️로 표시하고 52.7에 모았다.
+>
+> **원안 52.65·52.66의 구현 Prompt는 그대로 쓰지 않는다.** 원안 스키마(`snapshot_type` 문자열, `user_id`·`persona_id`·`platform` 중복 칸, 계산 값 저장), Repository 층, `[PA] 010`·`011`로 만들면 29장의 설계(`snapshot_hours`, `record_metrics`가 DB에서 계산, Operator RPC)와 어긋난다. Claude Code용은 44.7의 M8 표와 29.20의 작업 목록 + 52.4의 보강, Lovable용은 44.7의 Phase A(아직 `lovable_master_prompt.md`에 없고, 단계를 시작하기 전에 Claude Code가 쓴다)를 쓴다.
+
+### 52.1 구현 상태 (원안 52.67)
+
+| 원안 완료 기준 | 상태 | 근거 |
+|---|---|---|
+| Performance Collector, Platform Adapter metrics, Snapshot 예약, 멱등, Raw | 설계 완료 (V1). 게시가 끝날 때 `analytics` Job 5개를 미리 만들고 WF-009가 기한이 지난 것만 선점 | 28.11, 29.4, 14.17 |
+| 정규화 지표, `engagement_rate`, 기준선, 표본 수 | 설계 완료 (V1). 계산은 DB `record_metrics`와 `private` SQL 함수 한 벌 | 29.5~29.7, 29.13 |
+| Overview, Posts, Topics, Formats, Timing, Assets, Workflows 화면 | 설계 완료 (V1 `/analytics`, Post 성과 상세). Assets·Workflows는 52.3 | 29.18 |
+| Context Builder, Evidence, Confidence, 원본 과다 전달 금지, Analytics ↔ Decision 분리 | 설계 완료 (V2) | 29.14, 29.15, 29.17 |
+| Collector 재시도, 오류 기록, 데이터 검증 | 설계 완료. **재시도 간격은 수정 필요 → 52.4 2번** | 29.4 |
+| 신선도 감시 | 알림은 있고(WF-009 `FAILING` = critical, job_type별 실패율) **화면의 "지연" 정의가 없다 → 52.4 1번** | 37.5, 37.6, 29.13 |
+| RLS, Persona·사용자 격리 | 설계 완료 (읽기는 소유 Persona의 Post를 거쳐서, 쓰기는 `service_role`의 `record_metrics`만) | 29.13, 52.3 |
+| 테이블·함수·화면 구현 | ❌ 없음 (0013, Sprint 3) | 44.11, 44.7 |
+
+지금은 **새로 만들 코드가 없다.** 이 장의 보강은 모두 아직 만들지 않은 마이그레이션(`analytics_monitoring`, 0013)과 Phase A 프롬프트에 처음부터 넣는다.
+
+### 52.2 칼럼 대응 (원안 52.4·52.5·52.7·52.15)
+
+| 원안 | 현재 | 이유 |
+|---|---|---|
+| `user_id`, `persona_id`, `platform` (metrics에 중복) | **없음.** `post_id`로 Post → Persona·플랫폼을 따라간다 | 같은 값을 두 곳에 두면 어긋난다. RLS는 `post_id in (소유한 Persona의 Post)` |
+| `snapshot_type` (`1H`·`6H`·`24H`·`48H`·`7D`·`30D`·`LATEST`) | `snapshot_hours integer` (1·6·24·48·168, 30D = 720을 설정 목록에 넣기만 하면 됨) | 시점 계산·정렬·비교가 숫자로 된다 (10.11). 시점 목록은 `app_settings.analytics.snapshot_hours` |
+| `LATEST` Snapshot | **행으로 두지 않는다.** "최신"은 조회에서 `snapshot_hours`가 가장 큰 행 | 29.13. 같은 값을 행으로 복사하면 갱신 규칙이 생긴다 |
+| Unique `(post_id, snapshot_type)` | Unique `(post_id, snapshot_hours)` + Job 키 `analytics:{post_id}:{snapshot_hours}` | 원안 `performance:{post_id}:{type}`와 같은 역할, 14.17 |
+| `impressions` 칸 | 칸 없음, `raw_metrics`에만 | Instagram은 media `impressions`를 `views`로 대체했다 (29.3, 구현 때 최신 문서 확인) |
+| `engagement_count` 칸 | **저장하지 않고 조회에서 계산** (`likes + comments + shares + saves`, NULL은 뺌) | 원칙 8: 계산 값은 `engagement_rate` 하나만 저장 |
+| `engagement_rate` | 저장 (DB `record_metrics`가 계산, Adapter는 계산하지 않음) + `engagement_rate_basis` | 29.5 |
+| `platform_engagement_rate` (플랫폼 공식 값) | 칸 없이 `raw_metrics`에 보존 | 52.3 |
+| (원안에 없음) | `profile_visits`, `quality_flags`(`late`·`decreased`·`partial`), `automation_job_id` | 29.3 |
+| `created_at` | `collected_at` (수집 시각)이 같은 일을 한다 | 두 시각이 같다 |
+| 칸 `retry`·`status` 없음 | 수집 실패는 행이 아니라 Job 상태 | 29.4 |
+
+### 52.3 원안 항목별 대응 (원안 52.1~52.64)
+
+| 원안 | 여기 | 근거 |
+|---|---|---|
+| 흐름 `SNS → Adapter → Collector → Raw → Normalized → Snapshot → Analytics → AI Context → AI Decision`, "AI는 추측하지 않고 실제 SNS 데이터만 쓴다" | 같다. 숫자는 DB 함수가 계산하고 AI에는 요약 Context만 준다 (원칙: 화면 숫자와 AI가 받은 숫자가 같다) | 29.1, 29.13 |
+| 3계층 (Collection · Normalization · Intelligence) | 같다. Collection = WF-009 + Adapter, Normalization = Adapter 매핑 + `record_metrics`, Intelligence = 분석 SQL 함수 | 29.2 |
+| Persona → Post → Metrics, Post에 여러 시점 Snapshot | 같다 | 10.11 |
+| Snapshot 시점 1H·6H·24H·48H·7D (+30D) | 같다 (1·6·24·48·168시간) | 28.11, 29.4 |
+| Snapshot의 이유 (Initial Velocity, Growth, Peak, Decay) | **성장**은 계산한다: 연속 Snapshot의 `delta`·`rate`·`per_hour`, 성장 곡선(실선 = 이 게시물, 점선 = 시점별 기준선). Peak·Decay는 **측정 시점이 5개뿐이라 의미 있게 계산할 수 없어서** 두지 않는다 | 29.5, 29.18 |
+| Raw Metrics 보존, Raw ≠ Normalized | 같다. Snapshot 행은 insert만 하고 수정하지 않는다 | 29.1, 29.5 |
+| Platform Metric Mapping (플랫폼 응답 키 → 공통 키), 변경에 대비한 Mapping Layer | **Adapter 하위 Workflow 안의 매핑** (`[PA] SNS - {platform} - Metrics`). 공통 출력은 12.8 `get_metrics`(`views`·`likes`·`comments`·`shares`·`saves`·`reach`·`profile_visits`·`followers_delta`·`raw_metrics`). 플랫폼 API가 바뀌면 그 하위 Workflow만 고친다. 별도 매핑 설정 테이블은 두지 않는다 | 12.8, 28.2 |
+| Collector `[PA] 010 - Performance Collector`, "Find Published Posts → Determine Window → …" | **WF-009**(010은 Notification). 수집 시점은 게시가 끝날 때 Job의 `run_after`로 미리 정해 두고, WF-009는 10분마다 기한이 지난 Job을 선점해 `record_metrics`를 부른다. 시점이 지나지 않은 Job은 선점되지 않는다 | 28.11, 14.15, 20.3 |
+| Collection Window (게시 시각 + N시간, 지나기 전에는 수집 안 함) | 같다 (`run_after = published_at + N시간`) | 28.8 |
+| Collector Idempotency | Job 키 + Unique. 같은 시점이 이미 있으면 새로 쓰지 않고 Job만 `done` | 29.4 |
+| Latest Metrics (`distinct on (post_id) … order by collected_at desc`) | 최신 = 가장 큰 `snapshot_hours`. 화면의 숫자는 **24h Snapshot 합끼리** 비교한다 (최신 값끼리 비교하면 오래된 게시물이 더 쌓여 불공정) | 29.13 |
+| Engagement Count에서 없는 지표를 **0으로 대체할 수 있다** | **하지 않는다.** NULL인 항목은 합에서 빼고, 항목이 모두 NULL이면 `engagement_rate`도 NULL이다 | 29.5. 원안 52.17("없는 값을 0으로 만들지 않는다")과 52.15가 서로 어긋나 52.17을 따른다 |
+| Engagement Rate = 참여 ÷ **Reach** × 100 | `reach`가 있으면 reach 기준, 없고 `views`가 있으면 views 기준 (`engagement_rate_basis`에 기록), 둘 다 없으면 NULL. **기준이 다른 값끼리는 비교하지 않는다** | 29.5 |
+| 플랫폼 공식 참여율은 별도 보존 | `raw_metrics`에 그대로 | 29.5 |
+| 누락 값을 0으로 바꾸지 않음, 실제 0만 0 | 같다. 값 0은 `0`, 미제공은 `NULL`("– (미제공)"), 수집 실패는 행 없음 | 29.4 |
+| `/analytics` Dashboard (Views, Likes, Engagement, 추이, Top Posts, Best Topics, Best Times) | `/analytics` 필터(Persona·플랫폼·기간 7·30·90일), KPI 카드 4개, "잘 되는 것"·"주의 필요" 상위 3개, 리더보드, 저조 콘텐츠, 차원 탭 | 29.18 |
+| 필터에 Content Type | 차원 탭에서 `content_type`별 성과로 본다. V1은 이미지만 게시하므로 필터로 둘 만큼 값이 없다 | 28.9, 29.9 |
+| KPI (Total Posts, Views, Reach, Engagement, Avg ER, Follower Growth) | 게시 수, 총 조회수, 참여율(24h 중앙값), **게시물로 얻은 팔로워**. Reach 합계는 두지 않는다 (게시물마다 기준 기간이 달라 합이 의미가 없다). 팔로워는 계정 전체가 아니라 게시물로 생긴 수다 | 29.3, 29.13 |
+| Best Performing Post·Asset·Topic·Time | Post·Topic·Time은 있다. **Asset은 Post 리더보드의 Asset 링크**로 본다. Asset 단위 합계는 Asset Detail의 성과 요약(`get_asset_performance`, 50.5 4번)에서 **플랫폼별로 나눠** 보여 준다 ⚙️ | 29.18, 50.5 |
+| Trend (Views·Likes·Comments·Shares·Followers, 7D·30D·90D·Custom) | 기간 7·30·90일. 시점별 성장 곡선은 Post 성과 상세. Custom 기간은 두지 않는다 ⚙️ | 29.18 |
+| Performance Score = 정규화한 Engagement + Reach + Share + Save + Follower Conversion, **percentile** 정규화 | **기준선 대비 log2 비율 → 0~100, 50 = 평소**. 가중치 views 0.35, engagement_rate 0.25, shares 0.15, saves 0.15, followers_delta 0.10(`app_settings.analytics.score_weights`). Percentile은 쓰지 않는다 ⚙️: 게시물이 수십 개일 때 순위 정규화는 "Top 1% = 100"이 의미 없고, 새 게시물이 생길 때마다 다른 게시물 점수가 움직인다. 기준선 대비 비율은 점수의 뜻이 Persona·시기와 상관없이 같다 | 29.7 |
+| Contextual Performance (같은 Persona·플랫폼·콘텐츠 형식·기간 안에서 비교) | 같다. Persona × 플랫폼 단위 기준선, **같은 시점끼리** 비교 | 29.6 |
+| Baseline (평균 22,400 → +114%) | 최근 20개 **중앙값**, 최소 5개, `late`·`decreased` 제외, 자기 자신 제외 | 29.6 |
+| Performance Classification (`UNDERPERFORMING`·`NORMAL`·`GOOD`·`EXCELLENT`, 50%·100%·150%) | **4단계를 두지 않는다 ⚙️.** 표시는 점수와 기준선 대비 %(예: "87 / 100 · 조회수 +124%"), 이상치는 두 가지(🔥 ≥ 2.0배, ⚠ ≤ 0.5배, 24h 이상 Snapshot에서만). 경계는 `analytics.outlier_ratio` | 29.7, 29.8. 구간이 4개면 경계 근처 게시물이 계속 오간다 |
+| Best Content (Posts·Assets·Topics·Formats·Captions·Times) | 차원별 그룹 (`topic_category`·`visual_style`·`posting_time`·`day_of_week`·`caption`·`content_type`·`workflow`) | 29.9, 29.11 |
+| Topic Performance (Content Job의 `topic`) | **`content_jobs.topic_category`** (새 칸, Persona의 목록에서 고름). 자유 텍스트 `topic`은 묶을 수 없어서 차원이 아니다 | 29.9 |
+| Content Type 성과 (IMAGE·VIDEO·CAROUSEL·TEXT) | `content_type`별. V1은 이미지만이라 값이 하나다. 영상·Carousel이 생기면 자동으로 그룹이 늘어난다 | 29.9 |
+| Sample Size와 `confidence` (`LOW` 등), 10개부터 비교 권장 | 표본 수준 4단계 (1–4 부족·5–9 낮음·10–19 보통·20+ 높음). 5개 이상은 **참고**, **자동 결정 근거는 10개 이상 + 기준선과 20% 이상 차이** | 29.12 |
+| Posting Time (Hour·Day of Week·Timezone) | 시간대 구간 6개(새벽·아침·점심·오후·저녁·밤)와 요일. 시간대는 **Persona별**(`personas.timezone`, 없으면 `analytics.timezone`) | 29.9, 36.8 |
+| 모든 timestamp UTC, 분석할 때 Persona 시간대로 변환 | 같다. 저장은 `timestamptz`(UTC), 변환은 분석 함수 안에서 | 29.9 |
+| Asset Performance (Asset → Posts → Metrics) | 위의 Best Performing Asset 항목 | 50.5 4번 |
+| Workflow Performance (`workflow_id`·`workflow_version`) | `content_jobs.workflow`(ID)가 차원이다. 노드 구조가 바뀐 새 버전은 **새 ID**라서(48.4) `image_generation_v1`과 `…_v2`가 그대로 비교된다. **값만 바뀌어 `version`만 올린 경우는 같은 ID라 합쳐지므로** `generation_metadata.workflow_version`으로 나눠 본다 → 52.4 3번 | 29.9, 48.4 |
+| Model / LoRA Performance, 표본이 충분할 때만 전략 후보 | 차원은 있으나 **화면 전용으로만 쓴다 → 52.4 3번** | 29.9, 20.19 |
+| Caption Performance (길이·질문·이모지·해시태그 수·CTA·첫 줄 길이) | SQL로만 계산: 길이(짧음·보통·김), 이모지 유무, 질문(`?`), 해시태그 수 구간, 광고 표기. CTA 종류·첫 줄 길이는 믿을 만한 라벨이 없어 V1에서 분석하지 않는다 | 29.10 |
+| AI Context Builder, 요약만 전달 (Summary·Baseline·Top·Under·Recent·Confidence), 원본 과다 금지 | `get_analytics_context` (service_role, V2). 그룹마다 `ref`·표본 수·중앙값·`delta_pct`·표본 수준, 표본 부족·품질 표시 Snapshot은 빼고 개수만 `excluded`로. **결론 요약(`top_topics` 등)은 넣지 않는다** | 29.14 |
+| AI Insight (`observation`·`evidence`·`confidence`·`recommendation`, 관찰과 추천 분리) | `performance_insight.v1`의 `insights[]`(관찰: `finding`·`direction`·`evidence_refs`)와 `recommendations[]`(추천: `type`·`target_ref`·`reason`·`priority`). **문장에는 숫자를 쓸 수 없고**, 모든 항목은 Context의 ref를 근거로 가리킨다. 수치는 저장된 Context에서 붙인다 | 29.15 |
+| Insight 상태 (`GENERATED`·`REVIEWED`·`ACCEPTED`·`REJECTED`·`EXPIRED`) | **Insight에는 상태를 두지 않는다 ⚙️.** `performance_analyses.status`는 `done`·`skipped`·`failed`뿐이고, 받아들이거나 거절하는 것은 그 추천을 바탕으로 만든 **`ai_decisions`**의 상태·승인이다 | 29.16, 30.8. 같은 판단에 상태가 두 곳에 생기지 않게 |
+| Analytics API 8개 (`/analytics/overview` …), `analyticsRepository.ts`, Hook 7개 | **Repository 층을 두지 않는다 ⚙️.** Operator RPC 4개: `get_analytics_overview`·`get_post_performance`·`get_performance_leaderboard`·`get_dimension_performance`(차원 매개변수로 topic·style·time·caption·type·workflow·lora·model). Hook이 RPC를 부른다. Realtime은 `performance_metrics` insert 때 5초 디바운스로 RPC를 다시 부른다 | 29.13, 29.18, 18.7 |
+| 메뉴 `Intelligence > Analytics · AI Decisions` | 경로는 `/analytics`(V1), `/ai-decisions`(V2). 사이드바 묶음은 17장 App Shell을 따른다 | 18.3 |
+| Posting Time **Heatmap** (요일 × 시간) | **V1에는 두지 않는다 ⚙️.** 요일 × 시간 칸이 168개라 게시물이 수십 개면 거의 모든 칸이 표본 부족(N/A)이 된다. 시간대 구간 막대와 요일 막대를 따로 보여 준다. 게시물이 충분히 쌓이면(Persona·플랫폼당 수백 개 수준) 그때 Heatmap을 더한다 | 29.18 |
+| Data Freshness ("10분 전 업데이트", 지연 경고) | "10분 전 업데이트"는 같다(`data_as_of`). **지연 판정이 약하다 → 52.4 1번** | 29.13 |
+| Collector Monitoring (마지막 성공, 수집 수, 실패, API·Rate Limit 오류) | 알림: WF-009 `FAILING` critical, job_type별 실패율 > 30%, 같은 `error_code` 급증. 화면: Phase M 개요·서비스 | 37.5, 37.6 |
+| Collection Failure: Rate Limit에서 무한 retry 금지, 5분·15분·60분, 최대 횟수 뒤 `FAILED` | 같은 정신. 원안 간격은 **수집 Job에 맞게 가져온다 → 52.4 2번**. 최종 실패는 행 없음 + Job `failed` + `system_errors`, 화면은 "수집 실패 [다시 수집]" | 29.4 |
+| Historical Backfill `[PA] 011` | 첫 연결 이후 게시한 Post부터 추적한다 (Sprint 2 계정 연결 시점부터 쌓인다). 과거 게시물 Backfill은 이후이고 번호는 019 이후가 된다 (011은 AI 분석 WF, 018까지 사용 중) | 20.3, 14.3 |
+| Data Quality (Post·Persona 존재, 플랫폼, `collected_at`, 지표 ≥ 0, Snapshot Unique), 비정상은 저장하지 않거나 격리 | `record_metrics`가 검증: 지표는 NULL 또는 0 이상 정수(위반 시 `VALIDATION_FAILED`, 저장 안 함), Post는 FK, Unique. 값이 줄었거나(`decreased`) 늦거나(`late`) 일부 NULL(`partial`)이면 **저장하되 표시**하고 비교·AI Context에서 뺀다 | 29.4 |
+| Analytics Security, Cross-persona 금지 | `performance_metrics`는 읽기만 허용: `post_id`가 **소유한 Persona의 Post**일 때만. 쓰기 정책 없음, `record_metrics`는 `service_role`만. Operator RPC는 `require_owned_persona`. `get_analytics_context`는 `service_role`만 | 29.13, 0005 패턴 |
+| Performance: SQL 집계 → 규모가 커지면 Materialized View, `analytics_daily` | 같다. 요약 테이블은 아직 만들지 않는다. 대시보드 RPC가 1초를 넘거나 게시물이 수천 개가 되면 pg_cron으로 갱신하는 요약을 붙인다. `posts (persona_id, platform, published_at desc) where status = 'published'` index를 더한다 | 29.13 |
+| AI Decision 입력 (Persona + Recent + Baseline + Top + Under + Trends + Experiment + Resource) | Analytics Context(29.14) + Persona·목표·최근 Content Job(WF-012), 실험 결과(34.7), 예산·한도(15.18, 39장) | 29.17, 30장 |
+| Analytics는 Content Job을 만들지 않는다 (`Analytics → Insight → Decision → Permission → Content Job`) | 같다. 추천은 실행 명령이 아니고, WF-012가 `ai_decision.v1`을 정하고 정책·권한 판정(33.6)을 거친다 | 29.17 |
+| Confidence (LOW/MEDIUM/HIGH), LLM 숫자만 쓰지 않고 표본·분산·기준선 차이·신선도를 고려 | 화면은 **AI Confidence와 근거의 표본 수준 중 낮은 쪽**을 보여 준다 (High ≥ 0.8, Medium 0.6~0.8, Low < 0.6). 표본 4개에 AI가 0.95를 줘도 "표본 부족". 신선도는 `data_as_of`가 48시간을 넘으면 AI 분석 자체를 건너뛴다(`skipped`). 분산은 쓰지 않는다 (표본이 작으면 불안정하고, 중앙값 기준이라 이상치 영향이 이미 작다) | 29.12, 29.14 |
+| Statistical Guardrail (표본·효과 크기·신뢰, 1~2개면 관찰까지만) | 같다. 표본 부족(1–4)은 AI Context에서 빠지고 "잘 되는 것"에도 오르지 않는다. 효과 크기 = `delta_pct` | 29.12, 29.18 |
+| Experiment 연결 (Variant별 성과) | 실험은 24h 지표로 Control·Variant를 비교한다 (Variant 쪽 게시물 비율 상한 20%) | 34.6, 34.7, 34.11 |
+| Self-Optimization 연결 | 실험 결과가 전략 갱신 후보가 된다 | 35장 |
+| 최종 폐쇄 루프 | 같다 (V2 첫 바퀴). 53장에서 Decision Engine을 운영에 붙인다 | 32장, 30장 |
+
+### 52.4 보강 ⚙️
+
+원안이 짚은 것 중 29장에 빠졌거나 어긋난 세 가지다. 모두 아직 만들지 않은 `analytics_monitoring`(0013)과 Phase A에 처음부터 넣으므로 **지금 할 일은 없다.** 구현 때 놓치지 않도록 29.20 작업 목록의 항목으로 더한다.
+
+| # | 항목 | 지금 설계 | 바꿀 곳 | 테스트 |
+|---|---|---|---|---|
+| 1 | **수집 지연의 정의** (원안 52.50·52.51) | 29.13의 `data_as_of`는 `max(collected_at)`이다. 이것만으로는 "최근에 게시한 것이 없어서 수집할 것이 없다"와 "수집이 막혔다"를 구별할 수 없다. 오래된 시각을 경고로 쓰면 며칠 게시하지 않은 Persona에서 거짓 경고가 나고, 그렇다고 경고를 안 쓰면 계정 하나의 토큰 문제 같은 부분 지연은 화면에서 보이지 않는다 (WF-009 전체 정지와 실패율 알림은 37.6에 있다) | `get_analytics_overview`가 `collection` 객체를 함께 돌려준다: `last_success_at`(= `max(collected_at)`), `overdue`(= `analytics` Job 중 `pending`이고 **`run_after`가 1시간 넘게 지난 것**의 수), `failed_24h`(최근 24시간에 `failed`가 된 수). `/analytics` 상단에 `overdue > 0`이거나 `failed_24h > 0`이면 "일부 성과 수집이 지연되고 있어요" 배너와 [수집 상태 보기](Automation 화면의 `analytics` Job). 단순히 오래된 `max(collected_at)`는 "마지막 수집: n일 전"으로만 표시하고 경고로 쓰지 않는다. Phase M의 서비스 탭도 같은 세 값을 쓴다 | 게시가 없는 Persona → 경고 없음, Job이 1시간 넘게 `pending` → 경고, `failed` Job → 경고와 [다시 수집] |
+| 2 | **수집 Job의 재시도 간격** (원안 52.52) | 재시도 간격은 DB 전역 `[30, 120, 300, 900]`, `max_attempts` 3이다 (20.11). 수집 Job은 시점이 몇 시간 간격이고 API 장애·Rate Limit이 몇 분~한 시간 가므로, 30초·2분 간격 두 번 만에 최종 실패가 되면 24h Snapshot 하나가 영구히 빠진다 (사람이 [다시 수집]을 눌러야 한다) | `complete_publish`가 `analytics` Job을 만들 때 **`max_attempts = 4`**(`create_automation_job`에 `p_max_attempts`가 있다). WF-009가 일시 오류를 `fail_automation_job`에 보고할 때 **`p_retry_after_seconds`를 시도 횟수에 따라 300·900·3600초**로 준다. `RATE_LIMIT`은 플랫폼이 준 `retry_after`가 더 길면 그 값. 재시도 불가 코드(`TOKEN_EXPIRED` 등)는 그대로 바로 `failed` | 일시 오류 3번 → 세 번 모두 지연, 4번째 실패 → `failed`, 두 번째 시도에 성공하면 정상 Snapshot |
+| 3 | **Workflow 버전 구분, Model·LoRA 차원은 화면 전용** (원안 52.34·52.35) | 29.9는 LoRA·Model을 차원 출처로 적었지만 29.11·29.14의 차원 목록과 29.15의 `insight_type`·`ref` 형식에는 없다. 어디까지 쓰는지가 정해져 있지 않다 | `get_dimension_performance`가 `workflow` 차원을 `workflow`(ID)로 묶되 같은 ID 안에 `workflow_version`이 여럿이면 `workflow:{id}@{version}`으로 나눈다 (48.4: 값만 바꾼 변경은 ID를 유지하고 `version`만 올린다). 같은 함수가 `lora`·`model`도 받는다 (`generation_metadata.lora`·`.model`, 값이 없으면 "미지정"). `/analytics` 차원 탭에서 **Operator가 보는 용도**로만 쓰고, **AI Context·`insight_type`·`ref`에는 넣지 않는다.** AI는 LoRA·Model을 고르지 못한다 (20.19: 스키마에 칸이 없다). LoRA는 Persona의 신원이라 바꾸는 일은 Operator의 결정이다 (48.2) | `lora` 차원 그룹이 `generation_metadata`와 일치, 같은 Workflow ID의 두 `version`이 두 그룹으로 나뉨, Context JSON에 `lora`·`model` 키가 없음 |
+
+- **원안 52.65의 테스트 항목 대응**: 지표 삽입·중복·정규화·참여율·기준선·표본 수·`stale`·Collector 실패는 29.20의 테스트 표에 모두 있다. RLS는 29.20의 "다른 Operator의 Persona로 RPC 호출 → 거부"에 **`performance_metrics` 직접 `select`가 다른 계정에는 0행이고 직접 `insert`·`update`·`delete`는 거부**를 더한다 (50.5·51.5의 접근 테스트와 같은 방식). 1·2번의 확인은 위 표의 마지막 열이다.
+- **원안 52.65의 "Analytics는 AI Decision을 하지 않는다"**: `get_analytics_context`는 읽기 전용이고 Content Job·Decision을 만들지 않는다. WF-011이 `performance_analyses`에만 쓴다 (29.16).
+
+### 52.5 실행 순서 (44.7, 44.8)
+
+| # | 할 일 | 누가 | 통과 |
+|---|---|---|---|
+| 1 | Sprint 2 완료 (실제 게시가 시작되어야 데이터가 쌓인다, 관문 G2) | – | 44.6 |
+| 2 | **Sprint 3 M8 성과**: `analytics_monitoring` 마이그레이션(`performance_metrics`·`app_settings.analytics`·`record_metrics`·`complete_publish`의 수집 Job 생성(52.4 2번)·29장 분석 함수·Operator RPC 4개·`content_jobs.topic_category`·`visual_style`·`posts` index·Realtime), WF-009, `[PA] SNS - Instagram - Metrics`. 52.4 1·3번 반영 | Claude Code | 29.20 V1 테스트 |
+| 3 | Lovable Phase A (`/analytics`, Post 성과 상세, Create Content의 주제 분류·스타일, Persona 설정의 목록 편집, Asset Detail의 성과 요약) | 사람 + Lovable | 29.18 |
+| 4 | E2E: 28.15의 게시 뒤 **1시간 Snapshot → 24시간 Snapshot → `/analytics` 반영** (기준선은 게시물 5개가 필요하므로 시드 게시물 5개를 먼저 올린다) | 사람 | 27장 형식으로 기록 |
+| 5 | G3 관문(주 7개 게시 4주 연속)이 도는 동안 **Sprint 4**: `ai_decisions` 마이그레이션(`performance_analyses`·`get_analytics_context`), WF-011·012 | Claude Code | 30장, 29.20 V2 테스트 |
+
+**Sprint 3의 데이터는 처음에 비어 있다.** 기준선은 게시물 5개, 자동 결정 근거는 같은 그룹 10개 이상이다. 게시를 시작한 뒤 몇 주 동안은 `/analytics`가 "기준선을 만들려면 게시물 5개가 필요합니다"를 보여 주는 것이 정상이다 (29.18).
+
+### 52.6 완료 판단
+
+| 항목 | 상태 |
+|---|---|
+| 설계: 수집·정규화·기준선·점수·이상치·차원·표본·Context·AI 출력 검증 | ✅ (29장) |
+| 52.4 1~3번을 29.20 작업 목록에 반영 | ❌ (0013 만들기 전에) |
+| `performance_metrics`·`record_metrics`·WF-009·`/analytics` | ❌ Sprint 3 |
+| `performance_analyses`·`get_analytics_context`·WF-011 | ❌ Sprint 4 |
+
+원안 52.68의 결론("AI가 콘텐츠를 만들고 게시하는 것을 넘어 성과를 보고 다음에 무엇을 만들지 정하는 폐쇄 루프")에 동의한다. 이 루프의 앞쪽(Persona → Content Job → Asset → Post → 게시)은 V1까지, 뒤쪽(성과 → 분석 → Decision → Content Job)은 V2에서 닫힌다. 그 사이의 모든 숫자는 한 벌의 SQL 함수가 계산하므로 화면의 숫자와 AI가 받은 숫자가 같다.
+
+### 52.7 원안 조정
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 이 장의 성격 | 새 구현 명세 | 설계된 성과 파이프라인의 대응·빈틈·실행 순서 | 29장이 같은 원안을 반영, 구현은 V1·V2 |
+| 구현 Prompt | Claude Code·Lovable용 | 쓰지 않는다. 44.7·29.20 + 52.4 | 원안 스키마·Repository·계산 값 저장은 설계와 어긋남 |
+| Snapshot 칸 | `snapshot_type` 문자열 + `LATEST` | `snapshot_hours` 정수, `LATEST` 행 없음 | 정렬·비교가 숫자, 복사 행이 생기지 않음 |
+| 중복 칸 | `user_id`·`persona_id`·`platform` | 없음 (`post_id`로 따라감) | 어긋남 방지 |
+| 계산 값 | `engagement_count`, 비율, 점수 저장 | `engagement_rate`(+basis)만 저장, 나머지는 조회 때 계산 | 공식을 바꿔도 다시 쓸 필요 없음 |
+| `impressions` | 칸 | `raw_metrics`만 | 플랫폼이 `views`로 대체 |
+| 없는 지표 | 합에서 0으로 대체 가능 (52.15) | NULL로 빼고, 전부 NULL이면 NULL | 52.17과 일치 |
+| Engagement Rate 분모 | Reach | Reach, 없으면 Views(basis 기록) | 플랫폼이 reach를 안 줄 때 |
+| Collector | `[PA] 010`이 주기마다 대상·시점 판단 | WF-009가 기한 지난 Job만 선점 | 28.8, 누락이 Job으로 보임 |
+| Workflow 번호 | 010 Collector, 011 Backfill | 009 Collector, Backfill은 019 이후 | 14.3, 20.3 |
+| Performance Score | Percentile 정규화 | 기준선 대비 log2 비율, 50 = 평소 | 점수 의미가 일정, 다른 게시물 점수가 움직이지 않음 |
+| 성과 분류 | 4단계 (50%·100%·150%) | 점수 + 기준선 대비 % + 이상치 2종 (2.0배·0.5배) | 경계 근처가 오가지 않게 |
+| Peak·Decay | 계산 | 하지 않음 (성장만) | 시점이 5개뿐 |
+| Topic | Content Job의 `topic` | `topic_category` (Persona 목록) | 자유 텍스트는 묶을 수 없음 |
+| 캡션 특징 | 길이·질문·이모지·해시태그·CTA·첫 줄 | 길이·이모지·질문·해시태그 수·광고 | 믿을 만한 라벨이 없는 것은 제외 |
+| Model·LoRA 성과 | 전략 후보 | 화면 전용, AI Context 제외 | AI는 고르지 못하고 LoRA는 신원 |
+| Insight 상태 | 5개 | 없음. `ai_decisions`가 상태를 가진다 | 상태 이중화 방지 |
+| Analytics Repository, API 8개, Hook 7개 | Repository 층 | Operator RPC 4개 + Hook | 18.7 |
+| Heatmap | 요일 × 시간 | 시간대 구간 막대 + 요일 막대 (Heatmap은 데이터가 쌓인 뒤) | 칸 168개가 거의 N/A |
+| Custom 기간 | 있음 | 7·30·90일 | 기준선·표본 규칙과 맞추기 쉬움 |
+| Reach 합계 KPI | 있음 | 없음 | 게시물마다 기준 기간이 달라 합이 무의미 |
+| Content Type 필터 | 필터 | 차원 탭 | V1은 이미지만 게시 |
+| 시간대 | Persona 시간대 | `personas.timezone`, 없으면 전역 값 | 36.8 |
+| Freshness | `Last updated` + 지연 경고 | 같음 + 지연의 정의를 Job 기반으로 (52.4 1번) | 게시가 없는 것과 수집이 막힌 것의 구별 |
+| 수집 재시도 | 5·15·60분 | 수집 Job은 `max_attempts` 4 + 300·900·3600초 (52.4 2번). 나머지 Job은 DB 기본값 | 수집은 장애가 길고 시점이 멀다 |
+| Historical Backfill | 별도 Workflow | 이후 | 연결 뒤 게시물부터 추적 |
+| 다음 단계 | 53 AI Decision Engine Production Implementation | 30·33장 설계 완료, `ai_decisions`(0014, Sprint 4) | 44.8 |
