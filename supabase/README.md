@@ -13,6 +13,7 @@
 | `migrations/0007_workers_settings.sql` | `worker_status`, 설정 RPC, 오류 해결 RPC |
 | `migrations/0008_llm_limit_models.sql` | LLM 하루 호출 한도 `reserve_llm_call`, 설치된 모델 목록 `worker_status.models` |
 | `migrations/0009_persona_isolation.sql` | Persona 격리 보강(Job·Post의 Persona 일치 트리거), 보관 Persona의 재시도·재생성 거부, Asset Library index (TECH_DESIGN 36.12, 47.3, 50.5) |
+| `migrations/0010_execution_targets.sql` | Personal Edition: 활성 워커 `app_settings.active_worker`·`app_mode`, `worker_status.target`·`provider`, generation Job 선점 gating (TECH_DESIGN 56) |
 | `tests/stubs/supabase_stub.sql` | **로컬 테스트 전용.** 실제 프로젝트에 적용하지 않는다 |
 | `verify_production.sql` | 실제 프로젝트 적용 후 점검 (읽기 전용, TECH_DESIGN 24.4) |
 

@@ -34,7 +34,7 @@ def test_settings_require_admin(db):
     db.conn.execute("update users set role = 'admin' where id = %s", (uid,))
     db.as_operator(uid)
     settings = db.val("select get_app_settings()")
-    assert set(settings) == {"allowed_emails", "limits", "publishing_enabled", "retry_backoff_seconds"}
+    assert set(settings) == {"allowed_emails", "limits", "publishing_enabled", "retry_backoff_seconds", "active_worker", "app_mode"}
 
     updated = db.val("select update_app_setting('limits', '{\"daily_generation_limit\": 50}'::jsonb)")
     assert updated["limits"]["daily_generation_limit"] == 50

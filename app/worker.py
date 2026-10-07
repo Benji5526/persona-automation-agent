@@ -114,6 +114,26 @@ class GpuWorker:
             finally:
                 self.current, self._current_task, self.current_prompt_id, self.current_step = None, None, None, None
 
+    async def pull_loop(self) -> None:
+        """Pull 방식 (TECH_DESIGN 56.3): 놀고 있을 때만 DB에서 generation Job 하나를 가져온다.
+
+        * 한 번에 하나: 대기열이나 실행 중인 Job이 있으면 가져오지 않는다 (GPU 동시성 1).
+        * ComfyUI가 꺼져 있으면 선점하지 않는다 (attempts가 늘지 않게, push의 503과 같은 이유).
+        * **가져갈 수 있는지는 DB가 정한다**: app_settings.active_worker가 이 Worker가 아니면 claim이 빈 결과다.
+        """
+        while True:
+            await asyncio.sleep(self.settings.pull_interval_sec)
+            if self.stopping or self.current or self.pending:
+                continue
+            try:
+                await self.comfy.system_stats()
+                job = await self.repo.claim_next_job("generation", self.settings.worker_id)
+            except (DbError, httpx.HTTPError) as exc:  # ComfyUI 또는 Supabase에 잠시 닿지 않음: 다음 주기에 다시
+                log.warning("pull skipped: %s", type(exc).__name__)
+                continue
+            if job:
+                log.info("job %s pulled (queue position %d)", job["id"], self.enqueue(job))
+
     async def cancel(self, job_id: str) -> bool:
         """12.6 cancel: 대기열이면 빼고, 실행 중이면 ComfyUI 작업을 지우고 멈춘다. DB 상태는 이미 cancelled다."""
         removed = self._drop_queued(lambda j: j["id"] == job_id)
@@ -401,7 +421,8 @@ class GpuWorker:
             self.comfy_ok = False
         info = {"comfyui_ok": self.comfy_ok, "gpu": gpu,
                 "current_job_id": self.current["id"] if self.current else None,
-                "queue_size": len(self.pending), "version": __version__, "worker_loop_ok": self.healthy()}
+                "queue_size": len(self.pending), "version": __version__, "worker_loop_ok": self.healthy(),
+                "pull": self.settings.pull_jobs}
         if models is not None:  # 없으면 DB의 이전 목록을 유지한다 (0008)
             info["models"] = models
         return info

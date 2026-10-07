@@ -65,8 +65,8 @@ def create_app(settings: Settings | None = None, *, repo: Repository | None = No
         state.rate_limiter = RateLimiter(settings.jobs_rate_per_sec)
         state.comfy_check = None
         state.auth_logged = set()
-        log.info("bridge %s starting: worker=%s comfy=%s workflows=%s", __version__, settings.worker_id,
-                 settings.comfy_url, sorted(state.registry))
+        log.info("bridge %s starting: worker=%s comfy=%s pull=%s workflows=%s", __version__, settings.worker_id,
+                 settings.comfy_url, settings.pull_jobs, sorted(state.registry))
 
         tasks: list[asyncio.Task] = []
         state.worker.require_loop = start_background
@@ -75,6 +75,8 @@ def create_app(settings: Settings | None = None, *, repo: Repository | None = No
             tasks.append(state.worker.loop_task)
             tasks.append(asyncio.create_task(state.worker.heartbeat_loop(), name="heartbeat"))
             tasks.append(asyncio.create_task(state.worker.report_loop(), name="status-report"))
+            if settings.pull_jobs:  # Personal 프로필: 터널 없이 DB에서 Job을 가져간다 (TECH_DESIGN 56.3)
+                tasks.append(asyncio.create_task(state.worker.pull_loop(), name="pull"))
         try:
             yield
         finally:

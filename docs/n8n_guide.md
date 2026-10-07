@@ -37,7 +37,7 @@ content_jobs: queued ──WF-001──▶ generating
 
 ## 2. 사전 준비
 
-- [ ] Supabase에 마이그레이션 0001~0009 적용 ([supabase/README.md](../supabase/README.md))
+- [ ] Supabase에 마이그레이션 0001~0010 적용 ([supabase/README.md](../supabase/README.md))
 - [ ] Supabase에서 **n8n 전용 secret key**를 새로 만든다 (브릿지 키와 따로, TECH 15.6)
 - [ ] Cloudflare Tunnel이 브릿지(`127.0.0.1:8000`)에 연결돼 있고, Cloudflare Access에서 **Service Token**(Client ID·Secret)을 만들어 그 터널 앱에 허용 (TECH 15.7)
 - [ ] 브릿지 `.env`의 `BRIDGE_TOKENS` 값 확인

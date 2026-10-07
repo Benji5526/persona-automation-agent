@@ -28,6 +28,8 @@ class Settings:
     private_bucket: str = "persona-private"
     job_timeout_sec: float = 900.0
     poll_interval_sec: float = 1.0
+    pull_jobs: bool = False            # True면 놀고 있을 때 DB에서 generation Job을 가져간다 (TECH_DESIGN 56.3)
+    pull_interval_sec: float = 5.0
     heartbeat_sec: float = 30.0
     status_report_sec: float = 30.0
     comfy_check_cache_sec: float = 5.0
@@ -73,6 +75,8 @@ class Settings:
             work_dir=Path(get("WORK_DIR") or ROOT / "data" / "tmp"),
             job_timeout_sec=float(get("JOB_TIMEOUT_SEC", "900")),
             poll_interval_sec=float(get("POLL_INTERVAL_SEC", "1.0")),
+            pull_jobs=get("PULL_JOBS", "false").lower() in ("1", "true", "yes", "on"),
+            pull_interval_sec=float(get("PULL_INTERVAL_SEC", "5")),
             heartbeat_sec=float(get("HEARTBEAT_SEC", "30")),
             status_report_sec=float(get("STATUS_REPORT_SEC", "30")),
             n8n_callback_url=get("N8N_CALLBACK_URL"),

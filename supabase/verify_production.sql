@@ -151,3 +151,13 @@ union all
 select 'index', indexname from pg_indexes
  where schemaname = 'public' and indexname = 'assets_persona_created_idx'
  order by 1, 2;
+
+-- 20. 0010 execution_targets (TECH_DESIGN 56.4)
+--     기대: app_mode = "personal", active_worker = null(제한 없음) 또는 등록된 워커 id,
+--           worker_status에 target·provider 열, 함수 private.worker_may_claim 1개
+select key, value from public.app_settings where key in ('app_mode', 'active_worker') order by key;
+select column_name from information_schema.columns
+ where table_schema = 'public' and table_name = 'worker_status' and column_name in ('target', 'provider')
+ order by 1;
+select count(*) as worker_may_claim_functions from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+ where n.nspname = 'private' and p.proname = 'worker_may_claim';

@@ -487,3 +487,71 @@ def test_job_with_registered_asset_is_completed_without_regenerating(env):
     assert content_status(env, ids["content_job_id"]) == "ready"
     assert ("RECOVERED", "succeeded") in [(r["step"], r["status"]) for r in env.seed.all(
         "select step, status from execution_logs where automation_job_id = %s", (ids["job_id"],))]
+
+
+# -----------------------------------------------------------------------------
+# Pull 방식 (TECH_DESIGN 56.3): 놀고 있을 때 DB에서 Job을 가져간다
+# -----------------------------------------------------------------------------
+def run_pull_loop(env, job_id, seconds=4.0):
+    """Pull 루프와 실행 루프를 잠시 돌리고, Job이 끝나면(또는 시간이 다 되면) 멈춘다."""
+    env.settings = make_settings(pull_jobs=True, pull_interval_sec=0.01)
+
+    async def go():
+        worker = env.worker()
+        worker.loop_task = asyncio.create_task(worker.run_forever())
+        pull = asyncio.create_task(worker.pull_loop())
+        try:
+            for _ in range(int(seconds / 0.05)):
+                await asyncio.sleep(0.05)
+                if job_row(env, job_id)["status"] in ("done", "failed"):
+                    break
+        finally:
+            pull.cancel()
+            worker.loop_task.cancel()
+            await asyncio.gather(pull, worker.loop_task, return_exceptions=True)
+
+    env.run(go())
+
+
+def set_active_worker(env, worker_id):
+    env.seed.as_postgres()
+    if worker_id is None:
+        env.seed.conn.execute("update app_settings set value = 'null'::jsonb where key = 'active_worker'")
+    else:
+        env.seed.conn.execute("update app_settings set value = to_jsonb(%s::text) where key = 'active_worker'",
+                              (worker_id,))
+
+
+def test_pull_loop_claims_and_generates_without_any_request(env):
+    uid = env.seed.operator()
+    persona = env.seed.persona(uid)
+    ids = env.seed.generation_job(uid, persona["id"])
+    run_pull_loop(env, ids["job_id"])
+    row = job_row(env, ids["job_id"])
+    assert row["status"] == "done" and row["claimed_by"] == env.settings.worker_id
+    assert content_status(env, ids["content_job_id"]) == "ready"
+
+
+def test_pull_loop_only_takes_jobs_while_this_worker_is_active(env):
+    uid = env.seed.operator()
+    persona = env.seed.persona(uid)
+    ids = env.seed.generation_job(uid, persona["id"])
+
+    set_active_worker(env, "python:cloud-1")                     # 다른 GPU가 활성
+    run_pull_loop(env, ids["job_id"], seconds=0.5)
+    row = job_row(env, ids["job_id"])
+    assert (row["status"], row["attempts"]) == ("pending", 0) and env.comfy.prompts == []
+
+    set_active_worker(env, env.settings.worker_id)               # 이 GPU로 전환
+    run_pull_loop(env, ids["job_id"])
+    assert job_row(env, ids["job_id"])["status"] == "done"
+
+
+def test_pull_loop_does_not_claim_while_comfyui_is_down(env):
+    env.comfy.reachable = False
+    uid = env.seed.operator()
+    persona = env.seed.persona(uid)
+    ids = env.seed.generation_job(uid, persona["id"])
+    run_pull_loop(env, ids["job_id"], seconds=0.5)
+    row = job_row(env, ids["job_id"])
+    assert (row["status"], row["attempts"]) == ("pending", 0)    # 선점하지 않아 attempts가 늘지 않는다
