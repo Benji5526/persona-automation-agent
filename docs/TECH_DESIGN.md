@@ -13814,3 +13814,191 @@ Supabase  generation = done, content_jobs = ready, assets = generated ─▶ Rea
 | 진행 표시 | `progress: 0.65` | 단계 표시 | 17.7, ComfyUI는 정확한 %를 모른다 |
 | 다음 단계 순서 | 50 Asset Management → 51 SNS Publishing → 52 Scheduled Publishing → 53 Analytics → 54 AI Decision | 같다 (Sprint 2의 게시 → 예약 순서와 일치, 44.6). 45.10의 표는 51·52가 반대인데 이 순서가 맞다 | 44.6 |
 | 다음 단계 | 50 Asset Management | 11.7, 17.10, 22.12 (DB 완료, Lovable Phase 4) | 45.10 |
+
+---
+
+## 50. Asset Management System — 원안 대응과 실행 ✅
+
+> 원안 50의 Asset 체계(파일 + 생성 기록 + 상태 + 관계 + 사용 기록)는 **이미 설계되어 있고 MVP 부분은 구현되어 있다**: 10.8(`assets`), 11.7(상태), 17.10·22.12(화면), 21.14(Storage), 21.15(Realtime), 13.11·47.3(출력 검증), 38.6·36.6(체크섬·중복 경고), 그리고 `supabase/migrations/0001`·`0004`·`0005`, `docs/lovable_master_prompt.md`의 Phase 4. 이 장은 원안 대응, **원안과 다르게 두는 큰 결정 네 가지**(상태 9개, `user_id` 칸, 비공개 버킷, `asset_usages`), 원안이 짚어 새로 찾은 빈틈 네 가지, 실행 순서를 정한다. 원안과 다른 곳은 ⚙️로 표시하고 50.8에 모았다.
+>
+> **원안 50.42·50.43의 구현 Prompt는 그대로 쓰지 않는다.** 원안 스키마(`user_id` 추가, 비공개 `generated-assets`, `asset_usages`, Repository 층)로 만들면 이미 있는 DB·RLS·브릿지·Lovable Phase 4 프롬프트와 어긋난다. Claude Code용은 50.5의 보강, Lovable용은 기존 Phase 4(+ V1의 Phase R·A)를 쓴다.
+
+### 50.1 구현 상태 (원안 50.44)
+
+| 원안 완료 기준 | 상태 | 근거 |
+|---|---|---|
+| `assets` Production Schema | 완료 (칸 이름과 몇 칸이 다르다, 50.3) | 0001, 10.8 |
+| `asset_usages` | 두지 않음 ⚙️ | 50.4 |
+| Index | 일부 | `persona_id`·`content_job_id`·`automation_job_id`는 있다. Library 조회용은 없다 → **50.5 2번** |
+| RLS | 완료 (Persona 소유 경유, 읽기만 직접 허용) | 0005 `assets_select_own`, 10.21 Rule 1 |
+| Storage 정책 | 완료 (`media` 쓰기는 `service_role`만, 목록 조회 정책 없음) | 0005, 21.14 |
+| Private 버킷 | **공개 유지 ⚙️** | 15.13, 50.4 |
+| 경로 규칙 | 완료 (`persona/{persona_id}/assets/{asset_id}.{ext}`) | 19.15, `register_asset`이 경로를 확인 |
+| Signed URL | 참조 이미지(`persona-private`)에만 | 21.14, 22.12 |
+| Thumbnail | 완료 (긴 변 512px WebP, `…_thumb.webp`) | `make_thumbnail` |
+| `/assets`, `/assets/:id` (Grid, Filter, Preview, Metadata) | Phase 4 프롬프트 작성됨, Lovable에서 실행 전 | 17.10, 44.5 7번 |
+| Approval, Usage History, 성과 요약 | V1 | 50.4, 44.7 |
+| Archive | 완료 (`archive_asset`) | 0003, `test_archived_asset_is_terminal` |
+| Content Job·Automation Job lineage, Python·ComfyUI 메타데이터 | 완료 | `assets.automation_job_id`, `generation_metadata` (50.3) |
+| n8n 완료 검증 | 완료 (DB가 보장) | 50.4 |
+| 교차 계정 접근 차단 | 정책은 있다. **자동 테스트가 없다** | → **50.5 1번** |
+| 서비스 키 미노출 | Lovable Phase 6 점검 항목 | 27.7 S1 |
+| Checksum, 중복 감지 | V1 (`sha256`·`file_size`, pHash 경고) | 38.6, 36.6 |
+| 상태 전환 검증, 오류 기록 | 완료 | 11.7 트리거, `system_errors` |
+| Realtime | 완료 (`assets`가 `supabase_realtime`에 있다) | 21.15 |
+
+### 50.2 상태 대응 (원안 50.3·50.34) ⚙️
+
+원안은 상태 9개를 한 줄로 둔다. 여기서는 **Asset 상태 4개**(`generated`·`approved`·`rejected`·`archived`)만 두고 나머지는 이미 그 일을 하는 객체의 상태로 표현한다 (11.7).
+
+| 원안 | 현재 | 이유 |
+|---|---|---|
+| `GENERATING` | 없음. generation Job `processing` + 마지막 단계 | Asset 행은 **검증된 파일이 업로드된 뒤에** 처음 생긴다. 그래서 `INSERT` 이벤트가 곧 "준비됨"이다 (17.7) |
+| `READY` | `generated` | 생성·검증 완료 |
+| `REVIEW` | 없음. 검토 대기 = `generated` | `generated → approved·rejected`를 Operator가 바로 한다 (`review_asset`, V1). 게시 승인 대기는 Post `pending_approval` (11.10) |
+| `APPROVED` / `REJECTED` | `approved` / `rejected` | V1. `rejected → approved`도 된다 (판단을 바꿈) |
+| `PROCESSING` | 없음. Post `publishing`, 영상 변환은 `transcode` Job | Asset의 상태가 아니라 게시·변환 작업의 상태 |
+| `USED` | **상태로 두지 않는다.** Post가 있는지로 계산 ("게시 N건") | 한 Asset이 여러 Post에 쓰인다. 상태에 넣으면 `approved`와 겹치고, 보관 Guard도 Post 상태를 봐야 한다 |
+| `ARCHIVED` | `archived` (종료 상태) | `scheduled`·`publishing`인 Post가 있으면 불가 (11.7) |
+| `FAILED` | 없음. generation Job `failed` + `system_errors`, **Asset은 만들지 않는다** | 원안 50.24 마지막 문단과 같다 |
+
+**상태별 버튼** (원안 50.34): `generated`는 [승인]·[반려]·[보관] (V1), `approved`는 [게시 요청]·[보관] (V1, 28장·42장), `rejected`는 [사유 보기]·[보관]·[다시 만들기], 모든 상태에 [다운로드]·[변형 만들기]. 원안의 `ARCHIVED`의 [Restore]는 두지 않는다 (50.4의 보관 항목).
+
+### 50.3 칼럼 대응 (원안 50.4·50.6)
+
+| 원안 | 현재 | 이유 |
+|---|---|---|
+| `user_id` | **없음.** 소유자는 `persona_id`로 Persona를 거쳐 안다 ⚙️ | Persona가 Tenant다 (10.21 Rule 1, 36.1). 소유자를 두 곳에 두면 어긋날 수 있다. RLS가 `persona_id in (내 Persona)`이다 |
+| `persona_id … on delete cascade`, `content_job_id … on delete set null` | `on delete restrict`, `content_job_id`는 필수 (업로드 Asset은 V1에 null 허용, 41.2) | 지워서 생성 기록이 사라지게 하지 않는다 (Rule 4). Persona는 보관(`inactive`)만 한다 |
+| `asset_type` `IMAGE`·`VIDEO` | `image`·`video` (소문자). MVP 화면은 `image`만 | 21.6 상태·종류 값 규칙 |
+| `file_size_bytes`, `checksum` | `file_size`, `sha256` (V1) | 38.6. 이름만 다르다 |
+| `duration_seconds` | `duration` | 10.8 |
+| `workflow_id`, `workflow_version`, `negative_prompt`, `model_id`, `lora_id`, `lora_strength` | `generation_metadata`의 `workflow`, `workflow_version`, `negative_prompt`, `model`, `lora`, `lora_strength` | 한 jsonb에서 읽고, 실제 쓴 값을 기록한다 |
+| `generation_metadata`의 `seed`·`steps`·`cfg`·`width`·`height` | 같다. 그 밖에 `denoise`·`sampler`·`scheduler`·`prompt`·`oom_downscaled`·`batch_index`·`comfy_prompt_id`가 있다 | `app/comfyui/builder.py`, `worker.py` |
+| `generation_time_ms` | `execution_logs`의 `COMPLETE`·`COMFYUI_WAIT` `duration_ms` | 48장·49.5 2번. 같은 정보를 두 곳에 두지 않는다 |
+| `usage_metadata` | **없음.** 사용 기록은 `posts`가 정본 | 50.4 |
+| `status` 기본값 `ready` | `generated` | 11.7 |
+| `archived_at` | **없음.** `state_transitions`에 `to_status = 'archived'`의 시각이 있다 | 11.14. 같은 정보를 두 곳에 두지 않는다 |
+| `workflow` (원안엔 없음) | `workflow jsonb` = 자리표시자를 채워 **실제 실행한 그래프** | 재현 (13.9) |
+| `automation_job_id` (원안엔 없음) | 있다 | 이 Asset을 만든 실행 Job. 선점한 Worker만 등록한다 (19.7) |
+
+### 50.4 원안 항목별 대응 (원안 50.1~50.45)
+
+| 원안 | 여기 | 근거 |
+|---|---|---|
+| 라이프사이클 `생성 → … → 보관`, `Persona → Content Job → … → Asset → Post → Performance` | 같다 | 10.20, 11장 |
+| Asset ≠ Storage 파일 (파일 + metadata + 상태 + 관계 + 사용 기록) | 같다 | 10.8 |
+| Asset Type 확장 (`AUDIO`·`CAROUSEL`·`THUMBNAIL`·`REFERENCE`·`GENERATED_VARIATION`·`EDITED_MEDIA`) | **종류를 늘리지 않는다 ⚙️.** `THUMBNAIL`은 `thumbnail_url` 칸, `REFERENCE`는 `persona_assets`(`persona-private`), `GENERATED_VARIATION`은 `image` Asset + 그 Content Job의 `input_images`, `CAROUSEL`은 V1 이후(V1은 Asset 하나 = Post 하나, 28.9), `AUDIO`·`EDITED_MEDIA`는 이후 | 10.8, 17.10, 28.9 |
+| 재현 가능한 `generation_metadata`가 재생성·A/B·분석·AI 판단에 쓰임 | 같다. 분석 차원(Workflow·LoRA 등)은 `assets.generation_metadata`에서 읽는다 | 29.9, 34장, 35장, 37-A |
+| Checksum SHA-256, **파일 중복 ≠ Asset 중복** (자동 삭제 안 함) | 같은 원칙. `sha256`·`file_size`는 V1에 브릿지·업로드가 계산한다. 같은 Persona에 같은 `sha256`이 이미 있으면 업로드 화면이 **경고만** 한다 (막지 않음). 생성물은 파일이 같을 일이 거의 없어서 pHash 경고(36.6)가 맡는다 | 38.6, 41.2, 36.6 |
+| Bucket `generated-assets`, 경로 `{user_id}/{persona_id}/{content_job_id}/{asset_id}/original.png` | 버킷 `media`, 경로 `persona/{persona_id}/assets/{asset_id}.{ext}`, 썸네일 `{asset_id}_thumb.webp` ⚙️ | Storage 정책의 단위가 Persona이고, 경로에 Job·사용자를 넣으면 연결이 바뀔 때 파일을 옮겨야 한다. 경로는 한 번 정하면 바뀌지 않아야 한다. 경로를 Frontend가 만들지 않는 점은 같다. 화면은 DB의 `public_url`·`thumbnail_url`만 쓴다 |
+| 생성물은 **비공개** + Signed URL (5분~1시간) | **공개 버킷 유지 ⚙️** (15.13 확정). 추측할 수 없는 UUID 경로, 목록 조회 정책 없음, 쓰기는 `service_role`만. Signed URL은 참조 이미지에만 (1시간). **업로드 미디어**는 이미 비공개 `media-uploads`다 (41.2·42.3: 유료 구독 콘텐츠 보호) | 15.5, 15.13, 21.14, 22.12, Phase 4 프롬프트. **재검토 조건:** Persona가 유료 구독 플랫폼용이라 업로드를 비공개로 바꾼 이유가 생성물에도 해당하면 `media`를 비공개로 바꾸고 Phase 4를 Signed URL로 바꾼다. 둘이 한 묶음이다 (Operator 결정) |
+| 외부 게시에 Signed URL 전달 | 게시는 Asset ID로만 하고, 브릿지·Adapter가 Storage에서 직접 받는다. 외부 URL을 받지 않는다 | 41.2, 43장, 15.8 |
+| Thumbnail 400~600px, 영상은 poster frame | 긴 변 512px WebP. 영상 poster는 영상 Workflow(V1)와 함께 | `make_thumbnail`, 44.7 |
+| `/assets` Grid, Filter (Persona·Type·Status·Workflow·Created·Content Job), 검색 (Asset ID·Filename·Prompt) | Persona·종류·상태·Content Job·날짜 필터, 검색은 주제·프롬프트. **Workflow 필터와 Asset ID·파일명 검색은 두지 않는다** (파일명은 UUID이고 Registry Workflow는 5개). 필요해지면 V1에 `generation_metadata->>'workflow'` 필터를 더한다. 기본으로 `archived`와 테스트 이미지를 숨긴다 | 17.10, 22.12 |
+| 카드 Hover에 [Preview][Approve][Reject][Archive] | 카드는 열기만. **상태를 바꾸는 버튼은 Detail에 한 곳** | 실수로 반려·보관하는 것을 막는다 (확인 대화상자, 18.11) |
+| Asset Detail (Preview, 상태, Persona, Content Job, Workflow, Model/LoRA/Seed/Steps/CFG, Prompt, Usage History) | 같다 + 크기·해상도·생성 시간·OOM 축소 여부·ComfyUI prompt_id. 사용 기록은 V1 | 17.10, 22.12 |
+| Asset 승인 `READY → REVIEW → APPROVED`, 거절 comment | `review_asset` (V1). **거절 사유 칸이 없다 → 50.5 3번** | 12.4 |
+| `approvals` 테이블로 Asset 검토 (`ASSET_REVIEW`, `AI_ASSET_REVIEW`) | **쓰지 않는다 ⚙️.** `approvals`는 Post 승인(`publish`)과 AI 결정 승인(`decision`·`optimization`)이다. Asset 검토를 또 `approvals`에 두면 "어느 승인이 게시를 허용하는가"가 둘이 된다. 누가·언제 검토했는지는 `state_transitions`에 남는다. **원안의 "AI 생성 결과는 바로 게시하지 않는다"는 Post 승인(사람)이 지킨다.** 게시 전 검사 5번은 Asset이 `archived`·`rejected`가 아니면 되므로, 검토하지 않은 `generated` Asset도 Post 승인만 받으면 게시할 수 있다. 검토를 의무로 하려면 검사 5번을 `approved`로 바꾼다 (Operator 결정, V1) | 10.18, 11.10, 28.8, 33.7 |
+| AI의 Asset 검토 | MVP·V1에 없다. 권한 수준은 V2에서 (AI가 직접 할 일이 아니라 Decision 안의 Action으로) | 15.19, 33장 |
+| `asset_usages` 테이블 (`POST`·`SCHEDULE`·`REPOST`·`CAROUSEL`·`CAMPAIGN`·`EXPERIMENT`·`REFERENCE`) | **만들지 않는다 ⚙️.** 사용 기록은 이미 `posts.asset_id`(`on delete restrict`)다. 대응: `POST`·`SCHEDULE` = Post 상태, `REPOST` = 같은 Asset의 다른 Post, `EXPERIMENT` = Post가 속한 실험(34장), `REFERENCE` = 다른 Content Job의 `input_images`, `CAROUSEL`·`CAMPAIGN` = 아직 없음. 두 곳에 적으면 Post를 취소해도 사용 기록이 남아 어긋난다 | 10.10, 10.20, 34장 |
+| Asset 1 ─ N Posts (여러 플랫폼) | 같다 (`posts.platform` = `instagram`·`tiktok`·`x`). Post의 Persona가 Asset과 다르면 거부하는 트리거는 `persona_isolation` 마이그레이션(36.12, 첫 `db push` 전)이 더한다 | 36.12, 10.10 |
+| Asset에는 성과를 중복 저장하지 않고 `Asset → Post → Performance`로 연결, 데이터 없으면 `—`, **가짜 지표 금지** | 같다 (Lovable Phase 5·6에도 "No fake metrics"). Asset Detail의 성과 요약은 **V1에 더한다 → 50.5 4번** | 29장, Phase 6 |
+| `Asset Performance Score` (Engagement+Reach+Save+Share+Follower) | Asset 단위 점수를 따로 두지 않는다. 점수는 Post 단위(`Content Performance Score`, 29.7)이고, Asset은 그 Post들의 합계·평균을 본다 | 29.7 |
+| `assetRepository.ts` 함수 9개 | **Repository 층을 두지 않는다 ⚙️.** Hook이 Supabase를 부른다. `useAssets(filters)`·`useAsset(id)`가 이미 있고(`assets`, `posts`, Realtime `assets`), 상태 변경(`review_asset`·`archive_asset`)은 RPC를 부르는 mutation이다. `createAsset`·`updateAssetStatus` 직접 호출은 없다 (Asset은 브릿지만 만들고, 상태는 RPC만 바꾼다) | 18.7, 42장 메모, Phase 6 점검 |
+| `useAssetApproval`, `useAssetUsage` | `useAsset`이 Post를 함께 읽는다. 검토 mutation은 V1 Phase R | 18.7, 44.7 |
+| Realtime: `GENERATING → READY`로 화면 갱신 | `assets` INSERT = 생성 완료 (행이 검증 뒤에 생기므로). 진행 단계는 `automation_jobs`·`execution_logs` | 21.15, 17.7 |
+| 생성 Flow `… → Validation → Checksum → Storage → Asset INSERT → READY → Content Job GENERATED` | 49.2의 흐름과 같다 (`validate → thumbnail → 업로드 → register_asset → complete`). Content Job `ready`는 DB 트리거가 바꾼다. Checksum은 V1 | 49.2, 19.16 |
+| 검증 (존재·크기·MIME·확장자, 이미지 decode, path traversal, 큰 파일, 깨진 파일), 실패 시 Job 실패 + Asset 만들지 않음 | 같다 | 13.11, 47.3 (이름 허용 목록 `OUTPUT_UNEXPECTED`, 크기 상한 `OUTPUT_TOO_LARGE`). 영상(codec·duration)은 V1 |
+| `{asset_id}.png`, 원래 이름은 metadata에 | 같다. 업로드 Asset의 원래 이름은 `generation_metadata.original_name` | 41.2 |
+| Archive 우선, 보관한 Asset은 DB·Storage에서 유지 | `archive_asset`. 보관은 **종료 상태**다. 행·메타데이터는 남지만 **`rejected`·`archived` Asset의 파일은 30일 뒤 지운다 ⚙️** (WF-018, V1. MVP에는 남음) | 11.7, 15.5, 39.6, 45.7 |
+| `ARCHIVED → Restore` | 두지 않는다. 종료 상태이고 30일 뒤 파일이 없어진다. 실수로 보관해도 [변형 만들기]·[다시 만들기]로 새로 만든다. 되살릴 일이 생기면 **30일 안에 한해** `generated`로 되돌리는 RPC를 더한다 (WF-018 대상에서 빠짐). Operator 결정 대기 | 11.7 |
+| 게시·실험·성과 연결 Asset은 일반 사용자가 삭제 불가, 완전 삭제는 ADMIN + Storage 삭제 | **삭제 기능이 없다.** 모든 FK가 `restrict`이고 화면에 삭제 버튼이 없다. 게시된 Asset 보관은 된다 (Guard는 `scheduled`·`publishing`만). 완전 삭제는 만들지 않는다 | 10.21 Rule 4, 28장 |
+| RLS `user_id = auth.uid()` + `persona.user_id = auth.uid()` | `persona_id in (소유한 Persona)`. 읽기만 직접 허용하고 쓰기 정책은 없다 (모든 변경은 RPC) | 0005, 10.21 |
+| Storage RLS, 첫 path segment = `auth.uid()` | `persona-private`는 `persona/{persona_id}/refs/`에서 두 번째 칸이 내 Persona인지 확인. `media`는 공개이고 쓰기는 `service_role`만 | 0005, 21.14 |
+| n8n은 Asset을 만들지 않고, 성공 조건 `automation_job = SUCCEEDED`·`content_job = GENERATED`·`asset = READY` 셋 일치 | 같다. 셋이 어긋나지 않도록 DB가 보장한다: `complete_automation_job`은 Asset이 없으면 거부하고, Rollup 트리거가 같은 트랜잭션에서 Content Job을 `ready`로 바꾼다. WF-004는 콜백 값을 믿지 않고 Asset을 다시 조회한다 | 0004, 11.9 R1, 20.10 |
+| Python이 Asset을 만들고 Asset ID 중심으로 처리 | 같다 (`register_asset`). 화면은 URL을 Python에서 받지 않고 DB·Realtime에서 읽는다 | 19.9, 19.16 |
+| 컴포넌트 이름 (`AssetGrid`, `AssetCard`, `AssetPreview` …) | 이름은 Lovable이 정한다. 화면 요소는 17.10·22.12 | – |
+| 다시 만들기: 원본 Content Job으로 새 Asset, seed를 바꿔서, 기존 Asset 보존 | 같다. 두 가지다: [다시 만들기] = `regenerate_content_job`(같은 Content Job의 새 회차, seed가 -1이면 매번 새로 뽑음, 기존 Asset 보존), [변형 만들기] = 새 Content Job(`image_to_image_v1`, `init_image` = 이 Asset) | 17.10, 13.9, 46장 |
+| Asset Lineage (`Content Job → Automation Job → Workflow → Model → LoRA → Prompt → Asset → Post → Performance`) | 이미 연결되어 있다: Asset → `automation_job_id` → Content Job → Persona, `generation_metadata`(Workflow·버전·Model·LoRA·Prompt), `posts.asset_id`, `performance_metrics`. 변형이면 `content_jobs.input_images`가 원본 Asset을 가리킨다 | 10.21 Rule 5, 29.9 |
+| Index 6개 | `persona_id`·`content_job_id`·`automation_job_id`는 있다. `user_id`는 칸이 없다. `status`·`checksum`은 지금 쓰지 않는다. Library 조회용 하나를 더한다 | **50.5 2번**. `sha256` index는 V1에 중복 경고를 만들 때 |
+| 오류 코드 (`ASSET_NOT_FOUND`, `ASSET_ACCESS_DENIED`, `STORAGE_UPLOAD_FAILED`, `INVALID_MIME_TYPE`, `FILE_TOO_LARGE`, `CHECKSUM_FAILED`, `DATABASE_INSERT_FAILED` …) | `PT404`(RLS가 행을 숨기므로 "없음"과 "권한 없음"이 같다, 존재를 알리지 않음), `FILE_ERROR`(업로드·다운로드, 재시도), `OUTPUT_INVALID`·`OUTPUT_UNEXPECTED`(파일·MIME), `OUTPUT_TOO_LARGE`, `INVALID_MEDIA`(V1, 게시 때 `sha256` 불일치), `VALIDATION_FAILED`(`register_asset` 오류). 썸네일은 별도 코드 없이 같은 단계에서 만들고, 실패하면 Job 오류로 기록되어 재시도 정책을 따른다 | 13.12, 20.11, 47.3 |
+| 관찰: Assets Today, Generating, Ready, Review Required, Approved, Failed, Archived, Generation→Ready 시간, Storage 사용량, Failed Asset Rate | Dashboard의 최근 Asset·Asset 수 (Phase 5). Review Required = `generated` 수 (V1). Failed = generation Job `failed` (SLO 생성 성공률 37.11). Generation→Ready 시간 = 49.5 2번. Storage = `assets.file_size` 합 (V1, 39.6) | 18.9, 37.11, 37-A |
+| 테스트 22개 (CRUD, RLS, 교차 계정, Storage, 승인 전환, Archive, 중복 checksum, Realtime, Signed URL) | 50.5의 테스트와 아래 표 | 50.4 아래 |
+
+**원안 50.42의 테스트 대응**
+
+| 원안 | 있는 것 | 없는 것 |
+|---|---|---|
+| CRUD | 생성은 브릿지 `register_asset` (`test_lora_generation_end_to_end`), 경로 거부 `test_register_asset_rejects_foreign_storage_path`, 생성 Job은 Asset 없이 못 끝남 `test_generation_cannot_complete_without_asset` | – |
+| RLS·교차 계정 | 정책(0005), 수동 확인 27.7 S3 | **DB 자동 테스트 없음 → 50.5 1번** |
+| Storage 접근 | 수동 24.5·27.7 S4 (참조 이미지 Signed URL) | 자동 테스트 없음 (Supabase Storage가 필요, 수동으로 둔다) |
+| 상태 전환·Archive | `test_archived_asset_is_terminal` | 승인·반려 전환, "진행 중인 Post가 있으면 보관 불가"는 V1(Post 게시 단계)에 함께 |
+| 중복 checksum | – | V1 (`sha256`이 생길 때) |
+| Realtime | 수동 27.4 | – |
+| Signed URL | 수동 27.7 S8 (만료) | – |
+
+### 50.5 보강 ⚙️
+
+원안이 짚은 것 중 현재 설계에 없는 네 가지다. 1·2번은 **Lovable Phase 4(Asset Library)를 붙이기 전에** 한다. 새 마이그레이션에 넣고, 적용한 파일은 고치지 않는다.
+
+| # | 항목 | 지금 | 바꿀 곳 | 테스트 | 시점 |
+|---|---|---|---|---|---|
+| 1 | **교차 계정 Asset 접근 테스트** (원안 50.28·50.42) | `assets_select_own`·`archive_asset`의 소유 확인이 있지만 DB 자동 테스트가 없다. 정책을 잘못 고쳐도 알 수 없다 | `tests/db`에 계정 둘: 다른 계정의 `assets`를 select하면 0행, 다른 계정의 Asset을 `archive_asset`하면 `PT404`, 직접 `update`·`insert`·`delete`는 권한 거부 | 위 세 가지 | F0 |
+| 2 | **Library 조회 Index** (원안 50.37) | `persona_id` 단일 index뿐이라 Persona별 최신순 목록이 Asset이 늘수록 정렬을 한다 | 새 마이그레이션: `assets (persona_id, created_at desc)`. `status`·`sha256` index는 쓰는 쿼리가 생길 때(V1) | `verify_production.sql`의 index 확인에 더함 | F0, 첫 `db push` 전 |
+| 3 | **반려 사유** (원안 50.14·50.34 `View Reason`) | `review_asset(p_asset_id, p_decision)`에 사유 입력이 없고, `state_transitions.reason`은 짧은 코드(`approval_rejected` 등)다 | V1 `publishing` 마이그레이션: `assets.review_note text` (500자 이하)와 `review_asset(…, p_note text default null)`. 반려할 때 입력하고 Detail의 [사유 보기]에 쓴다. 다시 승인하면 비운다. 누가·언제는 `state_transitions` | 반려 → `review_note` 저장 → 승인 → 비워짐 | V1 (44.7 M7 나머지) |
+| 4 | **Asset Detail 성과 요약** (원안 50.19) | 44.7의 Phase A가 계정·Post 화면의 성과만 말한다. Asset 화면에는 성과 칸이 없다 | Phase A에 더한다: RPC `get_asset_performance(p_asset_id)` (`get_post_performance`와 같은 `private` 함수, 29.13). "게시 N건, 조회·좋아요·댓글·공유 합계, 참여율". **합계는 29장 규칙대로 같은 시점(24h) Snapshot끼리** 더하고, Snapshot이 없으면 `—`. 가짜 값 없음 | Snapshot 없음 → 모두 `—`, 둘 → 합이 맞음 | V1 (Sprint 3, Phase A) |
+
+- **Phase 4 프롬프트에 한 줄 더한다** (Lovable에 보내기 전): 변형 Asset이면 원본 Asset 링크(`content_jobs.input_images.init_image.asset_id`)를 Detail에 보여 준다 (원안 50.36 lineage).
+- **원안 50.42·50.43의 요구 중 이미 지켜지는 것**: 서비스 키는 프런트에 없다 (Phase 6 점검), React는 n8n·Python·ComfyUI·SNS를 부르지 않는다 (Supabase만, 18.1), 가짜 지표·가짜 이미지 없음, 로딩·빈·오류 상태 (Phase 6), Page → Hook → Supabase (Repository 층만 없음).
+
+### 50.6 실행 순서
+
+| # | 할 일 | 누가 | 통과 |
+|---|---|---|---|
+| 1 | 50.5 1·2번 + 테스트 | Claude Code | `pytest tests -q` 통과, `verify_production.sql` |
+| 2 | Lovable Phase 4 (Asset Library) | 사람 (프롬프트 전송), Claude Code (코드 리뷰) | Phase 4 확인 항목 + 27.4의 "새로고침 없이 Asset이 나타남" |
+| 3 | 첫 자동 실행(49.6)의 이미지가 Library에 보이는지 확인 | 사람 | `thumbnail_url`·`public_url` 표시, 생성 정보 칸 (Model·LoRA·seed·Workflow 버전) |
+| 4 | V1: 검토·성과 (50.5 3·4번, `review_asset` UI, `sha256`·`file_size`, WF-018) | Claude Code + Lovable | 44.7 |
+
+**지금 단계에서는 새 마이그레이션이 하나뿐이다** (50.5 2번). 상태·RLS·Storage·`register_asset`은 손대지 않는다.
+
+### 50.7 완료 판단
+
+| 항목 | 상태 |
+|---|---|
+| `assets` 스키마, RLS, Storage, Thumbnail, `register_asset`, `archive_asset`, Realtime | ✅ (M1·M2) |
+| 50.5 1·2번 | ❌ F0 |
+| Lovable Phase 4 실행 | ❌ 44.5 7번 |
+| 검토·사유·성과·체크섬·파일 정리 | ❌ V1 |
+
+원안 50.45의 결론("파일 관리가 아니라, AI가 무엇을·왜·어떻게 만들고 어디에 쓰고 결과가 어땠는지 추적하는 데이터 계층")에 동의한다. 그 추적 고리는 이미 FK로 이어져 있다 (Persona → Content Job → Automation Job → Asset → Post → Performance). 이 장에서 늘리는 것은 Index 하나와 V1의 칸 하나다.
+
+### 50.8 원안 조정
+
+| 위치 | 원안 | 조정 | 이유 |
+|---|---|---|---|
+| 이 장의 성격 | 새 구현 명세 | 구현된 Asset 계층의 대응·빈틈·실행 순서 | M1·M2 완료, 10.8·11.7·17.10·21.14가 같은 원안을 이미 대응 |
+| 구현 Prompt | Claude Code·Lovable용 | 쓰지 않는다. 기존 Phase 4 + 50.5 | 원안 스키마·버킷은 기존 구현과 어긋난다 |
+| 상태 | 9개 | 4개 (`generated`·`approved`·`rejected`·`archived`) | 나머지는 Job·Post 상태 (50.2) |
+| `USED` | 상태 | 상태가 아님 (Post 존재로 계산) | 한 Asset이 여러 Post에 쓰임 |
+| `user_id` | 칸 | 없음 (Persona 경유) | Tenant = Persona |
+| Asset Type | 8종 | `image`·`video` | 나머지는 칸이나 다른 테이블 |
+| 칼럼 이름 | `file_size_bytes`, `checksum`, `duration_seconds`, `workflow_id` … | `file_size`, `sha256`, `duration`, `generation_metadata.workflow` … | 구현된 이름 |
+| `archived_at`, `usage_metadata` | 칸 | 없음 | `state_transitions`, `posts` |
+| 버킷·경로 | `generated-assets` 비공개, `{user_id}/{persona_id}/{content_job_id}/{asset_id}/` | `media` 공개(15.13), `persona/{persona_id}/assets/{asset_id}.{ext}` | 경로는 바뀌지 않아야 함, 정책 단위는 Persona |
+| 생성물 Signed URL | 기본 | 참조 이미지에만. 재검토 조건은 50.4 | 15.13 확정 |
+| 카드 Hover 액션 | 있음 | Detail에만 | 실수 방지 |
+| Workflow 필터, Asset ID·파일명 검색 | 있음 | 없음 | 파일명은 UUID, Workflow 5개 |
+| Asset 검토 | `approvals` 테이블, `AI_ASSET_REVIEW` | `review_asset` + `state_transitions`. 승인 테이블은 Post 단위 | 게시를 허용하는 승인이 하나여야 함 |
+| 게시 전 Asset 승인 의무 | 승인된 Asset만 | `archived`·`rejected`만 막음. 의무화는 Operator 결정 | 28.8 검사 5번 |
+| `asset_usages` | 테이블 | 없음 (`posts.asset_id`) | 두 곳 기록은 어긋남 |
+| Asset Performance Score | Asset 단위 | Post 단위 점수의 합계·평균 | 29.7 |
+| Repository 층, Hook 4개 | `assetRepository.ts`, `useAssetApproval`, `useAssetUsage` | Hook이 Supabase를 부름 (`useAssets`·`useAsset`) | 18.7 |
+| Realtime | `GENERATING → READY` | `assets` INSERT = 준비됨 | 행이 검증 뒤에 생김 |
+| 보관한 파일 | DB·Storage 유지 | 행은 유지, `rejected`·`archived` 파일은 30일 뒤 삭제 (V1) | 비용, 15·39.6 |
+| Restore | 있음 | 없음 (결정 대기) | 종료 상태 + 파일 삭제 |
+| Admin 완전 삭제 | 있음 | 없음 | Rule 4, 모든 FK `restrict` |
+| Index 6개 | 6개 | `(persona_id, created_at desc)` 하나 (+ V1 `sha256`) | `user_id` 칸 없음, 쓰지 않는 index는 쓰기만 느림 |
+| 오류 코드 | 10개 | 13.12·47.3 코드 | 구현된 이름, RLS는 존재를 알리지 않음 |
+| 다음 단계 | 51 Post & SNS Publishing | 28장 (Sprint 2, 44.6) | 45.10 |
