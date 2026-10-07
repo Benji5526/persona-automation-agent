@@ -277,3 +277,57 @@ def test_storage_requests():
     assert err.error_code == "INPUT_NOT_FOUND"
     assert storage.public_url("media", "persona/p/assets/a.png") == \
         "https://ref.supabase.co/storage/v1/object/public/media/persona/p/assets/a.png"
+
+
+# -----------------------------------------------------------------------------
+# F0: 출력 파일 이름 허용 목록 (TECH_DESIGN 47.3 2번), 크기 상한 (47.3 3번)
+# -----------------------------------------------------------------------------
+JOB = "11111111-2222-3333-4444-555555555555"
+
+
+def test_output_names_allow_list():
+    from app.comfyui.validation import check_output_names
+    spec = REGISTRY["image_generation_v1"]
+    ok = [{"filename": f"{JOB}_00001_.png", "subfolder": "pa", "type": "output"},
+          {"filename": f"{JOB}_00002_.png", "subfolder": "pa", "type": "output"}]
+    check_output_names(ok, JOB, spec)  # 통과
+
+    bad_cases = [
+        {"filename": f"{JOB}_00001_.png [input]", "subfolder": "pa"},        # 폴더를 바꾸는 이름 끝 표기
+        {"filename": f"{JOB}_00001_.png", "subfolder": "pa/../x"},           # 하위·상위 폴더
+        {"filename": f"{JOB}_00001_.png", "subfolder": ""},                  # 허용 폴더(pa) 밖
+        {"filename": f"{JOB}_00001_.jpg", "subfolder": "pa"},                # Registry 형식(png) 밖
+        {"filename": "22222222-2222-2222-2222-222222222222_00001_.png", "subfolder": "pa"},  # 다른 Job
+        {"filename": f"../{JOB}_00001_.png", "subfolder": "pa"},
+        {"filename": f"{JOB}_1_.png", "subfolder": "pa"},                    # 자리수
+        {"filename": f"{JOB}_\u0661\u0662\u0663\u0664\u0665_.png", "subfolder": "pa"},  # ASCII가 아닌 숫자
+    ]
+    for bad in bad_cases:
+        with pytest.raises(JobError) as exc:
+            check_output_names([ok[0], bad], JOB, spec)  # 하나라도 다르면 전체 거부
+        assert exc.value.error_code == "OUTPUT_UNEXPECTED" and exc.value.retryable is False, bad
+
+
+def test_output_size_cap_is_checked_before_decoding():
+    spec = REGISTRY["image_generation_v1"]
+    data = noise_png_sized(256, 256, 1)
+    spec.output["max_bytes"] = len(data) - 1
+    try:
+        with pytest.raises(JobError) as exc:
+            validate_output(data, spec, 256, 256)
+        assert exc.value.error_code == "OUTPUT_TOO_LARGE" and exc.value.retryable is False
+    finally:
+        spec.output["max_bytes"] = 52428800
+    assert validate_output(data, spec, 256, 256).width == 256
+
+
+def test_registry_rejects_max_bytes_above_bucket_limit(tmp_path):
+    import shutil
+    for name in ("registry.json", "image_generation_v1.json", "image_generation_lora_v1.json", "image_to_image_v1.json",
+                 "character_reference_v1.json", "faceswap_v1.json"):
+        shutil.copy(ROOT / "workflows" / name, tmp_path / name)
+    reg = json.loads((tmp_path / "registry.json").read_text(encoding="utf-8"))
+    reg["image_generation_v1"]["output"]["max_bytes"] = 52428801     # media 버킷 한도(50MB)보다 큼
+    (tmp_path / "registry.json").write_text(json.dumps(reg), encoding="utf-8")
+    with pytest.raises(RegistryError, match="max_bytes"):
+        load_registry(tmp_path)

@@ -26,7 +26,7 @@ Lovable (관제센터) → Supabase (Source of Truth) → n8n (Orchestrator) →
 ```text
 app/                   Python 브릿지 (M2): FastAPI /v1, GPU Worker, ComfyUI·Supabase 연동
 workflows/             ComfyUI Workflow 템플릿 + registry.json
-supabase/migrations/   DB 마이그레이션 0001~0008
+supabase/migrations/   DB 마이그레이션 0001~0009
 supabase/tests/stubs/  로컬 테스트 전용 Supabase 흉내 스키마
 tests/db/              DB 테스트
 tests/bridge/          브릿지 테스트 (실제 DB + 가짜 ComfyUI)

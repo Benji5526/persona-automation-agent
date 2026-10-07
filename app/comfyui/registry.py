@@ -16,6 +16,7 @@ ID_RE = re.compile(r"^[a-z0-9_]+$")
 FILE_RE = re.compile(r"^[a-z0-9_]+\.json$")
 PLACEHOLDER_RE = re.compile(r"\{\{\s*([A-Za-z0-9_]+)\s*\}\}")
 BUILTIN_PLACEHOLDERS = {"filename_prefix"}
+MAX_OUTPUT_BYTES_LIMIT = 52_428_800  # media 버킷 파일 크기 한도 (0005). 이보다 큰 파일은 업로드가 실패한다
 
 
 class RegistryError(ValueError):
@@ -85,6 +86,9 @@ def load_registry(workflow_dir: Path) -> dict[str, WorkflowSpec]:
             raise RegistryError(f"{wf_id}: template placeholders not declared in registry: {sorted(unknown)}")
         if not spec.output.get("mime"):
             raise RegistryError(f"{wf_id}: output.mime is required")
+        max_bytes = spec.output.get("max_bytes")
+        if max_bytes is not None and not (isinstance(max_bytes, int) and 0 < max_bytes <= MAX_OUTPUT_BYTES_LIMIT):
+            raise RegistryError(f"{wf_id}: output.max_bytes must be 1..{MAX_OUTPUT_BYTES_LIMIT} (bucket limit)")
         for name, model in spec.models.items():
             if not {"node", "input"} <= set(model):
                 raise RegistryError(f"{wf_id}: models.{name} needs node and input")

@@ -35,9 +35,11 @@ class Repository(Protocol):
     async def get_persona(self, persona_id: str) -> Row | None: ...
     async def get_persona_assets(self, persona_id: str) -> list[Row]: ...
     async def get_asset(self, asset_id: str) -> Row | None: ...
+    async def get_job_assets(self, job_id: str) -> list[Row]: ...
     async def sync_workflow_registry(self, workflows: dict) -> int: ...
     async def report_worker_status(self, worker_id: str, info: dict) -> None: ...
-    async def log_security_event(self, event_type: str, source_ip: str | None, detail: dict) -> None: ...
+    async def log_security_event(self, event_type: str, source_ip: str | None, detail: dict,
+                                 actor_type: str = "anonymous", persona_id: str | None = None) -> None: ...
 
 
 def _first(value: Any) -> Row | None:
@@ -128,6 +130,10 @@ class PostgrestRepository:
         rows = await self._select("assets", {"id": f"eq.{asset_id}"})
         return rows[0] if rows else None
 
+    async def get_job_assets(self, job_id: str) -> list[Row]:
+        """이 generation Job이 이미 등록한 Asset (회수·재시도 때 다시 만들지 않기 위해, 49.5 1번)."""
+        return await self._select("assets", {"automation_job_id": f"eq.{job_id}", "order": "created_at"})
+
     # -- 운영 --------------------------------------------------------------------
     async def sync_workflow_registry(self, workflows: dict) -> int:
         return int(await self._rpc("sync_workflow_registry", {"p_workflows": workflows}) or 0)
@@ -135,6 +141,8 @@ class PostgrestRepository:
     async def report_worker_status(self, worker_id: str, info: dict) -> None:
         await self._rpc("report_worker_status", {"p_worker_id": worker_id, "p_kind": "python", "p_info": info})
 
-    async def log_security_event(self, event_type: str, source_ip: str | None, detail: dict) -> None:
-        await self._rpc("log_security_event", {"p_event_type": event_type, "p_actor_type": "anonymous",
-                                               "p_source_ip": source_ip, "p_detail": detail})
+    async def log_security_event(self, event_type: str, source_ip: str | None, detail: dict,
+                                 actor_type: str = "anonymous", persona_id: str | None = None) -> None:
+        await self._rpc("log_security_event", {"p_event_type": event_type, "p_actor_type": actor_type,
+                                               "p_source_ip": source_ip, "p_detail": detail,
+                                               "p_persona_id": persona_id})

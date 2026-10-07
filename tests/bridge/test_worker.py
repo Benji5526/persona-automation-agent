@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import datetime, timezone
 
-from tests.bridge.conftest import make_settings, noise_png_sized
+from tests.bridge.conftest import FakeComfy, make_settings, noise_png_sized
 
 
 def job_row(env, job_id):
@@ -56,7 +57,14 @@ def test_lora_generation_end_to_end(env):
         "select step, status from execution_logs where automation_job_id = %s order by id", (ids["job_id"],))]
     assert steps == [("BUILD", "started"), ("BUILD", "succeeded"), ("COMFYUI_QUEUE", "started"),
                      ("COMFYUI_WAIT", "started"), ("COMFYUI_WAIT", "succeeded"), ("VALIDATE", "started"),
-                     ("UPLOAD", "started"), ("COMPLETE", "succeeded")]
+                     ("VALIDATE", "succeeded"), ("UPLOAD", "started"), ("UPLOAD", "succeeded"),
+                     ("COMPLETE", "succeeded")]
+    # 단계별 소요 시간 (49.5 2번): 검증·업로드·ComfyUI·전체가 모두 기록된다
+    durations = {r["step"]: r["duration_ms"] for r in env.seed.all(
+        "select step, duration_ms from execution_logs where automation_job_id = %s and status = 'succeeded'",
+        (ids["job_id"],))}
+    for step in ("COMFYUI_WAIT", "VALIDATE", "UPLOAD", "COMPLETE"):
+        assert durations[step] is not None and durations[step] >= 0, step
     assert env.seed.one("select actor_type from state_transitions where entity_id = %s and to_status = 'done'",
                         (ids["job_id"],))["actor_type"] == "python"
 
@@ -388,3 +396,94 @@ def test_requeued_same_id_runs_with_new_lock(env):
 
     pending = env.run(scenario())
     assert len(pending) == 1 and pending[0]["attempts"] == 2
+
+
+# -----------------------------------------------------------------------------
+# F0 보강 (TECH_DESIGN 36.12, 47.3, 49.5)
+# -----------------------------------------------------------------------------
+def test_content_job_of_another_persona_fails_before_comfyui(env):
+    """36.12: Job과 Content Job의 Persona가 다르면 ComfyUI를 부르기 전에 실패한다 (DB 트리거 밖의 방어선)."""
+    uid = env.seed.operator()
+    persona = env.seed.persona(uid)
+    other = env.seed.persona(env.seed.operator())      # 실제로 있는 다른 Persona (존재하지 않는 ID가 아님)
+    ids = env.seed.generation_job(uid, persona["id"])
+
+    async def go():
+        worker = env.worker()
+        job = await env.repo.claim_job(ids["job_id"], env.settings.worker_id)
+        job["persona_id"] = other["id"]  # 선점한 Job dict의 persona가 Content Job과 어긋난 상황
+        await worker.process(job)
+
+    env.run(go())
+    assert env.comfy.prompts == []
+    row = job_row(env, ids["job_id"])
+    assert row["error_code"] == "INPUT_NOT_FOUND"
+    assert "different persona" in row["error_message"]   # persona 조회 실패가 아니라 새 검사에 걸렸다
+
+
+def test_unexpected_output_names_are_rejected_without_reading_files(env):
+    """47.3 2번: 이름 끝 표기·허용 폴더 밖 파일은 /view를 한 번도 부르지 않고 실패한다 (재시도 없음)."""
+    for mode in ("bad_name", "bad_folder"):
+        env.comfy = FakeComfy(modes=[mode])
+        uid = env.seed.operator()
+        persona = env.seed.persona(uid)
+        ids = env.seed.generation_job(uid, persona["id"])
+        env.process(ids["job_id"])
+        row = job_row(env, ids["job_id"])
+        assert (row["status"], row["error_code"]) == ("failed", "OUTPUT_UNEXPECTED"), mode
+        assert env.comfy.views == [], mode
+        assert env.seed.one("select count(*) as n from assets where automation_job_id = %s",
+                            (ids["job_id"],))["n"] == 0
+    event = env.seed.one("select actor_type, detail from security_events where event_type = 'OUTPUT_UNEXPECTED'"
+                         " order by id desc limit 1")
+    assert event["actor_type"] == "python" and event["detail"]["job_id"]
+    assert env.seed.one("select persona_id::text as p from security_events where event_type = 'OUTPUT_UNEXPECTED'"
+                        " order by id desc limit 1")["p"] == persona["id"]  # Operator가 자기 화면에서 볼 수 있다
+
+
+def test_oversized_output_is_not_retried(env):
+    """47.3 3번: Registry output.max_bytes를 넘으면 업로드 전에 OUTPUT_TOO_LARGE, 재시도 없음."""
+    env.registry["image_generation_lora_v1"].output["max_bytes"] = 20000
+    uid = env.seed.operator()
+    persona = env.seed.persona(uid)
+    ids = env.seed.generation_job(uid, persona["id"])
+    env.process(ids["job_id"])
+    row = job_row(env, ids["job_id"])
+    assert (row["status"], row["error_code"]) == ("failed", "OUTPUT_TOO_LARGE")
+    assert env.storage.objects == {}
+
+
+def test_job_with_registered_asset_is_completed_without_regenerating(env):
+    """49.5 1번: register_asset 뒤 complete 전에 죽은 Job이 Heartbeat 회수로 다시 선점돼도
+    ComfyUI를 부르지 않고 Asset도 늘지 않는다 (후보 2개 중 1개만 등록된 상태도 완료로 본다, 11.4)."""
+    uid = env.seed.operator()
+    persona = env.seed.persona(uid)
+    ids = env.seed.generation_job(uid, persona["id"], p_variants=2)
+    asset_id = str(uuid.uuid4())
+
+    async def crash_after_register():
+        job = await env.repo.claim_job(ids["job_id"], env.settings.worker_id)
+        row = await env.repo.register_asset(job["id"], job["locked_at"], {
+            "id": asset_id, "asset_type": "image", "file_name": f"{asset_id}.png", "mime_type": "image/png",
+            "storage_path": f"persona/{persona['id']}/assets/{asset_id}.png", "width": 832, "height": 1216,
+            "public_url": "https://example.supabase.co/x.png", "generation_metadata": {"seed": 1}})
+        assert row is not None   # 여기서 브릿지가 죽었다고 보고 complete는 부르지 않는다
+    env.run(crash_after_register())
+
+    # 실제 회수 경로: Heartbeat가 끊긴 Job을 recover_stale_jobs()가 pending으로 되돌린다 (pg_cron이 부르는 함수)
+    env.seed.as_postgres()
+    env.seed.conn.execute("update automation_jobs set heartbeat_at = now() - interval '1 hour' where id = %s",
+                          (ids["job_id"],))
+    assert env.seed.one("select recover_stale_jobs() as n")["n"] == 1
+    assert job_row(env, ids["job_id"])["status"] == "pending"
+    env.seed.requeue_now(ids["job_id"])               # 백오프 대기를 건너뛴다
+
+    assert env.process(ids["job_id"]) is not None
+    assert env.comfy.prompts == []                    # 다시 생성하지 않았다
+    assets = env.seed.all("select id from assets where automation_job_id = %s", (ids["job_id"],))
+    assert [a["id"] for a in assets] == [asset_id]
+    row = job_row(env, ids["job_id"])
+    assert row["status"] == "done" and row["result"]["recovered"] is True and row["result"]["asset_ids"] == [asset_id]
+    assert content_status(env, ids["content_job_id"]) == "ready"
+    assert ("RECOVERED", "succeeded") in [(r["step"], r["status"]) for r in env.seed.all(
+        "select step, status from execution_logs where automation_job_id = %s", (ids["job_id"],))]

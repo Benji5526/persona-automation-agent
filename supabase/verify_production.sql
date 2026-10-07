@@ -142,3 +142,12 @@ select id, kind, comfyui_ok, gpu ->> 'name' as gpu, queue_size, last_seen_at,
 select key, value from public.app_settings
  where key in ('limits', 'retry_backoff_seconds', 'heartbeat_timeout_seconds', 'publishing_enabled')
  order by key;
+
+-- 19. 0009 persona_isolation (TECH_DESIGN 36.12, 50.5)
+--     기대: automation_jobs_persona_match, posts_persona_match 트리거 2개, index assets_persona_created_idx 1개
+select 'trigger' as kind, tgname as name from pg_trigger
+ where tgname in ('automation_jobs_persona_match', 'posts_persona_match') and not tgisinternal
+union all
+select 'index', indexname from pg_indexes
+ where schemaname = 'public' and indexname = 'assets_persona_created_idx'
+ order by 1, 2;

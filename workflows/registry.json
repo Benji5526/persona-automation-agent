@@ -88,6 +88,7 @@
         "image/png"
       ],
       "min_bytes": 10240,
+      "max_bytes": 52428800,
       "check_dimensions": true
     },
     "oom_fallback": {
@@ -199,6 +200,7 @@
         "image/png"
       ],
       "min_bytes": 10240,
+      "max_bytes": 52428800,
       "check_dimensions": true
     },
     "oom_fallback": {
@@ -302,6 +304,7 @@
         "image/png"
       ],
       "min_bytes": 10240,
+      "max_bytes": 52428800,
       "check_dimensions": true
     },
     "oom_fallback": {
@@ -415,6 +418,7 @@
         "image/png"
       ],
       "min_bytes": 10240,
+      "max_bytes": 52428800,
       "check_dimensions": true
     },
     "oom_fallback": {
@@ -454,6 +458,7 @@
         "image/png"
       ],
       "min_bytes": 10240,
+      "max_bytes": 52428800,
       "check_dimensions": false
     },
     "oom_fallback": {

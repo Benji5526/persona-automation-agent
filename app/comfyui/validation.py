@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import io
+import re
 from dataclasses import dataclass
 
 from PIL import Image, UnidentifiedImageError
 
-from app.comfyui.registry import WorkflowSpec
+from app.comfyui.registry import MAX_OUTPUT_BYTES_LIMIT, WorkflowSpec
 from app.errors import JobError, validation
 
 FORMAT_MIME = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp"}
@@ -53,9 +54,36 @@ def output_invalid(message: str) -> JobError:
     return JobError(message, error_type="generation", error_code="OUTPUT_INVALID", retryable=True)
 
 
+OUTPUT_SUBFOLDER = "pa"
+DEFAULT_MAX_OUTPUT_BYTES = MAX_OUTPUT_BYTES_LIMIT  # 50MB. media 버킷 한도 이하로만 둔다 (47.3 3번)
+
+
+def output_unexpected(message: str) -> JobError:
+    """ComfyUI가 예상 밖의 파일 이름·폴더를 돌려줌. 재시도해도 같으므로 재시도하지 않는다 (47.3 2번)."""
+    return JobError(message, error_type="validation", error_code="OUTPUT_UNEXPECTED", retryable=False)
+
+
+def check_output_names(files: list[dict], job_id: str, spec: WorkflowSpec) -> None:
+    """출력 파일 이름을 허용 목록으로 확인한다 (TECH_DESIGN 47.3 2번).
+
+    브릿지가 filename_prefix를 `pa/{job_id}`로 고정하므로(13.8) ComfyUI SaveImage가 만드는 이름은
+    subfolder `pa`, filename `{job_id}_NNNNN_.{확장자}`뿐이다. 하나라도 다르면 /view를 한 번도 부르지 않고 실패한다.
+    (/view는 파일 이름 끝 표기 ` [input]` 등으로 다른 폴더를 읽을 수 있다.)
+    """
+    exts = "|".join(sorted(re.escape(MIME_EXT[m]) for m in spec.output["mime"] if m in MIME_EXT)) or "png"
+    pattern = re.compile(rf"^{re.escape(job_id)}_[0-9]{{5}}_\.(?:{exts})$")
+    for f in files:
+        if f.get("subfolder", "") != OUTPUT_SUBFOLDER or not pattern.fullmatch(str(f.get("filename", ""))):
+            raise output_unexpected("ComfyUI returned an output file name outside the allowed pattern")
+
+
 def validate_output(data: bytes, spec: WorkflowSpec, width: int | None, height: int | None) -> OutputInfo:
     """크기·형식·열림·해상도 확인 (13.11)."""
     min_bytes = int(spec.output.get("min_bytes", 10240))
+    max_bytes = int(spec.output.get("max_bytes", DEFAULT_MAX_OUTPUT_BYTES))
+    if len(data) > max_bytes:  # 업로드·디코드 전에 거른다. 재시도해도 같은 결과라 재시도하지 않는다 (47.3 3번)
+        raise JobError(f"output too large: {len(data)} bytes (max {max_bytes})", error_type="validation",
+                       error_code="OUTPUT_TOO_LARGE", retryable=False)
     if len(data) < min_bytes:
         raise output_invalid(f"output too small: {len(data)} bytes (min {min_bytes})")
     try:

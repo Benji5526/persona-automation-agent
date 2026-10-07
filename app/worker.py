@@ -23,8 +23,8 @@ from app import __version__
 from app.comfyui.builder import InputRequest, plan, render, resolve_workflow_id
 from app.comfyui.client import ComfyClient, iter_output_files
 from app.comfyui.registry import WorkflowSpec, missing_nodes
-from app.comfyui.validation import (MIME_EXT, check_models, combo_options, make_thumbnail, output_invalid,
-                                    validate_input_image, validate_output)
+from app.comfyui.validation import (MIME_EXT, check_models, check_output_names, combo_options, make_thumbnail,
+                                    output_invalid, validate_input_image, validate_output)
 from app.config import Settings
 from app.database import Repository
 from app.errors import DbError, JobError, LockLost, transient, validation
@@ -193,12 +193,22 @@ class GpuWorker:
         job_id, locked_at, persona_id = job["id"], job["locked_at"], job["persona_id"]
         started = time.monotonic()
 
+        # 0) 이 Job으로 이미 등록된 Asset이 있으면 다시 만들지 않는다 (TECH_DESIGN 49.5 1번).
+        #    register_asset 뒤 complete 전에 죽은 Job은 회수·재시도로 다시 선점되는데, 그대로 실행하면 Asset이 또 생긴다.
+        existing = await self.repo.get_job_assets(job_id)
+        if existing:
+            await self._finish_recovered(job, existing, started)
+            return
+
         # 1) 조립 (13.6 ~ 13.8)
         await self._log(job, "BUILD", "python", "started")
         content_job = await self.repo.get_content_job(job["content_job_id"])
         persona = await self.repo.get_persona(persona_id)
         if not content_job or not persona:
             raise validation("INPUT_NOT_FOUND", "content job or persona not found")
+        # Persona 격리 (TECH_DESIGN 36.12): 다른 Persona의 Content Job을 가리키는 Job은 ComfyUI를 부르기 전에 실패한다
+        if str(content_job["persona_id"]) != str(persona_id):
+            raise validation("INPUT_NOT_FOUND", "content job belongs to a different persona")
         persona_assets = await self.repo.get_persona_assets(persona_id)
         workflow_id = resolve_workflow_id(job, content_job, persona)
         spec = self.registry.get(workflow_id or "")
@@ -231,9 +241,18 @@ class GpuWorker:
 
         # 4) 실행 후 검증 (13.11). 이미지 처리는 스레드에서 (Heartbeat가 밀리지 않게)
         await self._log(job, "VALIDATE", "python", "started")
+        validate_started = time.monotonic()
         files = list(iter_output_files(entry))
         if not files:
             raise output_invalid("ComfyUI returned no output files")
+        try:  # 첫 /view를 부르기 전에 모든 파일 이름을 허용 목록으로 확인한다 (47.3 2번)
+            check_output_names(files, job_id, spec)
+        except JobError:
+            await self._security_event("OUTPUT_UNEXPECTED", {
+                "job_id": job_id, "files": [{"filename": str(f.get("filename"))[:200],
+                                             "subfolder": str(f.get("subfolder"))[:200]} for f in files[:5]]},
+                                       persona_id=persona_id)
+            raise
         validated = []
         for f in files:
             data = await self.comfy.view(f["filename"], f.get("subfolder", ""), "output")
@@ -242,8 +261,12 @@ class GpuWorker:
             thumb = await asyncio.to_thread(make_thumbnail, data)
             validated.append((str(uuid.uuid4()), data, thumb, info))
 
+        await self._log(job, "VALIDATE", "python", "succeeded",
+                        duration_ms=int((time.monotonic() - validate_started) * 1000))
+
         # 5) 전부 업로드한 다음 등록한다 (업로드 실패로 일부만 등록되는 일을 막는다, 리뷰 M4)
         await self._log(job, "UPLOAD", "supabase", "started")
+        upload_started = time.monotonic()
         bucket = self.settings.media_bucket
         paths = {}
         for asset_id, data, thumb, info in validated:
@@ -267,6 +290,8 @@ class GpuWorker:
             if row is None:
                 raise LockLost()
             asset_ids.append(str(row["id"]))
+        await self._log(job, "UPLOAD", "supabase", "succeeded",
+                        duration_ms=int((time.monotonic() - upload_started) * 1000))
 
         # 6) 완료
         result = {"asset_ids": asset_ids, "comfy_prompt_id": self.current_prompt_id,
@@ -277,6 +302,24 @@ class GpuWorker:
                         duration_ms=int((time.monotonic() - started) * 1000), output={"asset_ids": asset_ids})
         log.info("job %s done: %d asset(s)", job_id, len(asset_ids))
         await self.notifier.send(self._event(job, "generation.completed", "done", asset_ids, None))
+
+    async def _finish_recovered(self, job: dict, assets: list[dict], started: float) -> None:
+        """이미 등록된 Asset으로 Job을 끝낸다. 생성하지 않는다 (11.4: Asset 1개 이상이면 generation 완료)."""
+        job_id, locked_at = job["id"], job["locked_at"]
+        asset_ids = [str(a["id"]) for a in assets]
+        if not await self.repo.complete(job_id, locked_at, {"asset_ids": asset_ids, "recovered": True}):
+            raise LockLost()
+        await self._log(job, "RECOVERED", "python", "succeeded", output={"asset_ids": asset_ids})
+        await self._log(job, "COMPLETE", "python", "succeeded",
+                        duration_ms=int((time.monotonic() - started) * 1000), output={"asset_ids": asset_ids})
+        log.info("job %s recovered: %d existing asset(s), nothing generated", job_id, len(asset_ids))
+        await self.notifier.send(self._event(job, "generation.completed", "done", asset_ids, None))
+
+    async def _security_event(self, event_type: str, detail: dict, persona_id: str | None = None) -> None:
+        try:  # persona_id가 있어야 Operator가 자기 화면에서 볼 수 있다 (security_events_select_own)
+            await self.repo.log_security_event(event_type, None, detail, actor_type="python", persona_id=persona_id)
+        except Exception as exc:  # 기록 실패로 오류 보고를 막지 않는다
+            log.warning("security event %s not recorded (%s)", event_type, type(exc).__name__)
 
     async def _fetch_input(self, request: InputRequest, persona_id: str) -> tuple[bytes, str]:
         if request.kind == "asset":

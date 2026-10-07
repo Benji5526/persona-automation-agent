@@ -106,15 +106,19 @@ class PsycopgRepository:
     async def get_asset(self, asset_id):
         return await self._call("select * from assets where id = %s", (asset_id,))
 
+    async def get_job_assets(self, job_id):
+        return await self._call("select * from assets where automation_job_id = %s order by created_at",
+                                (job_id,), many=True)
+
     async def sync_workflow_registry(self, workflows):
         return int(await self._scalar("select sync_workflow_registry(%s::jsonb) as v", (json.dumps(workflows),)))
 
     async def report_worker_status(self, worker_id, info):
         await self._call("select report_worker_status(%s, 'python', %s::jsonb)", (worker_id, json.dumps(info)))
 
-    async def log_security_event(self, event_type, source_ip, detail):
-        await self._call("select log_security_event(%s, 'anonymous', %s, %s::jsonb)",
-                         (event_type, source_ip, json.dumps(detail)))
+    async def log_security_event(self, event_type, source_ip, detail, actor_type="anonymous", persona_id=None):
+        await self._call("select log_security_event(%s, %s, %s, %s::jsonb, %s)",
+                         (event_type, actor_type, source_ip, json.dumps(detail), persona_id))
 
 
 # -----------------------------------------------------------------------------
@@ -158,6 +162,7 @@ class FakeComfy:
     image_size: tuple[int, int] | None = None   # None이면 요청 크기로 만든다
     prompts: list[dict] = field(default_factory=list)
     prompt_ids: list[str] = field(default_factory=list)
+    views: list[str] = field(default_factory=list)   # /view로 읽은 파일 이름
     uploads: dict[str, bytes] = field(default_factory=dict)
     cancelled: list[str] = field(default_factory=list)
     interrupts: int = 0
@@ -200,6 +205,7 @@ class FakeComfy:
             entry = self._history.get(prompt_id)
             return httpx.Response(200, json={prompt_id: entry} if entry else {})
         if path == "/view":
+            self.views.append(request.url.params["filename"])
             return httpx.Response(200, content=self._outputs[request.url.params["filename"]])
         if path == "/queue" and request.method == "GET":
             running = [[0, pid, {}, {}, []] for pid, entry in self._history.items() if entry is None]
@@ -224,10 +230,18 @@ class FakeComfy:
         if mode != "no_output":
             latent = next((n["inputs"] for n in workflow.values() if n["class_type"] in ("EmptyLatentImage", "ImageScale")), {})
             w, h = self.image_size or (latent.get("width", 1024), latent.get("height", 1024))
+            # 진짜 ComfyUI처럼 SaveImage의 filename_prefix("pa/{job_id}")로 `{job_id}_00001_.png`를 만든다
+            prefix = next(n["inputs"]["filename_prefix"] for n in workflow.values() if n["class_type"] == "SaveImage")
+            subfolder, _, base = prefix.rpartition("/")
             for i in range(latent.get("batch_size", 1) or 1):
-                name = f"{prompt_id}_{i:05d}_.png"
+                name = f"{base}_{i + 1:05d}_.png"
+                folder = subfolder
+                if mode == "bad_name":       # 이름 끝 표기로 다른 폴더를 가리키는 파일 (47.3 2번)
+                    name += " [input]"
+                elif mode == "bad_folder":   # 허용 폴더(pa) 밖
+                    folder = "other"
                 self._outputs[name] = b"tiny" if mode == "tiny" else noise_png_sized(w, h, i)
-                outputs.append({"filename": name, "subfolder": "pa", "type": "output"})
+                outputs.append({"filename": name, "subfolder": folder, "type": "output"})
         return {"status": {"status_str": "success", "completed": True, "messages": []},
                 "outputs": {"9": {"images": outputs}, "99": {"images": [{"filename": "x.png", "subfolder": "", "type": "temp"}]}}}
 
