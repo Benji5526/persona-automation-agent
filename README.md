@@ -14,6 +14,9 @@ Lovable (관제센터) → Supabase (Source of Truth) → n8n (Orchestrator) →
 |---|---|
 | [docs/PRD.md](docs/PRD.md) | 제품 정의 v1.0: 문제, 목표·지표, 사용자, 기능, 자동화 시나리오, 범위(MVP·V1·V2), 로드맵 |
 | [docs/TECH_DESIGN.md](docs/TECH_DESIGN.md) | 기술 설계 v1.0 (**처음 읽을 때는 40장 최종 통합 명세부터**): 아키텍처, DB, State Machine, API, ComfyUI·n8n 명세, 보안, 구현 계획, UI/UX, Frontend, Python 실행 계층, n8n 구현, Supabase 구현, Lovable 빌드 명세, SNS 연동, Analytics, AI Decision Engine, Fan Interaction & Memory, Autonomous Loop, AI Permission·Safety, Experimentation, Self-Optimization, Multi-Persona, Monitoring, Backup·DR, Cost·Resource |
+| [docs/MVP_SCOPE_LOCK.md](docs/MVP_SCOPE_LOCK.md) | **MVP v1.0의 범위를 고정** (무엇이 안과 밖인가, 설계와의 대응, 열린 결정) |
+| [docs/MVP_CHECKLIST.md](docs/MVP_CHECKLIST.md) | 기능 완료 12칸 체크 + MVP v1.0 완료 목록 24개 |
+| [CLAUDE.md](CLAUDE.md) | Claude Code 작업 규칙 (계층 경계·보안·AI·DB·테스트). 세부 규칙은 `.claude/skills/pa-*` |
 | [docs/lovable_master_prompt.md](docs/lovable_master_prompt.md) | Lovable에 붙여 넣는 Master Prompt와 Phase별 프롬프트 (M4) |
 | [docs/n8n_guide.md](docs/n8n_guide.md) | n8n Workflow import·Credential·Webhook 연결·동작 확인 (M3) |
 | [supabase/README.md](supabase/README.md) | DB 마이그레이션 적용·테스트 방법, 적용 후 점검 SQL (`verify_production.sql`) |
@@ -29,7 +32,8 @@ tests/db/              DB 테스트
 tests/bridge/          브릿지 테스트 (실제 DB + 가짜 ComfyUI)
 n8n/                   n8n Workflow JSON (M3: WF-001~006 + LLM 하위 Workflow)
 deploy/n8n/            n8n 원격 서버 배포 (Docker Compose + Caddy, TECH_DESIGN 26)
-docs/                  PRD, 기술 설계, 가이드
+docs/                  PRD, 기술 설계, MVP 범위·체크리스트, 가이드
+.claude/skills/        Claude Code용 프로젝트 Skill 11개 (pa-architecture, pa-supabase, pa-lovable, pa-python-execution, pa-n8n, pa-comfyui, pa-ai-decision, pa-sns-publishing, pa-fan-interaction, pa-testing, pa-security)
 ```
 
 ## 진행 상황
