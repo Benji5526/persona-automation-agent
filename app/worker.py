@@ -125,6 +125,7 @@ class GpuWorker:
           일치해야 claim이 결과를 돌려준다. 이 코드는 local/cloud를 스스로 고르지 않는다.
         * 자격이 만료·폐기됐으면 같은 자격으로 다시 두드리지 않고 멈춘다 (56.5).
         """
+        skipping = False   # 같은 원인으로 건너뛰는 동안 5초마다 같은 경고를 쌓지 않는다
         while True:
             await asyncio.sleep(self.settings.pull_interval_sec)
             if self.stopping or self.current or self.pending:
@@ -136,13 +137,28 @@ class GpuWorker:
                 if is_worker_auth_failure(exc):
                     await self._stop_on_auth_failure(exc)
                     return
-                log.warning("pull skipped: %s", type(exc).__name__)
+                skipping = self._pull_skipped(skipping, type(exc).__name__)
                 continue
-            except httpx.HTTPError as exc:  # ComfyUI 또는 Supabase에 잠시 닿지 않음: 다음 주기에 다시
-                log.warning("pull skipped: %s", type(exc).__name__)
+            except (httpx.HTTPError, JobError) as exc:
+                # ComfyUI 또는 Supabase에 잠시 닿지 않음. ComfyClient는 연결 실패를 JobError(COMFY_UNREACHABLE)로
+                # 바꿔 던지므로 그것도 여기서 받는다. 받지 못하면 루프가 조용히 죽고 ComfyUI가 켜져도 Job을 못 가져간다.
+                skipping = self._pull_skipped(skipping, type(exc).__name__)
                 continue
+            except Exception:  # 어떤 예외도 루프를 영구히 죽이지 않는다 (기록하고 다음 주기에 다시)
+                log.exception("pull loop: unexpected error, will retry next interval")
+                skipping = True
+                continue
+            if skipping:
+                log.info("pull resumed")
+                skipping = False
             if job:
                 log.info("job %s pulled (queue position %d)", job["id"], self.enqueue(job))
+
+    @staticmethod
+    def _pull_skipped(already: bool, reason: str) -> bool:
+        if not already:
+            log.warning("pull skipped: %s (will keep retrying)", reason)
+        return True
 
     async def _stop_on_auth_failure(self, exc: DbError, *, from_job: bool = False) -> None:
         """자격이 깨졌다 (401·폐기·만료). 새 Job을 더 가져오지 않고 정상 종료한다 (사양 21조).

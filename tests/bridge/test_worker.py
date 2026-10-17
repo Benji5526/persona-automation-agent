@@ -620,3 +620,63 @@ def test_pull_loop_does_not_claim_while_comfyui_is_down(env):
     run_pull_loop(env, ids["job_id"], seconds=0.5)
     row = job_row(env, ids["job_id"])
     assert (row["status"], row["attempts"]) == ("pending", 0)    # 선점하지 않아 attempts가 늘지 않는다
+
+
+def test_pull_loop_survives_comfyui_being_down_and_claims_once_it_is_up(env):
+    """ComfyUI가 꺼진 채 워커가 시작돼도 풀 루프는 죽지 않는다. 켜지면 가져간다 (실제 장애: 2026-10-17).
+
+    실제 ComfyClient는 연결 실패를 JobError(COMFY_UNREACHABLE)로 바꿔 던진다. 루프가 이를 잡지 못하면
+    첫 반복에서 조용히 죽고, ComfyUI가 켜져도 Job이 영원히 pending으로 남는다.
+    """
+    env.comfy.reachable = False
+    uid = env.seed.operator()
+    persona = env.seed.persona(uid)
+    ids = env.seed.generation_job(uid, persona["id"])
+    env.settings = make_settings(pull_jobs=True, pull_interval_sec=0.01)
+
+    async def go():
+        worker = env.worker()
+        worker.loop_task = asyncio.create_task(worker.run_forever())
+        pull = asyncio.create_task(worker.pull_loop())
+        try:
+            await asyncio.sleep(0.3)                           # ComfyUI가 꺼진 동안 여러 번 반복한다
+            assert not pull.done(), "the pull loop died while ComfyUI was down"
+            assert job_row(env, ids["job_id"])["status"] == "pending"
+            env.comfy.reachable = True
+            for _ in range(int(4.0 / 0.05)):
+                await asyncio.sleep(0.05)
+                if job_row(env, ids["job_id"])["status"] in ("done", "failed"):
+                    break
+        finally:
+            pull.cancel()
+            worker.loop_task.cancel()
+            await asyncio.gather(pull, worker.loop_task, return_exceptions=True)
+
+    env.run(go())
+    row = job_row(env, ids["job_id"])
+    assert (row["status"], row["attempts"]) == ("done", 1)
+
+
+def test_pull_loop_keeps_running_after_an_unexpected_error(env):
+    """예상 못 한 예외 하나가 루프를 영구히 죽이지 않는다. 오류는 기록하고 다음 주기에 다시 한다."""
+    env.settings = make_settings(pull_jobs=True, pull_interval_sec=0.01)
+    calls = {"n": 0}
+
+    async def go():
+        worker = env.worker()
+
+        async def flaky(*_args, **_kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("unexpected")
+            return None
+        worker.repo.claim_next_job = flaky
+        pull = asyncio.create_task(worker.pull_loop())
+        try:
+            await asyncio.sleep(0.3)
+            assert not pull.done() and calls["n"] > 1
+        finally:
+            pull.cancel()
+            await asyncio.gather(pull, return_exceptions=True)
+
+    env.run(go())
