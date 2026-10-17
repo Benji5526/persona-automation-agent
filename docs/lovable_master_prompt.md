@@ -194,12 +194,22 @@ messages, fan_memories, ai_decisions. Do not query or create them.
 supabase.rpc(name, args):
 - create_content_job(p_persona_id, p_content_type, p_topic?, p_prompt?, p_negative_prompt?,
     p_workflow?, p_params?, p_input_images?, p_variants?, p_priority?, p_platform?,
-    p_submit = true) → content_jobs row ('queued'; 'draft' if p_submit=false)
+    p_submit = true, p_execution_target?) → content_jobs row ('queued'; 'draft' if p_submit=false)
+    p_execution_target: 'local' | 'cloud'. 비우면 app_settings.default_execution_target.
+    Target은 **생성 시점에 고정**된다 (TECH 56.2).
 - submit_content_job(p_content_job_id)            draft → queued
 - cancel_content_job(p_content_job_id, p_reason?) → cancelled (also cancels running steps)
 - retry_content_job(p_content_job_id)             failed → queued, from the start
 - regenerate_content_job(p_content_job_id, p_variants?)  ready → queued, more variants
-- retry_automation_job(p_job_id)                  failed step → pending (retry only that step)
+- retry_automation_job(p_job_id, p_execution_target?)  failed step → pending (retry only that step)
+    p_execution_target를 주면 그 단계와 상위 Content Job을 그 Target으로 옮겨 재시도한다.
+    비우면 Target을 유지한다. **자동 failover는 없다** — 바꾸려면 사용자가 분명히 골라야 한다 (56.2).
+- move_pending_jobs_to_target(p_target) → integer    admin. **대기 중(pending) generation Job만** 이동.
+    실행 중·완료·실패·취소된 Job은 건드리지 않는다. 옮긴 건수를 돌려주고 감사 이벤트를 남긴다.
+- issue_worker_credential(...)  admin 전용. UI에서 호출하지 않는다 (scripts/mint_worker_token.py가 쓴다)
+- revoke_worker_credential(p_jti) → worker_credentials row   admin. 폐기 즉시 그 Worker의 RPC가 막힌다
+- list_worker_credentials() → worker_credentials[]   admin. jti·worker_id·target·provider·만료·폐기 시각만.
+    **토큰 값은 어디에도 저장되지 않으므로 보여줄 수 없다**
 - archive_asset(p_asset_id)
 - resolve_system_error(p_error_id)                p_error_id is a bigint
 - get_dashboard_summary(p_persona_id?) → jsonb {
@@ -322,10 +332,25 @@ and Success states.
   reference image of this persona, filtered by asset_types when given); required slots must be
   filled. Send input_images = { <slot>: { asset_id } | { persona_asset_id } } (TECH 13.6).
   Send null for every empty optional field (never "").
+  Execution Target (TECH 56.2): ◉ Local ○ Cloud. 기본값은 현재 app_settings.default_execution_target.
+    사용자가 이 Job만 다른 Target으로 바꿀 수 있고, 그 값이 p_execution_target으로 간다.
+    Target이 고정된다는 것을 한 줄로 알린다: "이 Job은 선택한 Target에서 실행됩니다. 나중에 기본
+    Target을 바꿔도 이 Job은 이동하지 않습니다."
+    Capability 경고 (worker_status 보고값 기준, 조기 경고일 뿐):
+      선택한 Target의 Worker가 오프라인 → "⚠ Cloud Worker가 오프라인입니다. Job은 대기 상태로 남습니다."
+      보고된 VRAM이 Workflow 요구보다 작음 → "⚠ Local Worker의 VRAM이 부족할 수 있습니다."
+      Persona가 고른 모델·LoRA가 그 Worker의 installed 목록에 없음 → "⚠ 이 Worker에 <파일>이 없습니다."
+    **실행 시점의 Capability 검증이 최종 판단이다** (56.7). 경고는 막지 않고 알리기만 한다.
   Submit → create_content_job → navigate to the detail page.
   There is NO AI prompt preview, NO "improve with AI" button, NO schedule field.
 
-/content-jobs/:id: title, status badge, persona, type, platform, priority, created.
+/content-jobs/:id: title, status badge, persona, type, platform, priority, created,
+  **Execution Target** (local/cloud), 그리고 generation 단계의 **Worker**(automation_jobs.claimed_by)와
+  **Provider**(그 Worker의 worker_status.provider). 아직 선점되지 않았으면 "대기 중"으로 둔다.
+  그 Target의 Worker가 오프라인이면 (worker_status에 target이 같은 Online Worker가 없음) 분명히 알린다:
+  "이 Job의 Target(cloud) Worker가 오프라인입니다. Worker가 켜지면 자동으로 실행됩니다." — 실패가 아니다.
+  실패한 generation 단계에 [다른 Target으로 재시도] 제공: 현재 Target의 반대를 골라
+  retry_automation_job(job_id, target). 자동 전환은 하지 않는다 (56.2).
   Step progress (src/lib/progress.ts), computed from automation_jobs + latest execution_logs.step:
     대기 (content job queued) → 프롬프트 (prompt job processing; the prompt step always exists —
     if content_jobs.prompt was given, show it as 건너뜀 once the prompt job is done)
@@ -358,10 +383,17 @@ and Success states.
   "생성 정보" from generation_metadata: workflow + version, model, LoRA + strength, seed,
   steps, cfg, resolution, oom_downscaled, comfy_prompt_id.
 
-/automation: Workers (python bridge, ComfyUI via comfyui_ok, GPU name and free VRAM, n8n;
-  Online / Degraded (comfyui_ok false) / Offline, last seen), Queue counts (대기, 실행 중,
-  재시도 대기, 실패 — click filters the job table), automation_jobs table (type, status,
-  attempts/max, worker, error code, time).
+/automation: Workers — worker_status 한 줄에: Worker(id), **Target**(local/cloud),
+  **Provider**(local/runpod/…), Online / Degraded (comfyui_ok false) / Offline + last seen,
+  GPU 이름, VRAM(전체·여유), **installed models**, **installed LoRAs** (models.checkpoints /
+  models.loras; 길면 개수 + 펼치기). 전부 Worker가 보고한 값이다 — 설정이 아니다 (TECH 56.2).
+  **노출 금지**: GPU private URL, Pod id·secret, API 키, JWT 서명 키, SNS 토큰.
+  프런트엔드는 GPU 주소를 받지도, 브릿지를 직접 부르지도 않는다.
+  Queue counts (대기, 실행 중, 재시도 대기, 실패 — click filters the job table),
+  automation_jobs table (type, status, **execution_target**, attempts/max, worker, error code, time).
+  Worker Credentials (admin only, list_worker_credentials): worker_id, target, provider,
+  발급 시각, 만료 시각(만료됨 배지), 폐기 여부, [폐기] 버튼(confirm → revoke_worker_credential).
+  토큰 값은 저장되지 않으므로 표시할 수 없다 — 그 사실을 한 줄로 알린다.
 /automation/errors: system_errors with the related job. Filters: error type, service,
   retryable, resolved, date. Detail: Korean sentence, code, service, job link, attempts,
   message, the job's execution logs. Actions: 실패한 단계 다시 실행 (only when the related
@@ -373,6 +405,17 @@ and Success states.
   bridge connection guide + worker status. Admin only (users.role = 'admin'): allowed emails
   (trim + lowercase each address before sending) and limits (a partial object is merged) via
   get_app_settings / update_app_setting. Hide admin sections for operators.
+  Execution Target (admin only, TECH 56.2):
+    ◉ Local ○ Cloud → update_app_setting('default_execution_target', '"local"' | '"cloud"').
+    이 아래에 항상 보이는 안내: "기본 Target을 변경해도 이미 생성된 Job은 이동하지 않습니다."
+    [대기 중인 Job을 현재 Target으로 이동] 버튼:
+      누르기 전에 영향받는 건수를 보여준다 — automation_jobs에서 job_type='generation',
+      status='pending', execution_target ≠ 현재 기본 Target인 행의 개수.
+      confirm 다이얼로그에 그 건수를 넣고("대기 중인 Job N건을 cloud로 이동합니다"),
+      확인하면 move_pending_jobs_to_target(현재 기본 Target) 호출 → 돌려받은 건수를 토스트로.
+      실행 중·완료·실패·취소된 Job은 이동하지 않는다는 것을 명시한다. 감사 이벤트가 남는다.
+    Cloud는 Worker JWT 보안이 끝나기 전까지 실제로 실행되지 않는다 (56.5): cloud를 고르면
+    "Cloud Worker가 등록되기 전까지 cloud Job은 대기 상태로 남습니다."를 알린다.
 
 Header system status: "● 정상" (all workers online, no failed automation job in the last 24h) /
   "● 확인 필요 N건" (retry-waiting jobs + automation jobs failed in the last 24h, by completed_at) /

@@ -97,6 +97,10 @@ async def create_job(request: Request):
     state = request.app.state
     if not state.rate_limiter.allow():
         return error(429, "RATE_LIMITED", "too many requests")
+    if state.settings.worker_auth == "worker_jwt":
+        # push(n8n WF-003)는 local 전용 fallback이다. worker_jwt 워커(Cloud)는 pull만 쓰고, pa_worker에는
+        # 테이블 권한이 없어 이 경로의 get_job(직접 SELECT)도 쓸 수 없다 (TECH_DESIGN 56.3).
+        return error(503, "PUSH_DISABLED", "this worker pulls its own jobs; push dispatch is disabled")
     if not state.worker.healthy():
         return error(503, "WORKER_UNAVAILABLE", "GPU worker is not running")
 

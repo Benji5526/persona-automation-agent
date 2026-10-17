@@ -110,6 +110,19 @@ class Db:
         )
         return self
 
+    def as_worker(self, **claims: Any) -> "Db":
+        """Worker JWT로 들어온 세션 (0011). PostgREST가 role 클레임을 보고 pa_worker로 바꾼 상태를 흉내 낸다.
+
+        신원은 오직 클레임에서 온다 — RPC 인자로 넘기는 값은 믿지 않는다.
+        """
+        self.as_postgres()
+        self.conn.execute("set local role pa_worker")
+        self.conn.execute(
+            "select set_config('request.jwt.claims', %s, true)",
+            (json.dumps({"role": "pa_worker", **claims}),),
+        )
+        return self
+
     # -- 실행 ---------------------------------------------------------------
     def one(self, sql: str, params: Any = None) -> dict[str, Any] | None:
         with self.conn.cursor(row_factory=dict_row) as cur:

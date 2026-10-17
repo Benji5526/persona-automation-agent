@@ -37,6 +37,10 @@ class WorkflowSpec:
     inputs: dict[str, dict] = field(default_factory=dict)
     output: dict[str, Any] = field(default_factory=dict)
     oom_fallback: dict[str, Any] = field(default_factory=dict)
+    # Capability 요구사항 (TECH_DESIGN 56.7): 이 Workflow 자체가 고정적으로 요구하는 것만 둔다.
+    #   {"min_vram_gb": 8, "required_files": [{"node": …, "input": …, "file": …}]}
+    # 모델·LoRA 선택은 Persona 설정이므로 여기 두지 않는다 (models 블록과 Persona visual_settings가 담당).
+    requirements: dict[str, Any] = field(default_factory=dict)
     notes: str = ""
 
     @property
@@ -78,7 +82,8 @@ def load_registry(workflow_dir: Path) -> dict[str, WorkflowSpec]:
             id=wf_id, version=str(entry["version"]), type=entry["type"], stage=entry.get("stage", "mvp"),
             enabled=bool(entry.get("enabled", True)), file=file, template=template,
             params=entry.get("params", {}), models=entry.get("models", {}), inputs=entry.get("inputs", {}),
-            output=entry.get("output", {}), oom_fallback=entry.get("oom_fallback", {}), notes=entry.get("notes", ""),
+            output=entry.get("output", {}), oom_fallback=entry.get("oom_fallback", {}),
+            requirements=entry.get("requirements", {}), notes=entry.get("notes", ""),
         )
         allowed = set(spec.params) | set(spec.models) | set(spec.inputs) | BUILTIN_PLACEHOLDERS
         unknown = spec.placeholders - allowed
@@ -92,8 +97,33 @@ def load_registry(workflow_dir: Path) -> dict[str, WorkflowSpec]:
         for name, model in spec.models.items():
             if not {"node", "input"} <= set(model):
                 raise RegistryError(f"{wf_id}: models.{name} needs node and input")
+        _check_requirements(wf_id, spec.requirements)
         specs[wf_id] = spec
     return specs
+
+
+def _check_requirements(wf_id: str, requirements: dict) -> None:
+    """requirements 블록의 형식 (56.7). 모델·LoRA 선택은 여기에 두지 않는다 (사양 9조)."""
+    if not isinstance(requirements, dict):
+        raise RegistryError(f"{wf_id}: requirements must be an object")
+    unknown = set(requirements) - {"min_vram_gb", "required_files"}
+    if unknown:
+        raise RegistryError(f"{wf_id}: unknown requirements keys: {sorted(unknown)}")
+
+    min_vram = requirements.get("min_vram_gb")
+    if min_vram is not None and not (isinstance(min_vram, (int, float))
+                                     and not isinstance(min_vram, bool) and 0 < min_vram <= 1024):
+        raise RegistryError(f"{wf_id}: requirements.min_vram_gb must be a positive number of GB")
+
+    files = requirements.get("required_files", [])
+    if not isinstance(files, list):
+        raise RegistryError(f"{wf_id}: requirements.required_files must be a list")
+    for entry in files:
+        if not isinstance(entry, dict) or not {"node", "input", "file"} <= set(entry):
+            raise RegistryError(
+                f"{wf_id}: each required_files entry needs node, input and file")
+        if set(entry) - {"node", "input", "file"}:
+            raise RegistryError(f"{wf_id}: required_files entries take only node, input and file")
 
 
 def missing_nodes(spec: WorkflowSpec, object_info: dict) -> set[str]:

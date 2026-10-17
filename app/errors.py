@@ -40,3 +40,24 @@ class DbError(Exception):
         self.code = code
         self.message = message
         self.details = details
+
+
+class WorkerAuthError(Exception):
+    """Worker 자격이 없거나 만료·폐기됐다 (TECH_DESIGN 56.5).
+
+    같은 자격으로 다시 두드리지 않는다: 새 Job 선점을 멈추고 정상 종료한다 (사양 21조).
+    """
+
+
+# PostgREST의 JWT 거부 코드. 42501은 권한 없는 RPC·테이블 접근.
+AUTH_FAILURE_CODES = frozenset({"PGRST301", "PGRST302", "PGRST303", "42501"})
+
+
+def is_worker_auth_failure(exc: DbError) -> bool:
+    """자격 자체가 깨진 경우만 True. 업무 규칙 위반(PT409 등)은 False다."""
+    if exc.status == 401:
+        return True
+    if exc.code in AUTH_FAILURE_CODES:
+        return True
+    blob = f"{exc.message} {exc.details or ''}".lower()
+    return exc.status == 403 and "worker credential" in blob

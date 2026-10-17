@@ -11,6 +11,7 @@ from urllib.parse import quote
 
 import httpx
 
+from app.config import auth_headers
 from app.errors import transient, validation
 
 
@@ -38,19 +39,22 @@ def safe_path(path: str) -> str:
 
 
 class SupabaseStorage:
-    def __init__(self, client: httpx.AsyncClient, supabase_url: str, secret_key: str):
+    def __init__(self, client: httpx.AsyncClient, supabase_url: str, secret_key: str,
+                 *, worker_jwt: str = "", anon_key: str = ""):
         self.client = client
         self.base = f"{supabase_url.rstrip('/')}/storage/v1"
-        self.headers = {"apikey": secret_key}
-        if secret_key.count(".") == 2:
-            self.headers["Authorization"] = f"Bearer {secret_key}"
+        # worker_jwt면 service_role 키를 쓰지 않는다 (56.5).
+        self.headers = auth_headers(secret_key=secret_key, worker_jwt=worker_jwt, anon_key=anon_key)
+        # pa_worker에는 storage.objects의 UPDATE 권한이 없다 → 덮어쓰기(upsert)는 정책상 불가능하고 시도해서도 안 된다.
+        # 결과 파일 이름(asset id)은 시도마다 새로 만들어지므로 upsert가 필요하지 않다 (0011 8절).
+        self.upsert = "false" if worker_jwt else "true"
 
     def _object_url(self, bucket: str, path: str) -> str:
         return f"{self.base}/object/{quote(bucket)}/{quote(safe_path(path))}"
 
     async def upload(self, bucket: str, path: str, data: bytes, content_type: str) -> None:
         r = await self.client.post(self._object_url(bucket, path), content=data,
-                                   headers={**self.headers, "Content-Type": content_type, "x-upsert": "true"})
+                                   headers={**self.headers, "Content-Type": content_type, "x-upsert": self.upsert})
         if r.status_code >= 400:
             raise transient("FILE_ERROR", f"storage upload failed ({r.status_code}): {r.text[:300]}")
 

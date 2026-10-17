@@ -13,11 +13,12 @@ import pytest
 
 from app.comfyui.builder import plan, render
 from app.comfyui.prompt_builder import build_negative, build_prompt
-from app.comfyui.registry import RegistryError, load_registry
-from app.comfyui.validation import combo_options, make_thumbnail, validate_input_image, validate_output
-from app.config import ConfigError
+from app.comfyui.registry import RegistryError, WorkflowSpec, load_registry
+from app.comfyui.validation import (check_capability, combo_options, make_thumbnail, validate_input_image,
+                                    validate_output, vram_total_gb)
+from app.config import ConfigError, auth_headers
 from app.database import PostgrestRepository
-from app.errors import DbError, JobError
+from app.errors import DbError, JobError, is_worker_auth_failure, transient
 from app.security import AuthFailureTracker, RateLimiter, RedactingFilter, redact, token_matches
 from app.storage import SupabaseStorage, safe_path
 from tests.bridge.conftest import ROOT, make_settings, noise_png_sized
@@ -145,6 +146,109 @@ def test_registry_rejects_path_in_file_name(tmp_path: Path):
         load_registry(tmp_path)
 
 
+@pytest.mark.parametrize(
+    "requirements",
+    [
+        {"min_vram_gb": 0},
+        {"min_vram_gb": -8},
+        {"min_vram_gb": "8"},
+        {"min_vram_gb": True},
+        {"required_files": {}},
+        {"required_files": ["inswapper_128.onnx"]},                      # 문자열이 아니라 node/input/file
+        {"required_files": [{"node": "N", "input": "i"}]},               # file 누락
+        {"required_models": ["x"]},                                      # 9조: 모델 선택은 Persona의 몫
+        {"required_loras": ["x"]},
+    ],
+)
+def test_registry_rejects_bad_requirements(tmp_path: Path, requirements):
+    (tmp_path / "w.json").write_text(json.dumps({"1": {"class_type": "X", "inputs": {}}}))
+    (tmp_path / "registry.json").write_text(json.dumps({"w": {
+        "version": "1", "type": "image", "file": "w.json",
+        "output": {"mime": ["image/png"]}, "requirements": requirements}}))
+    with pytest.raises(RegistryError):
+        load_registry(tmp_path)
+
+
+def test_registry_accepts_the_documented_requirements_shape(tmp_path: Path):
+    (tmp_path / "w.json").write_text(json.dumps({"1": {"class_type": "X", "inputs": {}}}))
+    (tmp_path / "registry.json").write_text(json.dumps({"w": {
+        "version": "1", "type": "image", "file": "w.json", "output": {"mime": ["image/png"]},
+        "requirements": {"min_vram_gb": 8, "required_files": []}}}))
+    assert load_registry(tmp_path)["w"].requirements == {"min_vram_gb": 8, "required_files": []}
+
+
+# -- Capability 검증 (TECH_DESIGN 56.7) --------------------------------------------
+STATS_16GB = {"devices": [{"name": "cuda:0", "vram_total": 16 * 2**30, "vram_free": 2 * 2**30}]}
+REACTOR_INFO = {"ReActorFaceSwap": {"input": {"required": {"swap_model": [["inswapper_128.onnx"]]}}}}
+
+
+def spec_with(requirements: dict) -> WorkflowSpec:
+    return WorkflowSpec(id="wf", version="1.0", type="image", stage="mvp", enabled=True,
+                        file="wf.json", template={}, output={"mime": ["image/png"]},
+                        requirements=requirements)
+
+
+def capability_error(requirements, object_info=None, stats=STATS_16GB):
+    with pytest.raises(JobError) as exc:
+        check_capability(spec_with(requirements), object_info or {}, stats, "local")
+    return exc.value
+
+
+def test_vram_total_gb_reads_the_reported_device():
+    assert vram_total_gb(STATS_16GB) == 16.0
+    assert vram_total_gb({"devices": []}) is None and vram_total_gb({}) is None
+
+
+def test_no_requirements_means_no_capability_check():
+    check_capability(spec_with({}), {}, {}, "local")                     # 예외 없음
+
+
+def test_sufficient_vram_passes():
+    check_capability(spec_with({"min_vram_gb": 8}), {}, STATS_16GB, "local")
+    check_capability(spec_with({"min_vram_gb": 16}), {}, STATS_16GB, "local")   # 같은 값도 통과
+
+
+def test_insufficient_vram_fails_non_retryably():
+    err = capability_error({"min_vram_gb": 24})
+    assert err.error_code == "WORKFLOW_UNSUPPORTED_ON_TARGET"
+    assert err.retryable is False and err.error_type == "validation"
+    assert "24" in str(err) and "16" in str(err) and "local" in str(err)
+
+
+def test_a_worker_without_a_gpu_report_cannot_run_a_vram_bound_workflow():
+    assert capability_error({"min_vram_gb": 8}, stats={"devices": []}).error_code == "WORKFLOW_UNSUPPORTED_ON_TARGET"
+
+
+def test_required_file_present_passes():
+    check_capability(
+        spec_with({"required_files": [{"node": "ReActorFaceSwap", "input": "swap_model",
+                                       "file": "inswapper_128.onnx"}]}),
+        REACTOR_INFO, STATS_16GB, "local")
+
+
+def test_missing_required_file_fails_non_retryably():
+    err = capability_error(
+        {"required_files": [{"node": "ReActorFaceSwap", "input": "swap_model", "file": "other.onnx"}]},
+        REACTOR_INFO)
+    assert err.error_code == "WORKFLOW_UNSUPPORTED_ON_TARGET" and err.retryable is False
+    assert "other.onnx" in str(err)
+
+
+def test_missing_node_for_a_required_file_fails_non_retryably():
+    err = capability_error(
+        {"required_files": [{"node": "ReActorFaceSwap", "input": "swap_model", "file": "inswapper_128.onnx"}]},
+        {})
+    assert err.error_code == "WORKFLOW_UNSUPPORTED_ON_TARGET" and err.retryable is False
+
+
+def test_capability_failures_are_told_apart_from_runtime_oom():
+    """Capability 불일치는 재시도 불가, 실행 중 OOM은 재시도 가능 (56.7)."""
+    capability = capability_error({"min_vram_gb": 24})
+    oom = transient("OUT_OF_MEMORY", "CUDA out of memory")
+    assert capability.retryable is False and oom.retryable is True
+    assert capability.error_code != oom.error_code
+
+
 # -- 실행 전·후 검증 -------------------------------------------------------------
 def test_combo_options_supports_both_formats():
     assert combo_options({"N": {"input": {"required": {"x": [["a", "b"]]}}}}, "N", "x") == ["a", "b"]
@@ -182,6 +286,68 @@ def test_token_matching_and_config_rules():
         make_settings(bridge_tokens=("short",))
     with pytest.raises(ConfigError):
         make_settings(comfy_url="http://0.0.0.0:8188")
+
+
+# -- Worker 인증 (TECH_DESIGN 56.5, 56.6) ------------------------------------------
+def test_worker_auth_mode_is_validated():
+    with pytest.raises(ConfigError):
+        make_settings(worker_auth="basic")
+    with pytest.raises(ConfigError):
+        make_settings(worker_target="mars")
+
+
+def test_secret_key_mode_still_requires_a_secret_key():
+    with pytest.raises(ConfigError):
+        make_settings(supabase_secret_key="")
+
+
+def test_worker_jwt_mode_refuses_a_service_role_key():
+    """Cloud Worker에 service_role 키가 들어오면 기동하지 않는다 (18조)."""
+    with pytest.raises(ConfigError, match="must not hold a Supabase secret"):
+        make_settings(worker_auth="worker_jwt", worker_jwt="wjwt", supabase_anon_key="anon",
+                      supabase_secret_key="sb_secret_test")
+
+
+def test_worker_jwt_mode_requires_the_token_and_anon_key():
+    for overrides in ({"worker_jwt": ""}, {"supabase_anon_key": ""}):
+        with pytest.raises(ConfigError):
+            make_settings(worker_auth="worker_jwt", supabase_secret_key="",
+                          **{"worker_jwt": "wjwt", "supabase_anon_key": "anon", **overrides})
+
+
+@pytest.mark.parametrize("name", ["SUPABASE_SERVICE_ROLE_KEY", "JWT_SIGNING_SECRET", "SNS_ACCESS_TOKEN"])
+def test_worker_jwt_mode_refuses_forbidden_environment(monkeypatch, name):
+    """서명 키·SNS 토큰이 Cloud Pod 환경에 있으면 기동하지 않는다 (18조)."""
+    monkeypatch.setenv(name, "something")
+    with pytest.raises(ConfigError, match="never be set"):
+        make_settings(worker_auth="worker_jwt", worker_jwt="wjwt", supabase_anon_key="anon",
+                      supabase_secret_key="")
+
+
+def test_auth_headers_never_send_the_secret_key_in_jwt_mode():
+    jwt_mode = auth_headers(worker_jwt="wjwt", anon_key="anon_public")
+    assert jwt_mode == {"apikey": "anon_public", "Authorization": "Bearer wjwt"}
+    assert "sb_secret" not in str(jwt_mode)
+
+    # 로컬 Phase 0: 새 secret key는 apikey만, 레거시 service_role JWT는 Authorization도
+    assert auth_headers(secret_key="sb_secret_x") == {"apikey": "sb_secret_x"}
+    legacy = auth_headers(secret_key="a.b.c")
+    assert legacy["Authorization"] == "Bearer a.b.c"
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "message", "expected"),
+    [
+        (401, "PGRST301", "JWT expired", True),
+        (403, "42501", "permission denied for function", True),
+        (403, "PT403", "FORBIDDEN worker credential is missing, expired or revoked", True),
+        (403, "PT403", "FORBIDDEN persona is not active", False),   # 업무 규칙 위반은 인증 실패가 아니다
+        (409, "PT409", "INVALID_TRANSITION", False),
+        (503, None, "service unavailable", False),
+    ],
+)
+def test_worker_auth_failure_is_told_apart_from_business_errors(status, code, message, expected):
+    assert is_worker_auth_failure(DbError(status, code, message)) is expected
 
 
 def test_failure_tracker_blocks_and_expires():

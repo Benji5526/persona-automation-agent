@@ -1,0 +1,27 @@
+{
+  "files": {
+    "docs/PRD.md": "be66dd711552a508ec35797d58b1dfc50c2b5cd992d8b22bc5ea6c30d5b5c041",
+    "n8n/pa_001_content_job_dispatcher.json": "5eec5fbb63068750fa31e921b9948ecfa0d6fce1874808ae0f6bc15637c62ead",
+    "n8n/pa_002_prompt_generator.json": "9b3a10d59844038087db5e2f75034800ac49357356591b5cf29c3d3b4a4891dd",
+    "n8n/pa_004_generation_result_handler.json": "3f8edf728fbfb51489c38e9787f233bb817374c68c49e761cb26e2f7faee7ac2",
+    "n8n/pa_005_caption_generator.json": "3ad57f9bb0e712a92bc7a81c5d2c3dc5ec986607edfd81b4ecd516cc1f78dadf",
+    "n8n/pa_006_error_handler.json": "7b1188fadb9f882097e660ba3d5b9556363c53f1ae3cb5b55a4978a64dc99d3b",
+    "supabase/migrations/0001_core_tables.sql": "e6a432195c0168b81e41fcab9918d32d15cd834f7be98945d6203349c23dbee8",
+    "supabase/migrations/0002_state_machine.sql": "59817cf4f0aad23d56c269cec06dc9d993746dc4a0821317eb01353a0652ffa3",
+    "supabase/migrations/0003_rpc_operator.sql": "4a97c03b0b4ef23a640b7252b95af7fc5d168bcaa7bef9f075e8de3343f1e41c",
+    "supabase/migrations/0004_rpc_worker.sql": "1179b17e381918400c1f731b4b0d10b713662e8f4bf7d1ecd7be9ff25553eaa3",
+    "supabase/migrations/0005_security.sql": "fa143ff3622ca87c13e051cb96b97219118ccb82558df09ca27a80bbce76069a",
+    "supabase/migrations/0006_cron.sql": "13f2d3e607dd029eaf702ea2e49337641aedb92d37cde496cf278af3092edf66",
+    "supabase/migrations/0007_workers_settings.sql": "a6768d39647908a75f8a20559b83af421652771ddf53c59086aa12785eceda1a",
+    "supabase/migrations/0008_llm_limit_models.sql": "7c9a3b04e0e11be52dee9b3439de16bd79fc13e444a8551d5bd7c6ab40438889",
+    "supabase/migrations/0009_persona_isolation.sql": "4d46109ebe9d1491179c8ab362980238d172065113b943f49757c409c1eea7c2",
+    "tests/db/test_f0_isolation.py": "c9471ab5737935736e1792affb56d5975e909577a83fa13db6f3f18e2933a400",
+    "workflows/character_reference_v1.json": "aa6bb1f3532417ff8b6930f3773f8449d43b43bb829dbf67bef00e2daf90a5d2",
+    "workflows/faceswap_v1.json": "0b470a868c4e2447df555d728835dc4a0ca40ff0877a388bdb6b0ff77fa95266",
+    "workflows/image_generation_lora_v1.json": "431048623a0573483c4d6316d949b7e0b1e94e90b8dd445f33d700d0bfdd5e3f",
+    "workflows/image_generation_v1.json": "8391f6977caf7aa69b71171bb9e4e770a1f95914d7cc15a1518b759068e7b10c",
+    "workflows/image_to_image_v1.json": "2637ad2d6132ca81b7153f07de627d5b3da481afa685482fc2d1b36de7b7f3cd",
+    "workflows/registry.json": "bf5b71d146ba9155e2a28ef092db6aa8db4242e72b3af13396cf2f38eeecc8ac"
+  },
+  "tech_design_9_to_55": "ad4e86816e1f2fcce658f5656bbf31975b447fe20319395603b0890402489182"
+}

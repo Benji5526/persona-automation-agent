@@ -99,16 +99,18 @@ select tablename
  order by 1;
 
 -- 13. 확장과 pg_cron 작업
---     기대: pg_cron, pg_net 모두 있음. recover-stale-jobs가 '* * * * *'로 active
+--     기대: pg_cron, pg_net 모두 있음. recover-stale-jobs는 '* * * * *', dispatch-queued-content-jobs는
+--           '10 seconds'(pg_cron이 초 단위를 모르면 '* * * * *')로 각각 active (0012, TECH_DESIGN 56.10)
 select extname, extversion from pg_extension where extname in ('pg_cron', 'pg_net');
-select jobname, schedule, active from cron.job where jobname = 'recover-stale-jobs';
+select jobname, schedule, active from cron.job
+ where jobname in ('recover-stale-jobs', 'dispatch-queued-content-jobs') order by jobname;
 
 -- 14. pg_cron 최근 실행 결과 (적용 후 몇 분 지나서)
 --     기대: status = 'succeeded'
 select j.jobname, d.status, d.return_message, d.start_time
   from cron.job_run_details d
   join cron.job j on j.jobid = d.jobid
- where j.jobname = 'recover-stale-jobs'
+ where j.jobname in ('recover-stale-jobs', 'dispatch-queued-content-jobs')
  order by d.start_time desc
  limit 5;
 
@@ -129,7 +131,7 @@ select id, status_code, error_msg, created
  limit 10;
 
 -- 17. Worker 상태 (브릿지·n8n 연결 후)
---     기대: python:rtx5080-1과 n8n, last_seen_at이 90초 이내. python 행의 models에 설치된 체크포인트·LoRA 수
+--     기대: python:local-1과 n8n, last_seen_at이 90초 이내. python 행의 models에 설치된 체크포인트·LoRA 수
 select id, kind, comfyui_ok, gpu ->> 'name' as gpu, queue_size, last_seen_at,
        jsonb_array_length(coalesce(models -> 'checkpoints', '[]')) as checkpoints,
        jsonb_array_length(coalesce(models -> 'loras', '[]')) as loras,
@@ -153,11 +155,99 @@ select 'index', indexname from pg_indexes
  order by 1, 2;
 
 -- 20. 0010 execution_targets (TECH_DESIGN 56.4)
---     기대: app_mode = "personal", active_worker = null(제한 없음) 또는 등록된 워커 id,
---           worker_status에 target·provider 열, 함수 private.worker_may_claim 1개
-select key, value from public.app_settings where key in ('app_mode', 'active_worker') order by key;
-select column_name from information_schema.columns
- where table_schema = 'public' and table_name = 'worker_status' and column_name in ('target', 'provider')
+--     기대: app_mode = "personal", default_execution_target = "local",
+--           active_worker 행은 **없어야 한다** (구 설계 제거)
+select key, value from public.app_settings
+ where key in ('app_mode', 'default_execution_target', 'active_worker') order by key;
+
+--     기대: content_jobs.execution_target(not null), automation_jobs.execution_target, worker_status.target·provider
+select table_name, column_name, is_nullable from information_schema.columns
+ where table_schema = 'public'
+   and (table_name, column_name) in (('content_jobs', 'execution_target'),
+                                     ('automation_jobs', 'execution_target'),
+                                     ('worker_status', 'target'), ('worker_status', 'provider'))
+ order by 1, 2;
+
+--     기대: execution_target이 authenticated의 INSERT·UPDATE 권한에 **없어야 한다** (RPC 우회 차단)
+select privilege_type, count(*) as leaks from information_schema.column_privileges
+ where table_schema = 'public' and table_name = 'content_jobs' and column_name = 'execution_target'
+   and grantee = 'authenticated' and privilege_type in ('INSERT', 'UPDATE')
+ group by 1;
+
+--     기대: 상속 트리거 1개, Target RPC 3개 (move_pending_jobs_to_target, 2인자 retry, 13인자 create_content_job)
+select tgname from pg_trigger where tgname = 'automation_jobs_inherit_execution_target';
+select p.proname, p.pronargs from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+ where n.nspname = 'public'
+   and p.proname in ('move_pending_jobs_to_target', 'retry_automation_job', 'create_content_job')
+ order by 1, 2;
+
+-- 21. 0011 worker_auth (TECH_DESIGN 56.5)
+--     기대: worker_credentials 테이블 + RLS 켜짐, 정책 0개 (직접 읽기 불가)
+select c.relname, c.relrowsecurity, count(pol.polname) as policies
+  from pg_class c join pg_namespace n on n.oid = c.relnamespace
+  left join pg_policy pol on pol.polrelid = c.oid
+ where n.nspname = 'public' and c.relname = 'worker_credentials'
+ group by 1, 2;
+
+--     기대: worker_credentials에 secret·token·key 이름의 열이 **없어야 한다** (서명 키 미저장)
+select count(*) as secret_like_columns from information_schema.columns
+ where table_schema = 'public' and table_name = 'worker_credentials'
+   and (column_name like '%secret%' or column_name like '%token%' or column_name like '%key%');
+
+--     기대: pa_worker 역할 존재, 로그인 불가, public 스키마 테이블 권한 0건
+select rolname, rolcanlogin from pg_roles where rolname = 'pa_worker';
+select count(*) as pa_worker_table_grants from information_schema.role_table_grants
+ where grantee = 'pa_worker' and table_schema = 'public';
+
+--     기대: pa_worker가 실행할 수 있는 public 함수는 **정확히 12개** (create_content_job·update_app_setting 등은 없어야 한다):
+--           claim_automation_job, claim_next_automation_job, complete_automation_job, fail_automation_job,
+--           heartbeat_automation_job, log_execution, log_security_event, register_asset, report_worker_status,
+--           revoke_worker_credential, worker_get_input_asset, worker_get_job_context
+select p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+ where n.nspname = 'public' and has_function_privilege('pa_worker', p.oid, 'EXECUTE')
  order by 1;
-select count(*) as worker_may_claim_functions from pg_proc p join pg_namespace n on n.oid = p.pronamespace
- where n.nspname = 'private' and p.proname = 'worker_may_claim';
+
+--     기대: private 스키마에서는 storage 정책 술어 2개뿐 (worker_may_read_object, worker_may_write_object)
+select p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+ where n.nspname = 'private' and has_function_privilege('pa_worker', p.oid, 'EXECUTE')
+ order by 1;
+
+--     기대: authenticated(Lovable)·anon이 워커 RPC를 실행할 수 없다 → 모든 칸 false
+select
+  has_function_privilege('authenticated', 'public.claim_next_automation_job(text, text)', 'execute') as auth_claim,
+  has_function_privilege('authenticated', 'public.worker_get_job_context(uuid)', 'execute')          as auth_context,
+  has_function_privilege('authenticated', 'public.report_worker_status(text, text, jsonb)', 'execute') as auth_report,
+  has_function_privilege('anon', 'public.claim_next_automation_job(text, text)', 'execute')          as anon_claim,
+  has_function_privilege('anon', 'public.worker_get_job_context(uuid)', 'execute')                   as anon_context;
+
+-- 22. 호스팅 JWT 역할 매핑 (TECH_DESIGN 56.5) — 이 SQL만으로는 확인할 수 없다
+--     PostgREST가 JWT의 role 클레임으로 `SET ROLE`을 하려면 authenticator가 pa_worker의 멤버여야 한다.
+--     기대: 1행 (authenticator → pa_worker). 0행이면 0011이 grant를 건너뛴 것이다 (그 시점에 authenticator가 없었다).
+select r.rolname as member, g.rolname as granted_role
+  from pg_auth_members m
+  join pg_roles r on r.oid = m.member
+  join pg_roles g on g.oid = m.roleid
+ where g.rolname = 'pa_worker';
+--     0행이면 다음을 **한 번** 실행한다: grant pa_worker to authenticator;
+--     그다음 `python scripts/smoke_worker_jwt.py` 로 실제 JWT가 pa_worker로 전환되는지 확인한다 (설명은 그 파일 머리말).
+
+-- 23. Storage 격리 (TECH_DESIGN 56.5, 0011 8절)
+--     기대: pa_worker의 storage 권한은 storage.objects의 INSERT·SELECT **두 건뿐** (UPDATE·DELETE·TRUNCATE 없음, buckets 없음)
+select table_schema, table_name, privilege_type from information_schema.role_table_grants
+ where grantee = 'pa_worker' and table_schema = 'storage' order by 1, 2, 3;
+
+--     기대: pa_worker 정책 정확히 2개 — pa_worker_read_inputs(SELECT), pa_worker_write_results(INSERT)
+select policyname, cmd, roles from pg_policies
+ where schemaname = 'storage' and tablename = 'objects' and 'pa_worker' = any (roles)
+ order by policyname;
+
+--     기대: 위 두 정책 말고 pa_worker·PUBLIC 대상의 UPDATE·DELETE·ALL 정책이 **없어야 한다** (0행)
+select policyname, cmd, roles from pg_policies
+ where schemaname = 'storage' and tablename = 'objects'
+   and cmd in ('UPDATE', 'DELETE', 'ALL') and ('pa_worker' = any (roles) or 'public' = any (roles));
+
+--     기대: RLS가 켜져 있다 (relrowsecurity = true)
+select relname, relrowsecurity from pg_class where oid = 'storage.objects'::regclass;
+
+-- 24. Capability 요구사항은 배포 설정이다 (측정 전에는 UNSET) — DB가 아니라 workflows/registry.json에 있다.
+--     확인: python scripts/report_capability_requirements.py   (--strict 는 UNSET이 있으면 실패)

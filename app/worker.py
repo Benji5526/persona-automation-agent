@@ -23,11 +23,11 @@ from app import __version__
 from app.comfyui.builder import InputRequest, plan, render, resolve_workflow_id
 from app.comfyui.client import ComfyClient, iter_output_files
 from app.comfyui.registry import WorkflowSpec, missing_nodes
-from app.comfyui.validation import (MIME_EXT, check_models, check_output_names, combo_options, make_thumbnail,
-                                    output_invalid, validate_input_image, validate_output)
+from app.comfyui.validation import (MIME_EXT, check_capability, check_models, check_output_names, combo_options,
+                                    make_thumbnail, output_invalid, validate_input_image, validate_output)
 from app.config import Settings
 from app.database import Repository
-from app.errors import DbError, JobError, LockLost, transient, validation
+from app.errors import DbError, JobError, LockLost, is_worker_auth_failure, transient, validation
 from app.security import redact
 from app.storage import Storage, safe_path
 
@@ -74,6 +74,8 @@ class GpuWorker:
         self.disabled: dict[str, str] = {}      # Workflow ID → 꺼진 이유 (노드 미설치)
         self.nodes_checked = False
         self.comfy_ok: bool | None = None
+        self.auth_failed = False                # Worker 자격이 거부됐다 → 새 Job을 더 가져오지 않는다 (56.5)
+        self.on_auth_failure = None             # 자격이 거부되면 프로세스에 정상 종료를 요청하는 훅 (main.py가 설정)
 
     # -- 대기열 --------------------------------------------------------------------
     @property
@@ -119,7 +121,9 @@ class GpuWorker:
 
         * 한 번에 하나: 대기열이나 실행 중인 Job이 있으면 가져오지 않는다 (GPU 동시성 1).
         * ComfyUI가 꺼져 있으면 선점하지 않는다 (attempts가 늘지 않게, push의 503과 같은 이유).
-        * **가져갈 수 있는지는 DB가 정한다**: app_settings.active_worker가 이 Worker가 아니면 claim이 빈 결과다.
+        * **가져갈 수 있는지는 DB가 정한다** (56.4): Job의 execution_target과 인증된 Worker 신원이
+          일치해야 claim이 결과를 돌려준다. 이 코드는 local/cloud를 스스로 고르지 않는다.
+        * 자격이 만료·폐기됐으면 같은 자격으로 다시 두드리지 않고 멈춘다 (56.5).
         """
         while True:
             await asyncio.sleep(self.settings.pull_interval_sec)
@@ -128,11 +132,50 @@ class GpuWorker:
             try:
                 await self.comfy.system_stats()
                 job = await self.repo.claim_next_job("generation", self.settings.worker_id)
-            except (DbError, httpx.HTTPError) as exc:  # ComfyUI 또는 Supabase에 잠시 닿지 않음: 다음 주기에 다시
+            except DbError as exc:
+                if is_worker_auth_failure(exc):
+                    await self._stop_on_auth_failure(exc)
+                    return
+                log.warning("pull skipped: %s", type(exc).__name__)
+                continue
+            except httpx.HTTPError as exc:  # ComfyUI 또는 Supabase에 잠시 닿지 않음: 다음 주기에 다시
                 log.warning("pull skipped: %s", type(exc).__name__)
                 continue
             if job:
                 log.info("job %s pulled (queue position %d)", job["id"], self.enqueue(job))
+
+    async def _stop_on_auth_failure(self, exc: DbError, *, from_job: bool = False) -> None:
+        """자격이 깨졌다 (401·폐기·만료). 새 Job을 더 가져오지 않고 정상 종료한다 (사양 21조).
+
+        1) 새 Job 선점을 멈춘다.
+        2) 실행 중인 Job은 안전하게 멈춘다. 결과를 보고할 수 없으니 계속 돌려도 소용없다: ComfyUI 작업을 지우고,
+           DB의 Job은 Heartbeat가 끊겨 회수·재시도된다. 대기열에 있던 Job도 같다.
+        3) 프로세스에 정상 종료를 요청한다.
+        이미 거부된 자격으로 종료 보고(fail 등)를 되풀이하지 않는다. 토큰 값은 어디에도 기록하지 않는다.
+        한 번만 실행한다 (여러 루프가 동시에 같은 거부를 만날 수 있다).
+        """
+        if self.auth_failed:
+            return
+        self.auth_failed = True
+        self.stopping = True
+        log.error("worker credential rejected (%s %s); no more claims, stopping", exc.status, exc.code)
+        try:
+            # 거부된 자격(예: 폐기된 JWT)으로는 보통 기록되지 않는다. secret_key 모드의 일시 오류일 수 있어 한 번만 시도한다.
+            await self.repo.log_security_event(
+                "WORKER_AUTH_FAILED", None,
+                {"worker_id": self.settings.worker_id, "status": exc.status, "code": exc.code},
+                actor_type="python")
+        except Exception:  # 기록 실패가 종료를 막지 않는다
+            log.warning("worker auth failure not recorded in the database (expected when the credential is revoked)")
+        self.pending.clear()
+        # 작업 안에서 불렸다면(from_job) 그 작업은 곧 스스로 끝난다. 자기 자신을 기다리지 않는다.
+        if not from_job and self.current and self._current_task and not self._current_task.done():
+            await self._stop("auth_failed")
+        if self.on_auth_failure:
+            try:
+                self.on_auth_failure()
+            except Exception:  # 종료 요청 실패가 정리를 막지 않는다
+                log.exception("could not request process exit after auth failure")
 
     async def cancel(self, job_id: str) -> bool:
         """12.6 cancel: 대기열이면 빼고, 실행 중이면 ComfyUI 작업을 지우고 멈춘다. DB 상태는 이미 cancelled다."""
@@ -162,6 +205,10 @@ class GpuWorker:
         if self.current and self._current_task:
             jobs.insert(0, self.current)
             await self._stop("shutdown")
+        if self.auth_failed:
+            # 자격이 거부된 뒤에는 종료 보고를 하지 않는다: 같은 자격으로 Supabase를 계속 두드리지 않는다.
+            # 이 Job들은 Heartbeat가 끊겨 DB가 회수·재시도한다.
+            return
         for job in jobs:
             await self._report_failure(job, transient("SHUTDOWN", "bridge shut down before the job finished"))
 
@@ -172,6 +219,12 @@ class GpuWorker:
             for job in [j for j in (self.current, *self.pending) if j]:
                 try:
                     alive = await self.repo.heartbeat(job["id"], job["locked_at"])
+                except DbError as exc:
+                    if is_worker_auth_failure(exc):   # 폐기·만료: 계속 돌려도 결과를 보고할 수 없다
+                        await self._stop_on_auth_failure(exc)
+                        return
+                    log.warning("job %s: heartbeat failed (%s)", job["id"], type(exc).__name__)
+                    continue
                 except Exception as exc:  # 일시적 오류: 다음 주기에 다시
                     log.warning("job %s: heartbeat failed (%s)", job["id"], type(exc).__name__)
                     continue
@@ -196,6 +249,14 @@ class GpuWorker:
             raise
         except JobError as exc:
             await self._report_failure(job, exc)
+        except DbError as exc:
+            if is_worker_auth_failure(exc):
+                # 자격이 거부됐다: 같은 자격으로 실패 보고도 못 한다. DB는 Heartbeat 끊김으로 이 Job을 회수한다.
+                await self._stop_on_auth_failure(exc, from_job=True)
+                return
+            log.exception("job %s: database error", job["id"])
+            await self._report_failure(job, JobError(f"{type(exc).__name__}: {exc}", error_type="unknown",
+                                                     error_code="UNKNOWN", retryable=True))
         except Exception as exc:  # 예상하지 못한 오류도 Job은 반드시 실패 처리한다
             log.exception("job %s: unexpected error", job["id"])
             await self._report_failure(job, JobError(f"{type(exc).__name__}: {exc}", error_type="unknown",
@@ -213,23 +274,28 @@ class GpuWorker:
         job_id, locked_at, persona_id = job["id"], job["locked_at"], job["persona_id"]
         started = time.monotonic()
 
-        # 0) 이 Job으로 이미 등록된 Asset이 있으면 다시 만들지 않는다 (TECH_DESIGN 49.5 1번).
-        #    register_asset 뒤 complete 전에 죽은 Job은 회수·재시도로 다시 선점되는데, 그대로 실행하면 Asset이 또 생긴다.
-        existing = await self.repo.get_job_assets(job_id)
+        # 0) 실행 맥락을 한 번에 받는다 (TECH_DESIGN 56.5).
+        #    테이블을 직접 읽지 않는다: 이 RPC는 자기가 선점한 Job에 필요한 것만 돌려주고,
+        #    SNS 토큰·다른 Persona·무관한 Asset은 애초에 포함하지 않는다.
+        context = await self.repo.get_job_context(job_id)
+
+        # 이 Job으로 이미 등록된 Asset이 있으면 다시 만들지 않는다 (TECH_DESIGN 49.5 1번).
+        # register_asset 뒤 complete 전에 죽은 Job은 회수·재시도로 다시 선점되는데, 그대로 실행하면 Asset이 또 생긴다.
+        existing = context.get("existing_assets") or []
         if existing:
             await self._finish_recovered(job, existing, started)
             return
 
         # 1) 조립 (13.6 ~ 13.8)
         await self._log(job, "BUILD", "python", "started")
-        content_job = await self.repo.get_content_job(job["content_job_id"])
-        persona = await self.repo.get_persona(persona_id)
+        content_job = context.get("content_job")
+        persona = context.get("persona")
         if not content_job or not persona:
             raise validation("INPUT_NOT_FOUND", "content job or persona not found")
-        # Persona 격리 (TECH_DESIGN 36.12): 다른 Persona의 Content Job을 가리키는 Job은 ComfyUI를 부르기 전에 실패한다
-        if str(content_job["persona_id"]) != str(persona_id):
+        # Persona 격리 (TECH_DESIGN 36.12): 맥락은 선점한 Job 기준으로 만들어지지만, 한 번 더 확인한다
+        if str(persona["id"]) != str(persona_id):
             raise validation("INPUT_NOT_FOUND", "content job belongs to a different persona")
-        persona_assets = await self.repo.get_persona_assets(persona_id)
+        persona_assets = context.get("persona_assets") or []
         workflow_id = resolve_workflow_id(job, content_job, persona)
         spec = self.registry.get(workflow_id or "")
         if not spec or not spec.enabled:
@@ -237,14 +303,17 @@ class GpuWorker:
         if workflow_id in self.disabled:
             raise validation("WORKFLOW_INVALID", f"workflow {workflow_id} unavailable: {self.disabled[workflow_id]}")
         build = plan(spec, job, content_job, persona, persona_assets, self.rng)
-        check_models(spec, build.values, await self.comfy.object_info())  # 13.10
+        # 실행 전 Capability 검증 (13.10, 56.7). 불일치는 재시도하지 않는다 — 같은 Target에서 결과가 같다.
+        object_info = await self.comfy.object_info()
+        check_capability(spec, object_info, await self.comfy.system_stats(), self.settings.worker_target)
+        check_models(spec, build.values, object_info)
         await self._log(job, "BUILD", "python", "succeeded", output=build.metadata)
 
         # 2) 입력 이미지 (ID → Storage → ComfyUI)
         if build.inputs:
             await self._log(job, "INPUT_UPLOAD", "python", "started")
             for request in build.inputs:
-                data, ext = await self._fetch_input(request, persona_id)
+                data, ext = await self._fetch_input(request, persona_id, job_id)
                 build.values[request.slot] = await self.comfy.upload_image(f"{job_id}_{request.slot}.{ext}", data)
         workflow = render(spec.template, build.values)
 
@@ -341,9 +410,10 @@ class GpuWorker:
         except Exception as exc:  # 기록 실패로 오류 보고를 막지 않는다
             log.warning("security event %s not recorded (%s)", event_type, type(exc).__name__)
 
-    async def _fetch_input(self, request: InputRequest, persona_id: str) -> tuple[bytes, str]:
+    async def _fetch_input(self, request: InputRequest, persona_id: str, job_id: str) -> tuple[bytes, str]:
         if request.kind == "asset":
-            row = await self.repo.get_asset(request.id)
+            # 같은 Persona의 Asset인지 DB가 확인한다 (테이블 직접 조회 없음, 56.5)
+            row = await self.repo.get_input_asset(job_id, request.id)
             if not row or str(row["persona_id"]) != str(persona_id) or row["status"] == "archived":
                 raise validation("INPUT_NOT_FOUND", f"asset {request.id} not found for persona")
             bucket, path = row["storage_bucket"], row["storage_path"]
@@ -393,6 +463,10 @@ class GpuWorker:
                 self.disabled[spec.id] = f"missing ComfyUI nodes: {sorted(missing)}"
         self.nodes_checked = True
         enabled = {wid: spec.enabled and wid not in self.disabled for wid, spec in self.registry.items()}
+        if self.settings.worker_auth == "worker_jwt":
+            # comfy_workflows는 소유자 쪽(로컬 service_role 브릿지)이 갱신한다. sync_workflow_registry는 pa_worker의
+            # 허용 RPC가 아니다 — 부르면 42501이 돌아오고, 그걸 자격 거부로 오해해 워커가 스스로 종료한다 (게이트에서 발견).
+            return enabled
         await self.repo.sync_workflow_registry({wid: spec.sync_payload(enabled[wid]) for wid, spec in self.registry.items()})
         return enabled
 
@@ -422,7 +496,10 @@ class GpuWorker:
         info = {"comfyui_ok": self.comfy_ok, "gpu": gpu,
                 "current_job_id": self.current["id"] if self.current else None,
                 "queue_size": len(self.pending), "version": __version__, "worker_loop_ok": self.healthy(),
-                "pull": self.settings.pull_jobs}
+                "pull": self.settings.pull_jobs,
+                # Target·Provider는 보고값이다. 선점 가능 여부는 DB가 정한다 (56.4).
+                "target": self.settings.worker_target,
+                "provider": self.settings.worker_provider}
         if models is not None:  # 없으면 DB의 이전 목록을 유지한다 (0008)
             info["models"] = models
         return info
@@ -434,7 +511,12 @@ class GpuWorker:
                 if info["comfyui_ok"] and not self.nodes_checked:
                     await self.refresh_nodes()
                 await self.repo.report_worker_status(self.settings.worker_id, info)
-            except (DbError, httpx.HTTPError) as exc:  # Supabase에 잠시 연결할 수 없음
+            except DbError as exc:
+                if is_worker_auth_failure(exc):
+                    await self._stop_on_auth_failure(exc)
+                    return
+                log.warning("status report failed: %s", type(exc).__name__)
+            except httpx.HTTPError as exc:  # Supabase에 잠시 연결할 수 없음
                 log.warning("status report failed: %s", type(exc).__name__)
             except Exception:  # 상태 보고 실패로 Worker를 멈추지 않는다
                 log.exception("status report failed")

@@ -32,6 +32,56 @@ def combo_options(object_info: dict, node: str, input_name: str) -> list | None:
     return None
 
 
+# GPU 보고값은 드라이버마다 조금씩 다르다. 아주 작은 차이로 막지 않는다.
+VRAM_TOLERANCE_GB = 0.1
+
+
+def unsupported_on_target(message: str) -> JobError:
+    """이 Worker에서는 이 Workflow를 실행할 수 없다 (TECH_DESIGN 56.7).
+
+    Capability 불일치는 같은 Target에서 다시 해도 같은 결과다 → **재시도하지 않는다**.
+    실행 중에 터지는 OUT_OF_MEMORY(일시적, 재시도 가능)와는 다른 종류의 실패다.
+    """
+    return JobError(message, error_type="validation", error_code="WORKFLOW_UNSUPPORTED_ON_TARGET",
+                    retryable=False)
+
+
+def vram_total_gb(system_stats: dict) -> float | None:
+    """ComfyUI /system_stats가 보고한 첫 장치의 전체 VRAM (GB). GPU를 못 찾으면 None."""
+    devices = system_stats.get("devices") or []
+    total = (devices[0] or {}).get("vram_total") if devices else None
+    return round(total / 2**30, 2) if total else None
+
+
+def check_capability(spec: WorkflowSpec, object_info: dict, system_stats: dict, target: str = "local") -> None:
+    """실행 전 Capability 검증 (56.7): VRAM과 Workflow가 고정적으로 요구하는 파일.
+
+    Workflow = 구조 + 고정 파일 / Persona = 모델·LoRA 선택 / Worker = 실제 설치 상태.
+    모델·LoRA 값 검증은 check_models가 맡는다 (MODEL_NOT_FOUND·LORA_NOT_FOUND).
+    """
+    requirements = spec.requirements or {}
+
+    min_vram = requirements.get("min_vram_gb")
+    if min_vram:
+        have = vram_total_gb(system_stats)
+        if have is None:
+            raise unsupported_on_target(
+                f"{spec.id} needs {min_vram} GB VRAM but this {target} worker reported no GPU")
+        if have + VRAM_TOLERANCE_GB < float(min_vram):
+            raise unsupported_on_target(
+                f"{spec.id} needs {min_vram} GB VRAM, this {target} worker has {have} GB")
+
+    for entry in requirements.get("required_files") or []:
+        options = combo_options(object_info, entry["node"], entry["input"])
+        if options is None:
+            raise unsupported_on_target(
+                f"{spec.id} needs node {entry['node']}, which is not installed on this {target} worker")
+        if entry["file"] not in options:
+            raise unsupported_on_target(
+                f"{spec.id} needs {entry['file']} in {entry['node']}.{entry['input']}, "
+                f"which is not installed on this {target} worker")
+
+
 def check_models(spec: WorkflowSpec, values: dict, object_info: dict) -> None:
     """ComfyUI에 실제로 있는 모델·LoRA 파일인지 실행 전에 확인한다 (13.10)."""
     for name, model in spec.models.items():

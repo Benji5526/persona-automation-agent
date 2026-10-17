@@ -12,11 +12,11 @@ def test_worker_status_report_and_dashboard(db):
     db.make_persona(uid)
     db.as_service("python")
     info = {"comfyui_ok": True, "gpu": {"name": "RTX 5080", "vram_free_mb": 2100}, "queue_size": 2, "version": "1.0"}
-    db.val("select report_worker_status('python:rtx5080-1', 'python', %s::jsonb)", (json.dumps(info),))
-    db.val("select report_worker_status('python:rtx5080-1', 'python', %s::jsonb)", (json.dumps({**info, "queue_size": 0}),))
+    db.val("select report_worker_status('python:local-1', 'python', %s::jsonb)", (json.dumps(info),))
+    db.val("select report_worker_status('python:local-1', 'python', %s::jsonb)", (json.dumps({**info, "queue_size": 0}),))
 
     db.as_operator(uid)
-    row = db.one("select kind, comfyui_ok, gpu, queue_size from worker_status where id = 'python:rtx5080-1'")
+    row = db.one("select kind, comfyui_ok, gpu, queue_size from worker_status where id = 'python:local-1'")
     assert row == {"kind": "python", "comfyui_ok": True, "gpu": {"name": "RTX 5080", "vram_free_mb": 2100}, "queue_size": 0}
     workers = db.val("select get_dashboard_summary()")["workers"]
     assert len(workers) == 1 and workers[0]["online"] is True
@@ -34,7 +34,8 @@ def test_settings_require_admin(db):
     db.conn.execute("update users set role = 'admin' where id = %s", (uid,))
     db.as_operator(uid)
     settings = db.val("select get_app_settings()")
-    assert set(settings) == {"allowed_emails", "limits", "publishing_enabled", "retry_backoff_seconds", "active_worker", "app_mode"}
+    assert set(settings) == {"allowed_emails", "limits", "publishing_enabled", "retry_backoff_seconds",
+                             "default_execution_target", "app_mode"}
 
     updated = db.val("select update_app_setting('limits', '{\"daily_generation_limit\": 50}'::jsonb)")
     assert updated["limits"]["daily_generation_limit"] == 50

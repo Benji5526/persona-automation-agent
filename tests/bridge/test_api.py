@@ -34,7 +34,7 @@ def test_claims_job_and_queues_it(client):
     assert client.app.state.worker.queued_ids == [ids["job_id"]]
     row = client.env.seed.as_postgres().one("select status, attempts, claimed_by from automation_jobs where id = %s",
                                            (ids["job_id"],))
-    assert row == {"status": "processing", "attempts": 1, "claimed_by": "python:rtx5080-1"}
+    assert row == {"status": "processing", "attempts": 1, "claimed_by": "python:local-1"}
     # 같은 Job을 다시 보내면 409
     again = client.post("/v1/jobs", json={"job_id": ids["job_id"]}, headers=AUTH)
     assert again.status_code == 409 and again.json()["error"]["code"] == "JOB_NOT_CLAIMABLE"
@@ -120,7 +120,7 @@ def test_status_requires_token(client):
     r = client.get("/v1/status", headers=AUTH)
     assert r.status_code == 200
     body = r.json()
-    assert body["worker_id"] == "python:rtx5080-1" and body["workflows"]["faceswap_v1"]["enabled"] is False
+    assert body["worker_id"] == "python:local-1" and body["workflows"]["faceswap_v1"]["enabled"] is False
 
 
 def test_cancel_removes_queued_job(client):

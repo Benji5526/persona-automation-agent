@@ -6,6 +6,7 @@ import asyncio
 import uuid
 from datetime import datetime, timezone
 
+from app.errors import DbError
 from tests.bridge.conftest import FakeComfy, make_settings, noise_png_sized
 
 
@@ -255,7 +256,7 @@ def test_status_report(env):
 
     async def go():
         info = await worker.status_info()
-        await env.repo.report_worker_status("python:rtx5080-1", info)
+        await env.repo.report_worker_status("python:local-1", info)
         return info
 
     info = env.run(go())
@@ -263,14 +264,14 @@ def test_status_report(env):
     # 설치된 모델 목록 (0008, 22.9): 예전 형식(체크포인트)과 COMBO 형식(LoRA) 모두 읽는다
     models = {"checkpoints": ["model_a.safetensors"], "loras": ["gina_v3.safetensors"]}
     assert info["models"] == models
-    row = env.seed.as_postgres().one("select comfyui_ok, gpu, models from worker_status where id = 'python:rtx5080-1'")
+    row = env.seed.as_postgres().one("select comfyui_ok, gpu, models from worker_status where id = 'python:local-1'")
     assert row["comfyui_ok"] is True and "RTX 5080" in row["gpu"]["name"] and row["models"] == models
 
     # ComfyUI가 꺼지면 목록을 보내지 않고, DB는 이전 목록을 유지한다
     env.comfy.reachable = False
     info = env.run(go())
     assert info["comfyui_ok"] is False and "models" not in info
-    row = env.seed.as_postgres().one("select comfyui_ok, models from worker_status where id = 'python:rtx5080-1'")
+    row = env.seed.as_postgres().one("select comfyui_ok, models from worker_status where id = 'python:local-1'")
     assert row == {"comfyui_ok": False, "models": models}
 
 
@@ -441,6 +442,35 @@ def test_unexpected_output_names_are_rejected_without_reading_files(env):
                         " order by id desc limit 1")["p"] == persona["id"]  # Operator가 자기 화면에서 볼 수 있다
 
 
+def test_capability_mismatch_fails_before_comfyui_and_is_not_retried(env):
+    """56.7: VRAM이 모자라면 ComfyUI를 한 번도 부르지 않고 실패하고, 재시도하지 않는다."""
+    env.registry["image_generation_lora_v1"].requirements = {"min_vram_gb": 64}   # 가짜 GPU는 16GB
+    uid = env.seed.operator()
+    persona = env.seed.persona(uid)
+    ids = env.seed.generation_job(uid, persona["id"])
+    env.process(ids["job_id"])
+
+    row = job_row(env, ids["job_id"])
+    assert (row["status"], row["error_type"], row["error_code"]) == (
+        "failed", "validation", "WORKFLOW_UNSUPPORTED_ON_TARGET")
+    assert env.comfy.prompts == []            # 생성을 시도하지 않았다
+    assert env.storage.objects == {}
+    assert content_status(env, ids["content_job_id"]) == "failed"
+
+
+def test_a_required_workflow_file_missing_on_this_worker_is_not_retried(env):
+    env.registry["image_generation_lora_v1"].requirements = {
+        "required_files": [{"node": "CheckpointLoaderSimple", "input": "ckpt_name", "file": "absent.safetensors"}]}
+    uid = env.seed.operator()
+    persona = env.seed.persona(uid)
+    ids = env.seed.generation_job(uid, persona["id"])
+    env.process(ids["job_id"])
+
+    row = job_row(env, ids["job_id"])
+    assert (row["status"], row["error_code"]) == ("failed", "WORKFLOW_UNSUPPORTED_ON_TARGET")
+    assert env.comfy.prompts == []
+
+
 def test_oversized_output_is_not_retried(env):
     """47.3 3번: Registry output.max_bytes를 넘으면 업로드 전에 OUTPUT_TOO_LARGE, 재시도 없음."""
     env.registry["image_generation_lora_v1"].output["max_bytes"] = 20000
@@ -513,13 +543,47 @@ def run_pull_loop(env, job_id, seconds=4.0):
     env.run(go())
 
 
-def set_active_worker(env, worker_id):
+def test_pull_loop_stops_claiming_when_the_worker_credential_is_rejected(env):
+    """자격이 거부되면(401·폐기·만료) 같은 자격으로 다시 두드리지 않고 멈춘다 (사양 21조)."""
+    uid = env.seed.operator()
+    persona = env.seed.persona(uid)
+    ids = env.seed.generation_job(uid, persona["id"])
+
+    env.settings = make_settings(pull_jobs=True, pull_interval_sec=0.01)
+    attempts = []
+
+    async def rejecting_claim(job_type, worker):
+        attempts.append(job_type)
+        raise DbError(401, "PGRST301", "JWT expired")
+
+    async def go():
+        worker = env.worker()
+        worker.repo.claim_next_job = rejecting_claim
+        pull = asyncio.create_task(worker.pull_loop())
+        try:
+            await asyncio.wait_for(pull, timeout=3.0)      # 루프가 스스로 끝나야 한다
+        finally:
+            pull.cancel()
+            await asyncio.gather(pull, return_exceptions=True)
+        return worker
+
+    worker = env.run(go())
+
+    assert worker.auth_failed is True and worker.stopping is True
+    assert len(attempts) == 1                               # 한 번 거부되면 더 시도하지 않는다
+    assert job_row(env, ids["job_id"])["status"] == "pending"
+    events = env.seed.all("select event_type, detail from security_events order by id desc limit 1")
+    assert events[0]["event_type"] == "WORKER_AUTH_FAILED"
+    assert "jwt" not in str(events[0]["detail"]).lower()     # 토큰 값은 기록하지 않는다
+
+
+def set_job_target(env, job_id, target):
+    """Job의 Execution Target을 바꾼다. 상위 Content Job부터 바꿔야 상속 트리거가 같은 값을 읽는다."""
     env.seed.as_postgres()
-    if worker_id is None:
-        env.seed.conn.execute("update app_settings set value = 'null'::jsonb where key = 'active_worker'")
-    else:
-        env.seed.conn.execute("update app_settings set value = to_jsonb(%s::text) where key = 'active_worker'",
-                              (worker_id,))
+    env.seed.conn.execute(
+        "update content_jobs set execution_target = %s"
+        " where id = (select content_job_id from automation_jobs where id = %s)", (target, job_id))
+    env.seed.conn.execute("update automation_jobs set execution_target = %s where id = %s", (target, job_id))
 
 
 def test_pull_loop_claims_and_generates_without_any_request(env):
@@ -532,17 +596,18 @@ def test_pull_loop_claims_and_generates_without_any_request(env):
     assert content_status(env, ids["content_job_id"]) == "ready"
 
 
-def test_pull_loop_only_takes_jobs_while_this_worker_is_active(env):
+def test_pull_loop_only_takes_jobs_for_its_own_execution_target(env):
+    """Target이 다른 Job은 가져가지 않는다. 판단은 DB가 한다 (56.4) — Worker가 local/cloud를 고르지 않는다."""
     uid = env.seed.operator()
     persona = env.seed.persona(uid)
     ids = env.seed.generation_job(uid, persona["id"])
 
-    set_active_worker(env, "python:cloud-1")                     # 다른 GPU가 활성
+    set_job_target(env, ids["job_id"], "cloud")                  # 다른 Target의 Job
     run_pull_loop(env, ids["job_id"], seconds=0.5)
     row = job_row(env, ids["job_id"])
     assert (row["status"], row["attempts"]) == ("pending", 0) and env.comfy.prompts == []
 
-    set_active_worker(env, env.settings.worker_id)               # 이 GPU로 전환
+    set_job_target(env, ids["job_id"], "local")                  # 이 워커의 Target으로
     run_pull_loop(env, ids["job_id"])
     assert job_row(env, ids["job_id"])["status"] == "done"
 

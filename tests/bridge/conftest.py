@@ -94,21 +94,11 @@ class PsycopgRepository:
     async def register_asset(self, job_id, locked_at, asset):
         return await self._call("select * from register_asset(%s, %s, %s::jsonb)", (job_id, locked_at, json.dumps(asset)))
 
-    async def get_content_job(self, content_job_id):
-        return await self._call("select * from content_jobs where id = %s", (content_job_id,))
+    async def get_job_context(self, job_id):
+        return await self._scalar("select worker_get_job_context(%s) as v", (job_id,)) or {}
 
-    async def get_persona(self, persona_id):
-        return await self._call("select * from personas where id = %s", (persona_id,))
-
-    async def get_persona_assets(self, persona_id):
-        return await self._call("select * from persona_assets where persona_id = %s and is_active", (persona_id,), many=True)
-
-    async def get_asset(self, asset_id):
-        return await self._call("select * from assets where id = %s", (asset_id,))
-
-    async def get_job_assets(self, job_id):
-        return await self._call("select * from assets where automation_job_id = %s order by created_at",
-                                (job_id,), many=True)
+    async def get_input_asset(self, job_id, asset_id):
+        return await self._scalar("select worker_get_input_asset(%s, %s) as v", (job_id, asset_id)) or None
 
     async def sync_workflow_registry(self, workflows):
         return int(await self._scalar("select sync_workflow_registry(%s::jsonb) as v", (json.dumps(workflows),)))

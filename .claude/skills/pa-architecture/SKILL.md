@@ -40,5 +40,5 @@ Supabase is the **source of truth**. n8n holds no state of its own; a workflow t
 ## Personal Edition (CURRENT PRODUCT MODE = PERSONAL)
 
 - Personal is the implementation target (one real user, OWNER = `users.role='admin'`). SaaS design is preserved in `docs/architecture/saas.md`; do **not** implement multi-user, organizations, billing, quotas, per-customer GPU or scaling unless explicitly asked. Do not delete SaaS docs or tables.
-- The GPU is an **Execution Target** (local or cloud worker), chosen by `app_settings.active_worker`; workers pull jobs; the bridge interface and code are the same for both. Never hard-code a GPU model. See `docs/architecture/execution-targets.md`, TECH_DESIGN 56.
+- **Execution Target** (`local`/`cloud`), **Worker** (the instance) and **GPU Provider** are three separate concepts — never one setting. A job's Target is fixed at creation from `app_settings.default_execution_target` (or an explicit override) and is inherited by its automation jobs. **Worker Pull** is the primary dispatch; n8n push (WF-003) is a disabled-by-default local fallback. Never hard-code a GPU model. See `docs/architecture/execution-targets.md`, TECH_DESIGN 56.
 - Manual Generate and autonomous generation share one path: Content Job → n8n → active worker.

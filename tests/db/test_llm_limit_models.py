@@ -88,26 +88,26 @@ def test_worker_status_models_are_kept_until_replaced(db):
     uid = db.make_operator()
     models = {"checkpoints": ["model_a.safetensors"], "loras": ["gina_v2.safetensors"]}
     db.as_service("python")
-    db.val("select report_worker_status('python:rtx5080-1', 'python', %s::jsonb)",
+    db.val("select report_worker_status('python:local-1', 'python', %s::jsonb)",
            (json.dumps({"comfyui_ok": True, "models": models}),))
     # ComfyUI가 잠시 꺼져 목록 없이 보고해도 이전 목록은 남는다
-    db.val("select report_worker_status('python:rtx5080-1', 'python', %s::jsonb)",
+    db.val("select report_worker_status('python:local-1', 'python', %s::jsonb)",
            (json.dumps({"comfyui_ok": False}),))
 
     db.as_operator(uid)
-    row = db.one("select comfyui_ok, models from worker_status where id = 'python:rtx5080-1'")
+    row = db.one("select comfyui_ok, models from worker_status where id = 'python:local-1'")
     assert row == {"comfyui_ok": False, "models": models}
 
     db.as_service("python")
     newer = {"checkpoints": ["model_b.safetensors"], "loras": []}
-    db.val("select report_worker_status('python:rtx5080-1', 'python', %s::jsonb)", (json.dumps({"models": newer}),))
+    db.val("select report_worker_status('python:local-1', 'python', %s::jsonb)", (json.dumps({"models": newer}),))
     db.as_operator(uid)
-    assert db.val("select models from worker_status where id = 'python:rtx5080-1'") == newer
+    assert db.val("select models from worker_status where id = 'python:local-1'") == newer
 
 
 def test_worker_status_models_must_be_lists_in_an_object(db):
     db.as_service("python")
     for bad in (["model_a.safetensors"], {"checkpoints": "model_a.safetensors"}, {"loras": {"a": 1}}):
-        err = db.expect_error("select report_worker_status('python:rtx5080-1', 'python', %s::jsonb)",
+        err = db.expect_error("select report_worker_status('python:local-1', 'python', %s::jsonb)",
                               (json.dumps({"models": bad}),))
         assert err.sqlstate == "PT422", bad

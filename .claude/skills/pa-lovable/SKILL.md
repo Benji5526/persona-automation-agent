@@ -39,5 +39,11 @@ No call to anything but Supabase; searching the code for `sb_secret`, `service_r
 ## Personal Edition
 
 - One real user (OWNER). Do not build organization, team, billing or tenant screens; `app_settings.app_mode = 'personal'`.
-- Execution Target: show a settings card listing registered workers (`worker_status`: target, provider, online, GPU name/VRAM as reported) and let the admin choose the active one (`active_worker`). The frontend never receives or sends GPU URLs, keys or pod ids, and never calls the bridge.
-- Manual **Generate** = `create_content_job` RPC (then Realtime). Show a banner when the active worker is offline and jobs are pending.
+- **Execution Target, Worker and Provider are three different things** (TECH_DESIGN 56.2). Never merge them into one picker.
+  - *Target* (`local` | `cloud`) = where a job runs. Settings has one admin radio bound to `app_settings.default_execution_target` (`update_app_setting`), and `/content-jobs/new` has a per-job override sent as `create_content_job(p_execution_target)`.
+  - *Worker* = the instance that claimed it (`automation_jobs.claimed_by`); *Provider* = who supplies the GPU (`worker_status.provider`). Both are **reported** values, never settings.
+- **A job's Target is fixed when it is created.** Changing the default must never move existing jobs: say so next to the radio, and offer a separate explicit action `move_pending_jobs_to_target` with the affected count, a confirmation and an audit event. It moves only *pending generation* jobs.
+- Retrying on another target is explicit: `retry_automation_job(job_id, target)`. Never offer automatic local↔cloud failover.
+- Worker cards show Target, Provider, Online/Offline, GPU, VRAM, installed models and installed LoRAs — all as reported. Worker credentials (admin) show worker_id, target, provider, expiry, revoked state and a revoke action; **the token value is never stored, so it can never be displayed**.
+- The frontend never receives or sends GPU URLs, keys, pod ids, the JWT signing secret or SNS tokens, and never calls the bridge.
+- Manual **Generate** = `create_content_job` RPC (then Realtime). Capability warnings from worker reports are an early hint only — execution-time validation is authoritative (56.7). When the target's worker is offline, show a waiting message, not a failure.

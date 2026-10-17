@@ -54,13 +54,20 @@ def create_app(settings: Settings | None = None, *, repo: Repository | None = No
 
         state = app.state
         state.settings = settings
-        state.repo = repo or PostgrestRepository(new_client(timeout=30), settings.supabase_url, settings.supabase_secret_key)
-        state.storage = storage or SupabaseStorage(new_client(timeout=120), settings.supabase_url, settings.supabase_secret_key)
+        # WORKER_AUTH=worker_jwt면 service_role 키 없이 Worker JWT + 공개 anon 키로만 붙는다 (56.5).
+        auth = {"worker_jwt": settings.worker_jwt, "anon_key": settings.supabase_anon_key} \
+            if settings.worker_auth == "worker_jwt" else {}
+        state.repo = repo or PostgrestRepository(new_client(timeout=30), settings.supabase_url,
+                                                 settings.supabase_secret_key, **auth)
+        state.storage = storage or SupabaseStorage(new_client(timeout=120), settings.supabase_url,
+                                                   settings.supabase_secret_key, **auth)
         state.comfy = comfy or ComfyClient(new_client(timeout=httpx.Timeout(60.0, connect=5.0)), settings.comfy_url,
                                            settings.object_info_cache_sec)
         state.notifier = notifier or Notifier(new_client(timeout=15), settings.n8n_callback_url, settings.n8n_callback_token)
         state.registry = load_registry(settings.workflow_dir)
         state.worker = GpuWorker(settings, state.repo, state.storage, state.comfy, state.registry, state.notifier)
+        # Worker 자격이 거부되면(폐기·만료·401) 새 Job을 멈추고 프로세스가 정상 종료하도록 요청한다 (56.5).
+        state.worker.on_auth_failure = lambda: getattr(app.state, "request_exit", lambda: None)()
         state.auth_tracker = AuthFailureTracker(settings.auth_fail_limit, settings.auth_block_sec)
         state.rate_limiter = RateLimiter(settings.jobs_rate_per_sec)
         state.comfy_check = None
@@ -100,4 +107,9 @@ if __name__ == "__main__":
     load_dotenv()
     _settings = Settings.from_env()
     setup_logging(_settings)
-    uvicorn.run(create_app(_settings), host=_settings.host, port=_settings.port, log_level=_settings.log_level.lower())
+    _app = create_app(_settings)
+    _server = uvicorn.Server(uvicorn.Config(_app, host=_settings.host, port=_settings.port,
+                                            log_level=_settings.log_level.lower()))
+    # 자격이 거부되면 워커가 이 훅으로 정상 종료를 요청한다 (uvicorn이 lifespan 정리를 거쳐 끝낸다)
+    _app.state.request_exit = lambda: setattr(_server, "should_exit", True)
+    _server.run()

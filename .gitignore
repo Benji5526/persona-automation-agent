@@ -23,3 +23,6 @@ playwright-report/
 *.log
 .DS_Store
 Thumbs.db
+
+# Supabase CLI 연결 메타데이터 (로컬 전용)
+supabase/.temp/

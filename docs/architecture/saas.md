@@ -16,7 +16,7 @@ User → Organization → Tenant → Control Plane → Job Queue → Worker Pool
 | 역할 | `users.role` = `operator`/`admin` (OWNER ≡ admin) | 조직 역할 (OWNER·EDITOR·VIEWER) |
 | 가입 | 허용 목록 1개 (24.3) | 초대·가입·플랜 |
 | 한도 | `app_settings.limits` 전역 | 고객별 Quota, `limits_override`, `persona_platform_settings` (36.4·39) |
-| GPU | `app_settings.active_worker` 하나 | 고객별 GPU 할당, 워커 풀·공정 선점 (36.4 V2) |
+| GPU | Execution Target(`local`/`cloud`) + 워커 등록부 하나 (`app_settings.default_execution_target`) | 고객별 GPU 할당, 워커 풀·공정 선점 (36.4 V2) |
 | 워커 | `worker_status` 등록부 + `target`·`provider` | 워커 풀 관리, 자동 시작·종료 (`GpuProvider.start/stop/idle_shutdown`) |
 | 프로필 | `app_settings.app_mode = 'personal'` | `saas` 값과 `capabilities`로 화면 켜기 |
 

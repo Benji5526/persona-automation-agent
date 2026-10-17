@@ -14950,7 +14950,13 @@ Instagram ─ Webhook (서명 검증) + 10분 안전망 Polling ─▶ n8n WF-01
 
 ### 56.2 Execution Target
 
-**Execution Target = 일을 실행하는 장소(워커 한 대).** 지금은 두 가지다.
+**세 개념을 분리한다. 하나의 설정으로 합치지 않는다.**
+
+| 개념 | 뜻 | 어디에 있나 | 예 |
+|---|---|---|---|
+| **Execution Target** | 일을 **어디서** 실행할지 | `content_jobs.execution_target`, `automation_jobs.execution_target` | `local`, `cloud` |
+| **Worker** | 실제 워커 **인스턴스** | `worker_status.id`, `automation_jobs.claimed_by` | `python:local-1`, `python:cloud-1` |
+| **GPU Provider** | 인프라를 **누가** 제공하나 | `worker_status.provider` | `local`, `runpod`, 앞으로의 공급자 |
 
 | Target | 위치 | 비고 |
 |---|---|---|
@@ -14960,14 +14966,17 @@ Instagram ─ Webhook (서명 검증) + 10분 안전망 Polling ─▶ n8n WF-01
 - **GPU 모델을 어디에도 고정하지 않는다.** 모델명·VRAM은 설정값이 아니라 **워커가 ComfyUI `/system_stats`로 보고**한다 (`worker_status.gpu`). "RTX 5080"이라고 적었는데 실제는 3070인 일이 생기지 않게 한다. 문서·코드·테스트의 `rtx5080` 표기는 GPU 중립 이름(`python:local-1`)으로 바꾼다 (PRD·TECH_DESIGN 본문은 그대로 두고 이 장이 우선한다).
 - **워커 등록부는 기존 `worker_status`** (`id`, `kind`, `comfyui_ok`, `gpu`, `queue_size`, `last_seen_at`, `models`)다. 칸 두 개만 더한다: `target`(`local` / `cloud`), `provider`(`local` / `runpod` …). 워커가 상태 보고(`report_worker_status`)에 함께 보낸다.
 - **GPU Provider(누가 빌려주나)는 메타데이터와 생명주기 어댑터**다. Python 쪽 인터페이스는 시그니처만 둔다: `status()`, `start()`, `stop()`, `idle_shutdown()`. 지금은 시작·종료를 사람이 직접 하므로 `LocalProvider`는 아무것도 하지 않고, `RunpodProvider`는 만들지 않는다. 필요한 상태 표시(온라인·꺼짐·사용 가능)는 `worker_status.last_seen_at`·`comfyui_ok`로 이미 된다.
-- **Frontend는 GPU 인프라를 모른다.** Lovable이 아는 것은 워커 목록(`target`·`provider`·온라인 여부)과 활성 워커 하나뿐이다. ComfyUI·브릿지 주소, 키, Pod ID는 DB에도 Frontend에도 두지 않는다 (워커의 `.env`와 n8n Credential에만 있다).
-- Python 실행 인터페이스(`POST /v1/jobs`, Job 선점, 결과 등록)는 **Local이든 Cloud든 같다.** 애플리케이션은 어느 쪽인지 몰라도 된다.
+- **Frontend는 GPU 인프라를 모른다.** Lovable이 아는 것은 워커 목록(`target`·`provider`·온라인 여부·GPU·VRAM·설치된 모델/LoRA)과 기본 Target뿐이다. ComfyUI·브릿지 주소, 키, Pod ID, JWT 서명 키, SNS 토큰은 DB에도 Frontend에도 두지 않는다 (워커의 `.env`와 n8n Credential에만 있다).
+- Python 실행 인터페이스(Job 선점, 맥락 조회, 결과 등록)는 **Local이든 Cloud든 같다.** 구현을 둘로 나누지 않는다.
 
-**활성 워커 선택** ⚙️: `app_settings.active_worker`(워커 `id` 문자열 또는 `null`)로 정한다. 설정 화면의 "Execution Target ◉ Local ○ Cloud"는 이 값을 바꾸는 admin 동작이다 (`update_app_setting`).
+**Target은 Content Job 생성 시점에 고정된다** ⚙️ (D3).
 
-- `null`이면 제한 없음 (지금 동작과 같다, 기본값). 값이 있으면 **그 워커만 generation Job을 선점할 수 있다.** 다른 워커의 `claim_next_automation_job`·`claim_automation_job`(generation)은 **빈 결과**다. 선점은 DB 함수가 강제한다 (워커 코드가 아니라).
-- Job에 Target을 고정하지 않는다. 대기 중인 Job은 **활성 워커가 바뀌면 그 워커가 가져간다.** 그래서 "꺼진 Target에 갇힌 Job"을 옮기는 별도 동작이 필요 없다.
-- 활성 워커가 오프라인(`last_seen_at` 90초 초과)이면 generation Job은 `pending`으로 기다린다. Lovable이 "Cloud GPU가 꺼져 있어요 · 대기 3건" 배너를 보여준다 (생성 대기 시간 알림은 37.6의 큐 적체 규칙).
+- 기본값은 `app_settings.default_execution_target`(기본 `local`)이고, `create_content_job(p_execution_target)`으로 그 Job만 다르게 지정할 수 있다. `local`·`cloud` 외의 값은 거부한다.
+- `automation_jobs.execution_target`은 **상위 Content Job에서 상속**한다. 상속 트리거가 상위 값으로 덮어쓰므로 두 값이 조용히 어긋날 수 없다.
+- **기본 Target을 바꿔도 이미 만들어진 Job은 움직이지 않는다.** 이동은 명시적 관리 동작 하나뿐이다: `move_pending_jobs_to_target(p_target)` (admin). **대기 중(`pending`) generation Job만** 옮기고, `processing`·`done`·`failed`·`cancelled`는 건드리지 않는다. 옮긴 건수를 돌려주고 감사 이벤트(`EXECUTION_TARGET_JOBS_MOVED`)를 남긴다. 기본값 변경이 이 함수를 자동으로 부르지 않는다.
+- **선점은 DB가 강제한다** (워커 코드가 아니라): generation Job은 `job.execution_target`이 **인증된 워커의 Target과 같을 때만** 선점된다. 워커의 Target은 요청 본문이 아니라 서버가 정한다 — Worker JWT의 클레임(56.5), 없으면 `worker_status`의 보고값, 그것도 없으면 `local`로 본다. 조이는 방향은 cloud다: cloud Job은 `target='cloud'`로 등록·인증된 워커만 가져갈 수 있고, cloud 워커는 local Job을 가져갈 수 없다. 다른 job_type(`prompt`·`caption`·`publish` …)은 영향 없다.
+- **자동 failover는 없다.** 실패한 단계를 다른 Target에서 다시 돌리려면 `retry_automation_job(p_job_id, p_execution_target)`으로 **명시**해야 한다 (예: local에서 `MODEL_NOT_FOUND` → cloud로 재시도). 이때 상위 Content Job의 Target도 함께 옮겨 두 값을 맞춘다.
+- Target의 워커가 오프라인(`last_seen_at` 90초 초과)이면 그 Job은 `pending`으로 기다린다. 실패가 아니다. Lovable이 "Cloud Worker가 꺼져 있어요 · 대기 3건" 배너를 보여준다 (생성 대기 시간 알림은 37.6의 큐 적체 규칙).
 
 ### 56.3 pull 방식 디스패치 ⚙️
 
@@ -14981,68 +14990,197 @@ Instagram ─ Webhook (서명 검증) + 10분 안전망 Polling ─▶ n8n WF-01
 ```
 
 - **브릿지의 나머지(검증·ComfyUI·업로드·Asset 등록·Heartbeat·회수)는 그대로다.** 추가되는 것은 위의 가져가기 루프와 설정 `PULL_JOBS`·`PULL_INTERVAL_SEC` 뿐이다.
-- **push는 호환용으로 남긴다** (`POST /v1/jobs`와 WF-003). 로컬 개발·기존 테스트가 그대로 돈다. pull이 켜진 워커는 WF-003이 보내는 요청도 같은 DB 선점을 거치므로 중복 실행이 없다.
+- **Worker Pull이 기본 실행 경로다** (D2). push(`POST /v1/jobs`와 WF-003)는 **호환용 local fallback**으로만 남는다: WF-003은 두 트리거가 `disabled`로 들어오고, `execution_target = local`인 Job만 처리한다. **Cloud는 Worker Pull만 쓴다.** pull이 켜진 워커는 WF-003이 보내는 요청도 같은 DB 선점을 거치므로 중복 실행이 없다.
 - **pull을 쓰면 브릿지는 인터넷에서 오는 요청을 받을 필요가 없다.** Cloud Pod는 Supabase로 나가는 연결만 있으면 되고, Cloudflare Tunnel·Access·`X-Bridge-Token` 노출을 클라우드에서는 쓰지 않는다 (브릿지는 Pod 안 `127.0.0.1`).
-- Content Job → 프롬프트 생성(WF-002) → generation Job 생성까지는 지금과 같고 **n8n 구성은 바뀌지 않는다.** pull을 쓰는 환경에서 WF-003(push)은 꺼 둘 수 있다. 수동 [생성]과 자동 생성은 **같은 경로**(Content Job → WF-001 → generation Job → 활성 워커)를 쓴다.
+- Content Job → 프롬프트 생성(WF-002) → generation Job 생성까지는 지금과 같고 **n8n 구성은 바뀌지 않는다.** pull을 쓰는 환경에서 WF-003(push)은 꺼 둘 수 있다. 수동 [생성]과 자동 생성은 **같은 경로**(Content Job → WF-001 → generation Job → 활성 워커)를 쓴다. 단, 프롬프트가 이미 있는 주문의 `queued → generation Job` 구간은 **n8n 없이 DB 디스패처가 맡을 수 있다** (56.10).
 - 지연: 가져가기 간격(기본 5초)만큼 시작이 늦다. 개인 사용에는 허용 범위다.
 
 **수동 [생성]** ⚙️: Lovable은 Python API를 부르지 않는다. [생성] = `create_content_job` RPC → 위 경로 (결정: 브라우저에 브릿지 토큰·주소를 둘 수 없다, 15.6·18.1). 프롬프트를 직접 쓰면 LLM 단계(WF-002)를 건너뛴다 (20.8).
 
-### 56.4 DB 변경 (`0010`, 추가만) ⚙️
+### 56.4 DB 변경 (`0010`, `0011`) ⚙️
+
+적용한 마이그레이션(0001~0009)은 고치지 않는다. `0010`은 배포되지 않았으므로 이 설계에 맞게 **다시 작성**했다 (새 번호를 만들지 않는다).
+
+**`0010_execution_targets.sql`**
 
 | 변경 | 내용 |
 |---|---|
 | `app_settings.app_mode` | `'personal'` (기본). 읽기 전용 표시용 |
-| `app_settings.active_worker` | `null`(기본) 또는 워커 id. admin이 `update_app_setting`으로 바꾼다. **등록되지 않은(`worker_status`에 없는) id는 거부** |
-| `worker_status.target`, `provider` | nullable 두 칸 + CHECK (`target in ('local','cloud')`). `report_worker_status`가 `info`의 `target`·`provider`를 저장 |
-| `claim_automation_job`, `claim_next_automation_job` | generation Job에 한해 `active_worker`가 있고 `p_worker`와 다르면 **빈 결과**. 다른 job_type(`prompt`·`caption`·`publish` …)은 영향 없음 |
-| `get_app_settings` | 반환 키에 `active_worker`·`app_mode` 추가 (admin) |
+| `app_settings.default_execution_target` | `'local'`(기본). admin이 `update_app_setting`으로 바꾼다. `local`·`cloud`만 허용. **구 설계의 `active_worker`는 제거했고 대체 설정을 새로 만들지 않는다** |
+| `content_jobs.execution_target` | `not null`, 기본값은 `private.default_execution_target()`, CHECK (`local`·`cloud`). authenticated의 컬럼 단위 INSERT·UPDATE 권한(0005)에 넣지 않으므로 **직접 INSERT로는 Target을 고를 수 없다** — 변경은 RPC로만 |
+| `automation_jobs.execution_target` | nullable + CHECK. 상속 트리거가 상위 Content Job의 값으로 덮어쓴다 (어긋날 수 없다). 선점 질의에 맞춘 부분 인덱스 추가 |
+| `worker_status.target`, `provider` | nullable 두 칸 + CHECK. `report_worker_status`가 `info`의 `target`·`provider`를 저장 |
+| `create_content_job` | 인자 `p_execution_target` 추가 (13번째). `null`이면 설정 기본값, 그 외에는 검증 후 사용 |
+| `create_automation_job` | generation Job이 상위 Content Job의 Target을 그대로 받는다 |
+| `claim_automation_job`, `claim_next_automation_job` | generation Job은 Job의 Target과 **서버가 정한** 워커 Target이 같을 때만 선점된다 |
+| `move_pending_jobs_to_target(p_target)` | admin. 대기 중 generation Job만 이동, 건수 반환, 감사 이벤트 |
+| `retry_automation_job(p_job_id, p_execution_target)` | 실패한 단계를 **명시한** Target으로 재시도 (자동 failover 없음) |
+| `get_app_settings` | 반환 키에 `default_execution_target`·`app_mode` (admin) |
 
-적용한 마이그레이션(0001~0009)은 고치지 않는다. 모든 칸은 기본값으로 **지금 동작을 그대로 유지**한다 (`active_worker = null`).
+시그니처가 바뀐 `create_content_job`·`retry_automation_job`은 예전 시그니처를 지우고 다시 만든 뒤 EXECUTE 권한을 다시 부여한다 (오버로드를 남기면 예전 경로가 Target 로직을 건너뛴다). 0003·0009 **파일**은 고치지 않는다.
 
-### 56.5 클라우드 워커 배포와 능력 검사
+**`0011_worker_auth.sql`** — 56.5 참고.
 
-- **배포**: Pod 안에서 브릿지와 ComfyUI를 같이 띄운다 (Docker 이미지). `COMFY_URL=http://127.0.0.1:8188` (브릿지 설정 검증이 localhost만 허용하므로 Cloud에서도 ComfyUI가 밖으로 열리지 않는다). 시작·종료는 사람이 한다. `idle_shutdown`은 시그니처만 둔다.
-- **`.env`**: `EXECUTION_TARGET=cloud`, `WORKER_ID=python:runpod-1`, `PULL_JOBS=true`, `SUPABASE_URL`, `SUPABASE_SECRET_KEY`. 로컬은 `EXECUTION_TARGET=local`, `WORKER_ID=python:local-1`.
-- **Workflow 능력 검사**: Registry의 Workflow에 선택 칸 `requirements.min_vram_gb`를 둔다. 워커가 자기 VRAM(`/system_stats`)보다 큰 요구의 Workflow를 받으면 ComfyUI를 부르기 전에 `WORKFLOW_UNSUPPORTED_ON_TARGET`(재시도 없음)으로 실패한다. 예: 3070 8GB에서 약 16GB의 `flux1-dev-fp8`. 이때 Operator는 활성 워커를 Cloud로 바꾸고 [실패한 단계만 다시 실행]한다.
-- **모델·LoRA는 Target마다 따로 설치**한다 (`worker_status.models`). Persona 설정의 모델 드롭다운은 **활성 워커의 목록**을 보여주고, 신원 LoRA가 없으면 경고한다. 자동 복사는 하지 않는다. 없으면 `MODEL_NOT_FOUND`/`LORA_NOT_FOUND`다.
+| 변경 | 내용 |
+|---|---|
+| `worker_credentials` | 발급한 자격의 대장: `jti`·`worker_id`·`target`·`provider`·`issued_at`·`expires_at`·`revoked_at`. 수명 ≤ 24시간 CHECK. RLS 켜고 정책 없음. **서명 키는 저장하지 않는다** |
+| `pa_worker` 역할 | `NOLOGIN`, 테이블 권한 없음. `authenticator`가 있으면(Supabase) 멤버로 추가 |
+| `private.worker_identity()` / `require_worker()` | JWT 클레임에서 신원을 읽고 자격 존재·폐기·만료(DB와 토큰 양쪽)·`worker_id`·`target` 일치를 확인 |
+| `private.worker_session_kind()` / `session_worker()` | **세션 종류**를 DB 역할로 정한다 (56.5). `pa_worker` → 유효한 자격 필수, `anon`·`authenticated` → 거부, 그 밖(service_role) → 신뢰 |
+| `private.scoped_job(job, processing?)` | Worker 세션은 **자기가 선점한 generation Job**만 볼 수 있다. 없는 Job과 남의 Job을 구분해 알려 주지 않는다 (둘 다 FORBIDDEN) |
+| `claim_*` | Worker 세션이면 `p_worker`를 무시하고 클레임의 신원·Target을 쓴다. **generation Job만** 선점한다. 깨진 자격은 빈 결과가 아니라 **오류**다 |
+| `private.lock_processing_job` (재정의) | 결과 보고(`complete`·`fail`·`register_asset`)와 `heartbeat`가 `locked_at`뿐 아니라 **`claimed_by`**도 확인한다. `locked_at`이 새도 다른 워커는 남의 Job에 쓸 수 없다 |
+| `log_execution`, `log_security_event`, `report_worker_status` (재정의) | Worker 세션은 자기 Job에만 로그를 쓰고, 보안 이벤트는 정해진 종류(`OUTPUT_UNEXPECTED`·`WORKER_AUTH_FAILED`·`API_AUTH_FAILED`)·`actor_type = python`·자기 Persona로만 쓰고, 상태 보고는 **자기 자신**(target·provider는 자격에서)만 쓴다 |
+| `worker_get_job_context(job_id)` | 실행에 필요한 것만: Job·Content Job·Persona 실행 설정(`visual_settings`·`content_rules`)·Persona Asset 참조·**이 Job이 입력으로 참조한** Asset·이미 등록된 Asset. **SNS 토큰·다른 Persona·무관한 Job·설정은 포함하지 않는다** |
+| `worker_get_input_asset(job_id, asset_id)` | 이 Job이 입력으로 참조한 같은 Persona의 Asset 하나. 아니면 null |
+| `issue_worker_credential` / `revoke_worker_credential` / `list_worker_credentials` | 발급·폐기·조회 (admin). 워커는 **자기 자격만** 폐기할 수 있다 |
+| `storage.objects` 정책 2개 | `pa_worker_read_inputs`(SELECT)·`pa_worker_write_results`(INSERT). UPDATE·DELETE 권한·정책 없음 (56.5 Storage 격리) |
 
-### 56.6 보안 (렌탈 GPU)
+### 56.5 Worker 인증과 Capability 검증
 
-- **클라우드 워커 전용 secret key를 따로 만든다.** 렌탈 머신에 키를 두는 위험이 있으므로 Pod를 끝내면 그 키를 폐기·교체한다 (15.6의 "n8n용·Python용 key 분리"를 Local용·Cloud용으로 한 번 더 나눈다). 근본 해결(워커가 서명 URL로만 Storage에 쓰기)은 Personal 범위 밖이다.
-- ComfyUI는 어느 Target에서도 `127.0.0.1`에만 열고 인터넷에 노출하지 않는다. pull에서는 브릿지도 밖으로 열 필요가 없다.
-- 로그에 비밀값을 남기지 않는다 (`redact`). Pod의 볼륨·로그에도 키를 남기지 않는다.
-
-### 56.7 Lovable 화면 (설정)
-
-설정에 **Execution Target** 카드를 둔다 (admin).
+**Cloud Worker는 `service_role`을 쓰지 않는다** (D5). 수명이 짧은 Worker JWT로 들어와 제한된 역할로 전환되고, 허용된 RPC만 실행한다.
 
 ```text
-Execution Target
- ◉ Local   python:local-1   ● 온라인   RTX 3070 · VRAM 8GB
- ○ Cloud   python:runpod-1  ○ 꺼져 있음   (마지막 보고 3시간 전)
-대기 중인 생성 3건 · 활성 워커가 꺼져 있으면 시작 후 자동으로 진행돼요.
+Cloud Worker → Worker JWT(role=pa_worker) → PostgREST → pa_worker → 허용된 RPC만
 ```
-- 목록은 `worker_status`(읽기)에서, 선택은 admin 설정 변경으로 한다. GPU 모델·VRAM은 워커가 보고한 값을 그대로 보여준다.
-- Lovable은 주소·키·Pod 정보를 받지도 보내지도 않는다.
 
-### 56.8 구현 순서
+- **클레임**: `worker_id`, `target`, `provider`, `jti`, `exp`, `role = pa_worker`. 수명 **24시간 이하**. 서버는 자격의 존재·폐기·만료·신원 일치·Target 일치를 매 호출마다 확인한다. 폐기하면 이후 모든 RPC가 실패하고 워커는 새 Job을 가져가지 않는다.
+- **신원은 요청 본문에서 오지 않는다.** `p_worker_target`·`p_provider`·`p_worker_id`를 믿지 않는다.
+- **서명 키는 소유자 PC에만 둔다.** `scripts/mint_worker_token.py`가 자격을 등록(`issue_worker_credential`)하고 토큰을 발급한다. **Cloud Pod에는 서명 키를 넣지 않는다.**
+- **Local Worker**는 Phase 0 동안 `WORKER_AUTH=secret_key`를 쓸 수 있다. `WORKER_AUTH=worker_jwt`도 같은 코드 경로로 동작하므로 Local과 Cloud가 한 구현으로 수렴한다. 구현을 둘로 나누지 않는다.
+- **Python의 인증 실패 처리**: 401·폐기·만료면 ① 새 Job 선점을 멈추고 ② 실행 중인 Job은 안전하게 멈추고(ComfyUI 작업을 지우고, DB의 Job은 Heartbeat가 끊겨 회수·재시도된다) ③ 프로세스에 정상 종료를 요청한다(uvicorn `should_exit`). 같은 자격으로 Supabase를 계속 두드리지 않고, 이미 거부된 자격으로 실패 보고를 되풀이하지 않는다. 가려진 보안 이벤트(`WORKER_AUTH_FAILED`)는 **시도만 한다** — 폐기·만료된 자격으로는 DB가 받지 않으므로 보통 워커 로그에만 남는다 (autonomous transaction이 없어 DB가 거부 사실을 스스로 기록할 수 없다). 발급·폐기는 DB에 감사 이벤트로 남는다. `42501`(허용 목록 밖 RPC 호출)도 자격 거부와 같은 신호로 다루므로 JWT 모드 워커는 `pa_worker`가 못 부르는 RPC(예: `sync_workflow_registry`)를 부르지 않는다.
 
-| 단계 | 내용 |
+**세션 종류 — 신원이 깨져도 `local`로 폴백하지 않는다** ⚙️ (최종 게이트에서 구멍을 발견해 고쳤다)
+
+DB 역할은 PostgREST가 **검증된 JWT**의 `role` 클레임으로 정한다(`SET LOCAL ROLE`). 클라이언트가 바꿀 수 없다. 모든 워커 함수는 이 역할로 세션을 구분한다.
+
+| DB 역할 | 종류 | 동작 |
+|---|---|---|
+| `pa_worker` | worker | **유효한 자격이 반드시 있어야 한다.** 없거나 폐기·만료·불일치면 `FORBIDDEN`(빈 결과가 아니다). 자기가 선점한 `generation` Job만 다루고, Target·신원은 클레임이 정한다 |
+| `anon`, `authenticated` | untrusted | 워커 함수는 EXECUTE도 없고 함수 안에서도 한 번 더 거부한다 |
+| `service_role`, 소유자 연결 | trusted | 로컬 Phase 0. 전권 키이므로 `p_worker`를 믿는다 |
+
+**service_role 경로의 의도적 완화 (F0 충돌 기록).** 보호 대상인 F0 테스트(`test_concurrent_generation_job_claim_has_one_winner`)는 `worker_status`에 **등록되지 않은** service_role 워커가 local generation Job을 선점하는 것을 요구한다. 등록을 필수로 하면 이 테스트가 깨진다. 우리는 이 테스트를 고치지 않고 service_role 경로를 이렇게 둔다: 등록되지 않은 워커는 **`local`로만** 취급한다 (cloud Job은 못 가져가고, 이름을 `cloud`로 지어도 같다). 근거: service_role은 모든 테이블을 읽고 쓰는 전권 키이고 `report_worker_status`로 스스로 등록할 수 있어서, 등록을 강제해도 보안이 늘지 않는다. **실제 경계는 `pa_worker` 경로이고 거기서는 자격이 필수다.** 이 판단은 소유자가 받아들여야 하는 결정이다 (56.9 #9).
+
+**Storage 격리** ⚙️ — 워커는 **자기가 지금 선점한 generation Job** 기준으로만 Storage에 닿는다. `storage.objects` RLS 정책 두 개가 판단한다.
+
+| 접근 | 허용 범위 |
 |---|---|
-| **A** | 문서·CLAUDE.md·Skill 개정, `rtx5080` 표기 일반화 (코드 없음) — 이 장과 `docs/architecture/*` |
-| B | 마이그레이션 `0010`과 DB 테스트 (선점 gating, `active_worker` 검증, 다른 job_type 영향 없음) |
-| C | 브릿지: `EXECUTION_TARGET`·`WORKER_ID`·`PULL_JOBS`, pull 루프, 상태 보고 필드, `min_vram_gb` 검사, 기본 `WORKER_ID`·테스트 ID를 GPU 중립으로 |
-| D | Lovable 설정 카드(Phase 프롬프트), n8n은 WF-003(push)을 pull 환경에서 끄는 안내만 |
-| E | 클라우드 이미지(브릿지 + ComfyUI)와 런북, 클라우드 전용 키 |
+| 읽기 | 선점한 Job이 `input_images`로 **참조한** 파일 하나하나 (`asset_id`는 `media`, `persona_asset_id`는 `persona-private`). 경로를 추측해도·같은 Persona의 다른 파일도·목록 조회(list)도 그 밖은 보이지 않는다 |
+| 쓰기 | `media`의 `persona/{선점한 Job의 Persona}/assets/{uuid}[_thumb].{png|jpg|webp}`만. 이미 등록된 Asset 경로는 불가. 경로 조작(`..`·중첩·대문자 UUID·다른 확장자)은 정규식에서 막힌다 |
+| 없음 | `UPDATE`·`DELETE` 권한 → 덮어쓰기·삭제 불가. 같은 이름을 다시 쓰면 유일 제약이 막는다. `x-upsert`는 JWT 모드에서 보내지 않는다 |
+| 끝남 | Job이 끝나거나(`done`·`failed`) 회수되거나 자격이 폐기·만료되면 접근도 즉시 끝난다 |
 
-**남은 사전 조건은 Phase 0이다**: Supabase 새 프로젝트, 생성 PC(이 PC는 SDXL 계열), ComfyUI 실행 (PHASE0.md). 다른 세션이 시작한 pull 루프 코드(`pull_loop`, `PULL_JOBS`)는 이 장의 56.3을 따른다. 주석의 "Solo 프로필"은 **Personal**로 통일한다.
+한계: 경로에 **Job id가 없다** (15.5의 `persona/{id}/assets/{asset_id}`, 공개 URL과 테스트가 이 형태에 의존). 그래서 쓰기 경계는 "선점한 Job의 **Persona**"이고 Job 단위가 아니다. 같은 워커가 같은 Persona의 Job을 둘 쥐고 있으면 한쪽 경로에 올리고 다른 쪽에 등록할 수 있다 — 그래도 `register_asset`은 선점한 Job에만, 그 Job의 Persona 경로에만 등록되고, 남이 쥔 Job에는 등록되지 않는다. 또 호스팅 **Storage API**가 `pa_worker` 역할로 이 정책을 실제로 적용하는지는 로컬에서 검증할 수 없다 (아래 스파이크 결과).
+
+**Capability 검증 (실행 전)** — Workflow가 이 워커에서 실제로 돌 수 있는지 ComfyUI를 부르기 **전에** 확인한다.
+
+```text
+Workflow → 구조 + 고정적으로 요구하는 파일   (registry의 requirements)
+Persona  → 모델·LoRA 선택                    (visual_settings)
+Worker   → 실제 설치 상태                    (/object_info, /system_stats)
+```
+
+- Registry의 선택 블록: `requirements: { min_vram_gb, required_files: [{node, input, file}] }`. **`required_models`·`required_loras`는 두지 않는다** — 모델·LoRA 선택은 Persona의 몫이다.
+- 검사: VRAM(`/system_stats`), Workflow 고정 파일, Persona가 고른 모델·LoRA(`/object_info`).
+- 실패 코드: `WORKFLOW_UNSUPPORTED_ON_TARGET`(VRAM 부족·고정 파일 없음), `MODEL_NOT_FOUND`, `LORA_NOT_FOUND`.
+- **Capability 실패는 재시도하지 않는다** (같은 Target에서 결과가 같다). 실행 중에 터지는 `OUT_OF_MEMORY`는 일시적 오류로 재시도·축소 대상이다 — 둘을 섞지 않는다. Operator는 `retry_automation_job(job_id, 'cloud')`로 다른 Target에 명시 재시도한다.
+- 모델·LoRA는 Target마다 따로 설치한다 (`worker_status.models`). 자동 복사는 하지 않는다.
+
+### 56.6 Cloud 보안
+
+- **Cloud Pod에 두지 않는 것**: `SUPABASE_SERVICE_ROLE_KEY`/`SUPABASE_SECRET_KEY`, JWT 서명 키, `SNS_ACCESS_TOKEN`·`SNS_REFRESH_TOKEN`. 브릿지는 `WORKER_AUTH=worker_jwt`일 때 이들이 환경에 있으면 **기동을 거부**한다.
+- Pod에는 Worker JWT와 공개 anon 키만 있다. 통신은 **나가는 HTTPS뿐**이다 — 인바운드가 없으므로 Cloudflare Tunnel·Access가 기본 구조에 필요 없다.
+- ComfyUI는 어느 Target에서도 `127.0.0.1:8188`에만 열고 인터넷에 노출하지 않는다 (브릿지 설정 검증이 localhost만 허용한다).
+- 로그에 비밀값을 남기지 않는다 (`redact`). Pod의 볼륨·로그에도 남기지 않는다.
+- **Cloud 실행은 다음이 모두 끝나기 전까지 켜지 않는다**: Worker JWT, 제한 RPC, 자격 폐기, Storage 격리, 보안 테스트(로컬 DB 절반 ✅) **그리고 호스팅 검증(56.8 H) ⬜**. 구조는 `cloud`를 지원하지만 그 전에는 cloud Job이 조용히 실행되지 않는다 (cloud 워커가 인증될 수 없으므로 `pending`으로 남는다).
+- **배포**: Pod 안에서 브릿지와 ComfyUI를 같이 띄운다 (Docker 이미지). 시작·종료는 사람이 한다. 환경은 `deploy/cloud-worker.env.example`의 변수**만** 쓴다 (허용 목록). n8n 콜백(`N8N_CALLBACK_*`)은 두지 않는다 — 결과는 DB 상태로 이미 반영되고 WF-004에는 5분 안전망이 있어 캡션 단계가 최대 5분 늦을 뿐이다.
+- **Capability 요구사항은 배포 설정이다.** 레지스트리의 `requirements`는 대상 GPU에서 측정한 뒤에 채운다 (현재 5개 Workflow 모두 `UNSET` — 측정 방법은 `python scripts/report_capability_requirements.py`). `UNSET`이면 VRAM 사전 검사를 건너뛰고 실행 중 `OUT_OF_MEMORY`(재시도·축소)가 대신 잡는다. 값을 추측해서 채우지 않는다.
+
+### 56.7 Lovable 화면
+
+프런트엔드는 Supabase만 부른다. GPU 주소·키·Pod 정보·서명 키·SNS 토큰을 받지도 보내지도 않는다. 자세한 화면 명세는 `docs/lovable_master_prompt.md`에 있다.
+
+| 화면 | 내용 |
+|---|---|
+| 설정 (admin) | **Execution Target** ◉ Local ○ Cloud → `default_execution_target`. 바로 아래 고정 안내: "기본 Target을 변경해도 이미 생성된 Job은 이동하지 않습니다." |
+| 설정 (admin) | **[대기 중인 Job을 현재 Target으로 이동]** — 영향 건수 표시 → confirm → `move_pending_jobs_to_target` → 이동 건수 토스트. 감사 이벤트가 남는다 |
+| 설정/자동화 (admin) | **Worker Credentials**: worker_id·target·provider·만료·폐기 여부·[폐기]. **토큰 값은 저장되지 않아 보여줄 수 없다** |
+| 자동화 | **Worker 상태**: Worker·Target·Provider·Online/Offline·GPU·VRAM·설치된 모델·설치된 LoRA (모두 보고값) |
+| 콘텐츠 생성 | **Execution Target** 선택 (기본값 = 현재 기본 Target), 고정된다는 안내, Capability 경고(조기 경고일 뿐 — 실행 시점 검증이 최종) |
+| Job 상세 | Target·Worker·Provider·상태. Target 워커가 오프라인이면 "대기 중"으로 분명히 표시(실패 아님). 실패한 단계에 [다른 Target으로 재시도] |
+
+Personal Edition이므로 조직·팀·과금·구독·테넌트 관리·고객별 GPU 할당·다중 리전 화면은 만들지 않는다.
+
+### 56.8 구현 상태
+
+| 단계 | 내용 | 상태 |
+|---|---|---|
+| A | 문서·CLAUDE.md·Skill 개정, GPU 표기 일반화 | ✅ |
+| B | `0010` 재작성 + DB 테스트 (Target 고정·상속·gating·이동·명시 재시도) | ✅ |
+| C | `0011` + Worker 인증·권한 격리 테스트 | ✅ (DB 절반 검증) |
+| D | 브릿지: `WORKER_AUTH` 추상화, `worker_get_job_context`, 인증 실패 시 정상 종료, Target·Provider 보고 | ✅ |
+| E | Capability 검증 (`min_vram_gb`·`required_files`, 재시도 불가) | ✅ |
+| F | n8n WF-003을 기본 비활성 + local 전용 fallback으로 | ✅ |
+| G | Lovable 명세 갱신 | ✅ |
+| H | Storage 격리(DB 정책): 읽기는 Job이 참조한 파일만, 쓰기는 선점한 Job의 Persona 경로만, UPDATE·DELETE 없음 | ✅ (로컬 SQL 수준 검증) |
+| H2 | 선점·결과·로그·상태·보안이벤트의 **Worker 범위 강화**: 깨진 자격은 오류, generation만, 선점자만 | ✅ |
+| **I** | **호스팅 검증**: PostgREST가 `role = pa_worker`를 받아 `authenticator` → `pa_worker`로 전환하는지, Storage API가 그 역할로 정책을 적용하는지 → `python scripts/smoke_worker_jwt.py` | ⬜ M0 필요 (NOT VERIFIED) |
+| J | Cloud 이미지·런북, Capability `requirements` 측정값 채우기 | ⬜ |
+
+**JWT 역할 스파이크 결과 (2026-10-07)**
+
+- **DB 절반 — 검증함.** `pa_worker`로 전환한 실제 세션에서: 신원은 클레임에서만 오고, 만료·폐기·Target 불일치·신원 불일치·클레임 누락은 모두 **오류**로 거부되며, 테이블 직접 접근·허용 목록 밖 RPC는 `42501`이다. 권한 표면은 실제 DB에서 꺼내 정확히 비교한다 (`tests/db/test_permission_surface.py`: public RPC 12개 + 정책 술어 2개, 테이블 권한은 `storage.objects`의 SELECT·INSERT뿐).
+- **플랫폼 절반 — 검증하지 못했다.** 실제 Supabase 프로젝트가 없다. 로컬 테스트 환경에는 `authenticator` 역할이 없고, `0011`은 `authenticator`가 있을 때만 `grant pa_worker to authenticator`를 실행한다. 아래 세 가지를 호스팅에서 확인해야 한다 — 실제 프로젝트에서 `scripts/smoke_worker_jwt.py`가 점검한다 (스크립트의 판정 로직은 모의 서버로 검증했다. 그것이 호스팅 검증은 아니다):
+  1. PostgREST가 `role = pa_worker` JWT를 받아 그 역할로 전환하는가.
+  2. 프로젝트의 **JWT 서명 설정**이 우리가 만든 HS256 토큰을 받아들이는가. Supabase가 비대칭 JWT Signing Keys만 쓰고 레거시 HS256 secret을 끈 프로젝트에서는 `mint_worker_token.py`의 토큰이 거부될 수 있다 (레거시 secret을 유지하거나 직접 가져온 서명 키로 서명해야 한다).
+  3. Storage API가 `pa_worker` 역할로 `storage.objects` 정책을 적용하는가 (버킷 조회에 `storage.buckets` SELECT가 필요하면 그 권한 하나만 새 마이그레이션으로 더한다).
+- 막히면 정확한 사유를 기록하고 승인된 fallback을 쓴다. **`service_role`로 대체하지 않는다.** 이 확인이 끝나기 전까지 Cloud는 켜지 않는다.
 
 ### 56.9 확정한 결정 (2026-10-07)
 
 | # | 결정 | 이유 |
 |---|---|---|
-| 1 | 수동 [생성]은 `create_content_job` RPC → n8n → 활성 워커. Lovable → Python 직접 호출은 만들지 않는다 | 비밀 노출 규칙, 수동·자동이 같은 경로 |
-| 2 | 디스패치는 **pull**, push는 호환용 유지 | 클라우드 Pod에 맞고 inbound가 필요 없다 |
-| 3 | OWNER ≡ `users.role = 'admin'`, DB 값 변경 없음 | RPC 체크·테스트·SaaS 확장 매핑이 그대로 |
-| 4 | Local = 이 PC(RTX 3070 8GB), Cloud = Runpod 하나 | 큰 모델은 Cloud, 능력 검사로 사고 방지 |
+| 1 | 수동 생성과 AI 생성은 **같은 파이프라인**: Content Job → Automation Job → Worker Pull → Python → ComfyUI → Asset. Lovable → Python/ComfyUI 직접 호출은 만들지 않는다 | 비밀 노출 규칙, 경로 하나로 관측·복구 |
+| 2 | 디스패치는 **Worker Pull**이 기본. push(WF-003)는 기본 비활성 local fallback | 클라우드 Pod에 맞고 인바운드가 필요 없다 |
+| 3 | **Target·Worker·Provider는 별개 개념**. 하나의 `active_worker` 설정으로 합치지 않는다 | 어디서/누가/무엇으로를 섞으면 Cloud 전환과 권한 설계가 모두 꼬인다 |
+| 4 | **Target은 Job 생성 시점에 고정**. 기본값 변경은 기존 Job을 옮기지 않고, 이동은 명시적 관리 동작 | 실행 중인 작업이 설정 변경으로 흔들리지 않는다 |
+| 5 | 자동 failover 없음. Target 변경 재시도는 명시 | 조용한 비용 발생·무한 전환을 막는다 |
+| 6 | Capability 실패는 **재시도하지 않는다**. 실행 중 OOM과 구분한다 | 같은 Target에서 결과가 같다 |
+| 7 | Cloud Worker는 `service_role`을 쓰지 않고 제한된 Worker JWT로만 붙는다 | 렌탈 머신에 전권 키를 두지 않는다 |
+| 8 | OWNER ≡ `users.role = 'admin'`, DB 값 변경 없음 | RPC 체크·테스트·SaaS 확장 매핑이 그대로 |
+| 9 | **service_role 경로(Phase 0)에서는 등록되지 않은 워커도 local Job을 선점한다.** `pa_worker` 경로는 자격이 필수다. **소유자가 받아들여야 하는 결정** (F0 테스트와의 충돌 기록, 56.5) | 보호 대상 F0 테스트가 이를 요구한다. service_role은 전권이라 등록 강제가 보안을 늘리지 않는다. 조이는 방향(cloud)은 이미 막혀 있다 |
+| 10 | **`pa_worker` 세션에서 신원이 깨지면 오류**다. 빈 결과·`local` 폴백이 아니다 | 폴백하면 폐기된 워커가 local Job을 가져갈 수 있었고, 워커가 거부 사실을 모르고 계속 두드렸다 |
+| 11 | Worker 세션은 **generation Job만, 자기가 선점한 것만** 다룬다 (선점·heartbeat·결과·로그·입력·Storage 모두) | `locked_at`이 새도, 다른 Job 종류를 id로 집어도 남의 일을 건드릴 수 없다 |
+| 12 | 호스팅 JWT 역할 매핑과 Storage API 적용은 **외부 배포 게이트**다. 통과하기 전에 Cloud를 켜지 않는다 | 로컬에서 검증할 수 없다. 통과한 척하지 않는다 |
+
+### 56.10 Local 디스패처: DB 함수 + pg_cron (`0012`) ⚙️
+
+**빈 칸이었던 것.** `create_content_job`이 만든 `queued` Content Job을 generation Job으로 바꾸는 주체가 n8n(WF-001·002)뿐이어서, n8n이 없으면 주문이 `queued`에서 멈췄다 (2026-10-07 로컬 E2E는 이 구간을 SQL로 대신했다).
+
+**결정 (소유자, 2026-10-07).** Local-Only MVP의 이 구간은 **DB 함수 + pg_cron**이 맡는다. n8n은 이 구간에 필요하지 않다. WF-001·002 파일은 그대로 두고 비활성 상태로 둔다(나중에 n8n을 다시 쓸 수 있다).
+
+```text
+pg_cron ─ 10초마다(미지원 시 1분) ─▶ public.dispatch_queued_content_jobs(p_limit = 10)
+   queued Content Job (프롬프트 있음, Persona active, 예약 시각 도래)
+      └▶ claim_content_job            queued → generating
+      └▶ create_automation_job        generation:{content_job_id}:{run_number}, worker = python
+      └▶ execution_logs               step DISPATCH, service supabase
+   이후는 그대로: Worker Pull(claim_next_automation_job) → Python → ComfyUI → Asset
+```
+
+| 항목 | 규칙 |
+|---|---|
+| 처리 대상 | `status = 'queued'` · `prompt` 또는 `prompt_parts`가 있음 · Persona `active` · `scheduled_at`이 비었거나 도래. **프롬프트가 없는 주문은 건드리지 않는다** (LLM이 써야 하므로 WF-002의 몫) |
+| 원자성 | 선점과 Job 생성은 한 하위 트랜잭션이다. 둘째가 실패하면 첫째도 되돌아가 `queued`로 남는다 → **`generating`인데 Job이 없는 고아 상태가 생기지 않는다** |
+| 멱등·중복 | 키는 기존 규칙 그대로 `generation:{content_job_id}:{run_number}`. 재시도·재생성(`run_number + 1`)은 새 키로 새 Job이 된다. 새 중복 방지 체계를 만들지 않았다 |
+| 동시 실행 | `FOR UPDATE OF c SKIP LOCKED` + 선점의 `where status = 'queued'` + 멱등 키. 동시에 두 번 돌아도 Content Job당 Job은 정확히 하나다 |
+| 배치 | 한 번에 최대 `p_limit`(기본 10, 1~100). 한 건의 오류가 다음 건을 막지 않는다 |
+| Target·Workflow | 디스패처는 **고르지 않는다.** Target은 Content Job에서 `create_automation_job`이 그대로 상속하고, Workflow·파라미터는 비워 두어 브릿지가 Content Job·Persona에서 정한다 (56.2, 13.6) |
+| 정지 | `app_settings.emergency_stop_all`(값이 `false`가 아니면) 또는 `generation_enabled`(값이 `true`가 아니면)이면 **아무것도 하지 않는다**(fail closed). **두 키는 아직 DB에 없다**(M7 설계, 32.6). 디스패처는 만들지 않고 있으면 존중한다 |
+| 오류 | 삼키지 않는다: `system_errors`(service `dispatcher`)에 남기되 같은 Persona·원인은 1시간에 한 줄. 일일 한도(`RATE_LIMITED`)는 `policy`, 나머지는 `unknown`. 한도에 걸리면 그 회차는 멈추고 다음 주기에 다시 본다. **Worker 쪽 실패(`MODEL_NOT_FOUND`, `OUT_OF_MEMORY` …)는 다루지 않는다** |
+| 권한 | `service_role`과 pg_cron(postgres)만 실행한다. `anon`·`authenticated`·`pa_worker`는 실행할 수 없다 (`tests/db/test_permission_surface.py`가 고정). `SECURITY DEFINER`, `search_path = ''` |
+| 행위자 | 상태 전이 기록의 `actor_type = 'system'` |
+
+**한계.** 브라우저는 이 함수를 부를 수 없다 — Lovable은 `create_content_job`만 부르고 디스패치를 기다린다 (최대 한 주기). `queued`가 한 주기 이상 지속되면 화면은 원인 후보를 안내한다: 프롬프트가 없는 주문(LLM 필요), 비활성 Persona, 예약 시각, 일일 한도(`system_errors`의 `dispatcher`), 정지 스위치.
+

@@ -14,6 +14,7 @@ from typing import Any, Protocol
 
 import httpx
 
+from app.config import auth_headers
 from app.errors import DbError
 
 Row = dict[str, Any]
@@ -23,6 +24,8 @@ class Repository(Protocol):
     async def claim_job(self, job_id: str, worker: str) -> Row | None: ...
     async def claim_next_job(self, job_type: str, worker: str) -> Row | None: ...
     async def get_job(self, job_id: str) -> Row | None: ...
+    async def get_job_context(self, job_id: str) -> Row: ...
+    async def get_input_asset(self, job_id: str, asset_id: str) -> Row | None: ...
     async def heartbeat(self, job_id: str, locked_at: str) -> bool: ...
     async def complete(self, job_id: str, locked_at: str, result: dict) -> bool: ...
     async def fail(self, job_id: str, locked_at: str, error_type: str, error_code: str, message: str,
@@ -31,11 +34,6 @@ class Repository(Protocol):
                   output: dict | None = None, duration_ms: int | None = None, execution_ref: str | None = None,
                   error: str | None = None) -> None: ...
     async def register_asset(self, job_id: str, locked_at: str, asset: dict) -> Row | None: ...
-    async def get_content_job(self, content_job_id: str) -> Row | None: ...
-    async def get_persona(self, persona_id: str) -> Row | None: ...
-    async def get_persona_assets(self, persona_id: str) -> list[Row]: ...
-    async def get_asset(self, asset_id: str) -> Row | None: ...
-    async def get_job_assets(self, job_id: str) -> list[Row]: ...
     async def sync_workflow_registry(self, workflows: dict) -> int: ...
     async def report_worker_status(self, worker_id: str, info: dict) -> None: ...
     async def log_security_event(self, event_type: str, source_ip: str | None, detail: dict,
@@ -52,13 +50,14 @@ def _first(value: Any) -> Row | None:
 
 
 class PostgrestRepository:
-    def __init__(self, client: httpx.AsyncClient, supabase_url: str, secret_key: str, actor: str = "python"):
+    def __init__(self, client: httpx.AsyncClient, supabase_url: str, secret_key: str, actor: str = "python",
+                 *, worker_jwt: str = "", anon_key: str = ""):
         self.client = client
         self.base = f"{supabase_url.rstrip('/')}/rest/v1"
-        self.headers = {"apikey": secret_key, "Content-Type": "application/json", "x-actor": actor}
-        # 레거시 service_role 키(JWT)는 Authorization도 필요하다. 새 secret key(sb_secret_)는 apikey만 보낸다.
-        if secret_key.count(".") == 2:
-            self.headers["Authorization"] = f"Bearer {secret_key}"
+        self.headers = {
+            "Content-Type": "application/json", "x-actor": actor,
+            **auth_headers(secret_key=secret_key, worker_jwt=worker_jwt, anon_key=anon_key),
+        }
 
     async def _rpc(self, fn: str, params: dict) -> Any:
         r = await self.client.post(f"{self.base}/rpc/{fn}", headers=self.headers, content=json.dumps(params))
@@ -114,25 +113,14 @@ class PostgrestRepository:
     async def register_asset(self, job_id: str, locked_at: str, asset: dict) -> Row | None:
         return _first(await self._rpc("register_asset", {"p_job_id": job_id, "p_locked_at": locked_at, "p_asset": asset}))
 
-    # -- 조회 --------------------------------------------------------------------
-    async def get_content_job(self, content_job_id: str) -> Row | None:
-        rows = await self._select("content_jobs", {"id": f"eq.{content_job_id}"})
-        return rows[0] if rows else None
+    # -- 실행 맥락 ----------------------------------------------------------------
+    # 직접 SELECT를 쓰지 않는다 (TECH_DESIGN 56.5): pa_worker는 테이블 권한이 없고,
+    # 이 RPC는 자기가 선점한 Job에 필요한 것만 돌려준다. SNS 토큰·다른 Persona는 포함되지 않는다.
+    async def get_job_context(self, job_id: str) -> Row:
+        return await self._rpc("worker_get_job_context", {"p_job_id": job_id}) or {}
 
-    async def get_persona(self, persona_id: str) -> Row | None:
-        rows = await self._select("personas", {"id": f"eq.{persona_id}"})
-        return rows[0] if rows else None
-
-    async def get_persona_assets(self, persona_id: str) -> list[Row]:
-        return await self._select("persona_assets", {"persona_id": f"eq.{persona_id}", "is_active": "eq.true"})
-
-    async def get_asset(self, asset_id: str) -> Row | None:
-        rows = await self._select("assets", {"id": f"eq.{asset_id}"})
-        return rows[0] if rows else None
-
-    async def get_job_assets(self, job_id: str) -> list[Row]:
-        """이 generation Job이 이미 등록한 Asset (회수·재시도 때 다시 만들지 않기 위해, 49.5 1번)."""
-        return await self._select("assets", {"automation_job_id": f"eq.{job_id}", "order": "created_at"})
+    async def get_input_asset(self, job_id: str, asset_id: str) -> Row | None:
+        return await self._rpc("worker_get_input_asset", {"p_job_id": job_id, "p_asset_id": asset_id}) or None
 
     # -- 운영 --------------------------------------------------------------------
     async def sync_workflow_registry(self, workflows: dict) -> int:
