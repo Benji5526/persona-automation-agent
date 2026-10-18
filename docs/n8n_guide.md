@@ -121,9 +121,22 @@ mkdir -p /tmp/pa-n8n && cp n8n/pa_*.json /tmp/pa-n8n/ && sed -i -e 's/YOUR-PROJE
 | 002, 005 | `LLM 호출` 노드 → Workflow = `[PA] LLM - Structured Call` |
 | 004 | `WF-005 실행` 노드 → Workflow = `[PA] 005 - Caption Generator` |
 
-그다음 Workflow를 **Active**로 켠다. `[PA] LLM - Structured Call`은 다른 Workflow가 부르기만 하므로 켜지 않아도 된다.
+그다음 Workflow를 **Publish**(n8n 2.x. 1.x의 **Active** 토글에 해당)한다. n8n 2.x는 Execute Workflow 노드가 부르는 **하위 Workflow가 먼저 Publish돼 있어야** 상위 Workflow를 Publish할 수 있다. 그래서 **`[PA] LLM - Structured Call`도 Publish해야 한다.** 이 Workflow의 트리거는 Execute Workflow Trigger 하나뿐이라 Publish해도 혼자 실행되지 않고, 다른 Workflow가 부를 때만 돈다. 순서는 아래대로 한다.
 
-> 이 JSON은 n8n에 실제로 import해 보지 않고 작성했다. import할 때 노드 버전 차이로 경고가 나오면 해당 노드를 열어 값을 확인한다 (특히 Execute Workflow 노드의 Workflow 선택, Custom Auth Credential).
+| 순서 | Workflow | 먼저 Publish돼 있어야 하는 하위 Workflow |
+|---|---|---|
+| 1 | `[PA] 006 - Error Handler` | (Error Workflow로 지정되는 대상) |
+| 2 | `[PA] LLM - Structured Call` | - |
+| 3 | `[PA] 005 - Caption Generator` | LLM |
+| 4 | `[PA] 004 - Generation Result Handler` | 005 |
+| 5 | `[PA] 002 - Prompt Generator` | LLM |
+| 6 | `[PA] 001 - Content Job Dispatcher` | 002 |
+
+`[PA] 003 - Generation Dispatcher`는 Publish하지 않는다 (기본 비활성 local fallback, TECH 56.3).
+
+**Credential이 없는 노드.** 가짜 LLM(`fake`) 모드에서는 `PA Anthropic`과 `PA Bridge` Credential이 없어도 된다. Publish 검증(n8n 2.43.7)은 HTTP Request 노드의 Header Auth·Custom Auth 연결 여부를 검사하지 않고, `fake` 모드에서는 Claude API 노드가 실행되지 않는다. 편집기에서 그 노드에 경고 아이콘이 보일 수 있으나 Publish를 막지는 않는다. `claude` 모드로 바꾸기 전에 `PA Anthropic`을 만들어 연결한다.
+
+> 이 JSON은 n8n 2.43.7에서 CLI(`n8n import:workflow`)로 import하고 Credential·Execute Workflow·Error Workflow 연결이 DB에 저장되는 것까지 확인했다. 실제 Publish와 실행(`queued → ready`)은 이 문서의 §8 절차로 확인한다. import할 때 노드 버전 차이로 경고가 나오면 해당 노드를 열어 값을 확인한다 (특히 Execute Workflow 노드의 Workflow 선택, Custom Auth Credential).
 
 ## 5. Supabase Database Webhook 2개
 
@@ -193,6 +206,7 @@ N8N_CALLBACK_TOKEN=<PA Callback Token 값>
 
 | 증상 | 확인할 것 |
 |---|---|
+| Publish할 때 "Node … references workflow … which is not published" | 그 노드가 부르는 하위 Workflow를 먼저 Publish한다. 순서는 §4-3 표 (006 → LLM → 005 → 004 → 002 → 001) |
 | Content Job이 `queued`에서 안 움직임 | WF-001이 Active인지, `pa_content_jobs` Webhook 응답(`net._http_response`), 1분 안전망 실행 기록 |
 | prompt Job이 `pending`으로 남음 | WF-002 Active·`LLM 호출` 노드의 Workflow 선택. `run_after`가 미래면 재시도 대기 중 |
 | generation Job이 `pending`으로 남음 | WF-003 실행 기록의 `응답 분류` 결과: `bridge_unreachable`(PC·터널 꺼짐), `bridge_unavailable`(ComfyUI 꺼짐), 401·403(`PA Bridge` Credential·Access Service Token) |
