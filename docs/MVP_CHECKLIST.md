@@ -39,7 +39,7 @@
 | 7 | ComfyUI 생성 (활성 GPU: Local 또는 Cloud) | 1 | 25.6, 48.8 | ☑ Local (2026-10-18). Cloud는 호스팅 검증 전이라 미확인 |
 | 8 | Asset 업로드 (Storage) | 1 | 27.4 | ☑ Local (2026-10-18). `media` 버킷의 PNG·썸네일(WebP) 공개 URL이 200이고 MIME·크기가 맞음. Lovable `/assets`에서 이미지 표시와 다운로드를 사용자가 확인 |
 | 9 | Asset DB 등록 (lineage 칸 포함) | 1 | 27.3 확인 SQL, 50.3 | ☑ Local (2026-10-18). persona·content job·automation job·workflow(+버전)·model·seed·prompt·negative prompt·width/height 확인. LoRA는 쓰지 않아 null (N/A) |
-| 10 | Asset 승인·반려 (사유) | 2 | 50.5 3번 | ☐ 백엔드(RPC) 미구현. Lovable 화면의 승인·반려 버튼은 명세대로 비활성 |
+| 10 | Asset 승인·반려 (사유) | 2 | 50.5 3번 | ☐ 부분 (백엔드 `review_asset`(0013)과 `assets.review_note`는 로컬 DB 테스트 24개로 검증. 실제 Supabase 적용 전이고 Lovable 화면의 승인·반려 버튼은 아직 비활성) |
 | 11 | Post 생성 (캡션 초안 → 제출) | 2 | 28.7, 51장 | ☐ |
 | 12 | SNS 게시 (Instagram 또는 X) | 2 | 28.15 E2E, 관문 G2 | ☐ |
 | 13 | Post ID 저장 (`external_post_id`, `permalink`) | 2 | 11.8 CHECK | ☐ |
@@ -164,3 +164,26 @@
 - 일부 코드가 상태 상수 대신 문자열을 직접 쓴다 (값은 DB와 일치).
 - 전체 번들에 금지 문자열이 없는지는 배포 산출물이 없어 확정하지 못했다. 앱을 게시한 뒤 다시 확인해야 한다.
 - 오류 목록 쿼리가 `system_errors`와 `automation_jobs`를 연결해 가져온다. 이 연결이 실패하면 오류 목록 전체가 실패할 수 있어 사용자가 오류 센터를 열어 확인해야 한다 (Phase 6 통과 보고에 포함됨).
+
+### Asset 승인·반려 백엔드 기록 (2026-10-18)
+
+범위: 마이그레이션 `0013_review_asset.sql` — `review_asset(p_asset_id, p_decision, p_note)`와 `assets.review_note`(500자 이하). 설계는 TECH_DESIGN 12.4(V1 RPC 표), 50.5 3번. 호스팅 Supabase에는 아직 적용하지 않았고 Lovable 화면도 연결하지 않았다.
+
+**동작**
+- 전이: `generated·rejected → approved`, `generated·approved → rejected`. 같은 결정을 두 번, 보관된 Asset은 `PT409`. 허용 전이표와 가드(게시·예약·게시 중인 Post가 있으면 승인된 Asset은 반려 불가)는 0002에 이미 있어 새로 만들지 않았다.
+- 반려할 때 사유를 저장하고(앞뒤 공백 제거, 빈 값은 null), 다시 승인하면 비운다. 승인에 사유를 보내면 `PT422`. 누가·언제는 `state_transitions`(actor, created_at, reason `operator:approve`/`operator:reject`).
+- 내 Persona의 Asset만. 남의 Asset은 `PT404`. authenticated 전용이고 anon·워커는 실행할 수 없다. authenticated에게는 `assets` UPDATE 권한이 없어 직접 쓰기는 `42501`.
+
+**12칸**
+- DB ✔ 새 마이그레이션, 제약(`review_note ≤ 500`), 상태 값은 DB 값. RLS ✔ 내 Persona 경유, 쓰기는 RPC, 교차 계정 테스트.
+- API ✔ 오류 코드 `PT404`·`PT409`·`PT422`. Error handling ✔. Logging ✔ `state_transitions`.
+- Idempotency: N/A 같은 결정의 재호출은 `PT409`로 거부되고 아무것도 바꾸지 않는다(테스트로 확인).
+- Tests ✔ `tests/db/test_review_asset.py` 24개. 로직을 일부러 망가뜨려(사유 초기화 제거, 소유 확인 제거, 승인에 사유 허용) 해당 테스트가 실패하는 것을 확인했다. 전체 `pytest tests -q` 496개 통과(이전 470개 + `review_asset` 24개 + 점검 블록 25 테스트 2개).
+- Security ✔ 권한 표면 테스트(`test_permission_surface.py`)의 authenticated 허용 목록과 워커 거부 목록에 `review_asset` 추가, `verify_production.sql` 블록 5(16개)와 새 블록 25.
+- Documentation ✔ `supabase/README.md`, `README.md`, `verify_production.sql`, 이 기록.
+- Hook·UI: 이번 범위 밖. Lovable 화면의 승인·반려 버튼 연결은 호스팅 적용과 확인 뒤에 한다.
+
+**남은 일**
+- 호스팅 Supabase에 0013 적용 후 `verify_production.sql` 블록 5(16개)와 25를 확인.
+- Lovable 브리프(`docs/lovable_master_prompt.md`)의 승인·반려 관련 문구를 바꾸고 Lovable 화면 연결, 그 뒤 이 항목(10번)을 ☑로 올린다.
+- 반려로 Content Job에 유효한 Asset이 하나도 남지 않아도 Job은 `ready`로 남는다(설계에 이를 막는 규칙이 없다). 필요하면 별도로 결정한다.

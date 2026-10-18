@@ -16,6 +16,7 @@
 | `migrations/0010_execution_targets.sql` | Execution Target: `app_settings.default_execution_target`·`app_mode`, `content_jobs`·`automation_jobs.execution_target`(생성 시점 고정 + 상속), `worker_status.target`·`provider`, Target 기준 선점 gating, `move_pending_jobs_to_target`, `retry_automation_job(target)` (TECH_DESIGN 56.4) |
 | `migrations/0011_worker_auth.sql` | Worker 인증: `worker_credentials`(발급 대장, 서명 키는 저장 안 함), `pa_worker` 역할(테이블 권한 없음), JWT 클레임 기반 신원, 세션 종류(깨진 자격은 오류)와 선점자 범위, `worker_get_job_context`, 자격 발급·폐기, **Storage 격리 정책** (TECH_DESIGN 56.5) |
 | `migrations/0012_dispatch_queued_content_jobs.sql` | Local 디스패처: `dispatch_queued_content_jobs()`(프롬프트가 있는 `queued` Content Job → `generation` Job, 원자적·멱등·동시 실행 안전, 정지 스위치 존중)와 pg_cron 스케줄 `dispatch-queued-content-jobs` (TECH_DESIGN 56.10) |
+| `migrations/0013_review_asset.sql` | Asset 검토: `review_asset(p_asset_id, p_decision, p_note)`(`generated·rejected → approved`, `generated·approved → rejected`, 내 Persona의 Asset만, 게시·예약 중인 Post가 있으면 반려 불가는 0002 가드), 반려 사유 `assets.review_note`(500자 이하, 다시 승인하면 비움). authenticated 전용 (TECH_DESIGN 12.4, 50.5 3번) |
 | `tests/stubs/supabase_stub.sql` | **로컬 테스트 전용.** 실제 프로젝트에 적용하지 않는다 |
 | `verify_production.sql` | 실제 프로젝트 적용 후 점검 (읽기 전용, TECH_DESIGN 24.4) |
 

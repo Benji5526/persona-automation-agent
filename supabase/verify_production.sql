@@ -5,7 +5,7 @@
 -- =============================================================================
 
 -- 1. 마이그레이션 적용 버전
---    기대: 0001 ~ 0008 여덟 줄 (파일 이름 앞부분이 version)
+--    기대: 0001 ~ 0013 열세 줄 (파일 이름 앞부분이 version)
 select version
   from supabase_migrations.schema_migrations
  order by version;
@@ -32,12 +32,13 @@ select n.nspname as schema, p.proname as function_name
    and has_function_privilege('anon', p.oid, 'execute');
 
 -- 5. authenticated(Lovable)가 실행할 수 있는 public 함수
---    기대: 15개 — archive_asset, cancel_content_job, create_content_job,
+--    기대: 16개 — archive_asset, cancel_content_job, create_content_job,
 --          get_app_settings, get_dashboard_summary, regenerate_content_job, resolve_system_error,
 --          retry_automation_job, retry_content_job, submit_content_job, update_app_setting
 --          + 0010: move_pending_jobs_to_target (admin)
 --          + 0011: issue_worker_credential, list_worker_credentials, revoke_worker_credential
 --            (함수 안에서 private.require_admin()으로 막는다. revoke는 Worker가 자기 자격만 폐기할 수도 있다)
+--          + 0013: review_asset (Asset 승인·반려. 내 Persona의 Asset만, 반려 사유는 assets.review_note)
 --    claim_*, complete_*, fail_*, heartbeat_*, register_asset, report_worker_status,
 --    reserve_llm_call, dispatch_queued_content_jobs, sync_workflow_registry 등이 보이면 안 된다.
 select p.proname as function_name
@@ -255,3 +256,11 @@ select relname, relrowsecurity from pg_class where oid = 'storage.objects'::regc
 
 -- 24. Capability 요구사항은 배포 설정이다 (측정 전에는 UNSET) — DB가 아니라 workflows/registry.json에 있다.
 --     확인: python scripts/report_capability_requirements.py   (--strict 는 UNSET이 있으면 실패)
+
+-- 25. 0013 review_asset (Asset 승인·반려)
+--     기대: has_review_note = true, authenticated_can_execute = true, anon_can_execute = false
+select
+  exists (select 1 from information_schema.columns
+           where table_schema = 'public' and table_name = 'assets' and column_name = 'review_note') as has_review_note,
+  has_function_privilege('authenticated', 'public.review_asset(uuid, text, text)', 'execute') as authenticated_can_execute,
+  has_function_privilege('anon', 'public.review_asset(uuid, text, text)', 'execute') as anon_can_execute;

@@ -29,7 +29,7 @@ def run(db, number: int) -> list[list[tuple]]:
     return [db.conn.execute(stmt).fetchall() for stmt in block(number)]
 
 
-@pytest.mark.parametrize("number", [20, 21, 22, 23])
+@pytest.mark.parametrize("number", [20, 21, 22, 23, 25])
 def test_every_check_block_runs_on_a_fresh_database(db, number):
     results = run(db, number)
     assert results                                   # 문장이 하나 이상 있고 모두 오류 없이 실행된다
@@ -73,3 +73,8 @@ def test_block_23_storage_isolation_expectations(db):
     assert [(p, c) for p, c, _ in policies] == [("pa_worker_read_inputs", "SELECT"), ("pa_worker_write_results", "INSERT")]
     assert forbidden_policies == []                   # UPDATE·DELETE·ALL 정책 없음 → 덮어쓰기·삭제 불가
     assert rls == [("objects", True)]
+
+
+def test_block_25_reports_the_review_asset_surface(db):
+    """0013: review_note 칸이 있고, authenticated만 review_asset을 실행할 수 있다."""
+    assert run(db, 25) == [[(True, True, False)]]
