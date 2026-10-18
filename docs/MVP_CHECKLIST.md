@@ -30,16 +30,16 @@
 
 | # | 항목 | Sprint | 확인 방법 | 상태 |
 |---|---|---|---|---|
-| 1 | Google 로그인 (허용 목록 밖은 거부) | 1 | 24.3, 27.7 S3 | ☐ |
-| 2 | Persona 생성 | 1 | 45장, 22장 | ☐ |
-| 3 | Persona 활성화 (`active`) | 1 | 45장 | ☐ |
-| 4 | Content Job 생성 (`queued`) | 1 | 27.4 | ☐ 부분 (SQL 직접 INSERT로 `queued` 확인. RPC·화면 경로는 미확인) |
+| 1 | Google 로그인 (허용 목록 밖은 거부) | 1 | 24.3, 27.7 S3 | ☐ 부분 (허용된 계정의 로그인·새로고침 유지·로그아웃·보호 경로는 사용자가 화면에서 확인. 허용 목록 밖 계정의 실제 거부는 미확인) |
+| 2 | Persona 생성 | 1 | 45장, 22장 | ☑ Lovable 화면 (2026-10-18, 사용자 확인). 생성한 Persona가 DB에서 본인 소유로 확인됨 |
+| 3 | Persona 활성화 (`active`) | 1 | 45장 | ☑ 생성 시 `active`, 그 Persona로 Job 생성까지 이어짐 (2026-10-18). 보관 후 재활성화 경로는 미확인 |
+| 4 | Content Job 생성 (`queued`) | 1 | 27.4 | ☑ Lovable 화면의 `create_content_job` RPC (2026-10-18). DB에서 `created_by`가 로그인 사용자, `source = operator`, `execution_target = local` 확인 |
 | 5 | n8n Claim (Atomic, 중복 없음) | 1 | 27.6 D3, 49.5 3번 | ☐ |
 | 6 | Python 실행 (브릿지 선점 → 생성) | 1 | 25.6 | ☑ Local (2026-10-18) |
 | 7 | ComfyUI 생성 (활성 GPU: Local 또는 Cloud) | 1 | 25.6, 48.8 | ☑ Local (2026-10-18). Cloud는 호스팅 검증 전이라 미확인 |
-| 8 | Asset 업로드 (Storage) | 1 | 27.4 | ☑ Local (2026-10-18). `media` 버킷의 PNG·썸네일(WebP) 공개 URL이 200이고 MIME·크기가 맞음. 화면에서 눈으로 본 확인은 아님 |
+| 8 | Asset 업로드 (Storage) | 1 | 27.4 | ☑ Local (2026-10-18). `media` 버킷의 PNG·썸네일(WebP) 공개 URL이 200이고 MIME·크기가 맞음. Lovable `/assets`에서 이미지 표시와 다운로드를 사용자가 확인 |
 | 9 | Asset DB 등록 (lineage 칸 포함) | 1 | 27.3 확인 SQL, 50.3 | ☑ Local (2026-10-18). persona·content job·automation job·workflow(+버전)·model·seed·prompt·negative prompt·width/height 확인. LoRA는 쓰지 않아 null (N/A) |
-| 10 | Asset 승인·반려 (사유) | 2 | 50.5 3번 | ☐ |
+| 10 | Asset 승인·반려 (사유) | 2 | 50.5 3번 | ☐ 백엔드(RPC) 미구현. Lovable 화면의 승인·반려 버튼은 명세대로 비활성 |
 | 11 | Post 생성 (캡션 초안 → 제출) | 2 | 28.7, 51장 | ☐ |
 | 12 | SNS 게시 (Instagram 또는 X) | 2 | 28.15 E2E, 관문 G2 | ☐ |
 | 13 | Post ID 저장 (`external_post_id`, `permalink`) | 2 | 11.8 CHECK | ☐ |
@@ -50,10 +50,10 @@
 | 18 | Decision → 새 Content Job (승인 후, `source = 'agent'`) | 4 | 30.18 E2E | ☐ |
 | 19 | Audit Log | 1~4 | `state_transitions`, `execution_logs`, `ai_decisions` | ☐ 부분 (`execution_logs` 11행 확인. `state_transitions`·`ai_decisions`는 미확인) |
 | 20 | Emergency Stop (전역·플랫폼·Persona) | 2~4 | 33.16, 30.18 (`agent_enabled = false`) | ☐ |
-| 21 | Retry (일시 오류 재시도, 최종 실패 표시) | 1 | 27.5 F2·F6 | ☐ |
+| 21 | Retry (일시 오류 재시도, 최종 실패 표시) | 1 | 27.5 F2·F6 | ☐ 부분 (재시도 불가 오류 `LORA_NOT_FOUND`가 1회 시도로 즉시 실패하고 화면이 실패 단계·시도 횟수·재시도 불가를 표시함을 확인. 일시 오류의 재시도·백오프는 미확인) |
 | 22 | Idempotency (생성·게시·수집·결정) | 1~4 | 27.6 D1~D3, 43.8, 49.5 1번 | ☐ |
 | 23 | RLS (교차 계정·교차 Persona) | 1~4 | 27.7 S2~S4, 50.5 1번, 51.5 3번 | ☐ |
-| 24 | Error Monitoring (실패 Job·`system_errors` 확인) | 1 | 17.11 Error Center | ☐ |
+| 24 | Error Monitoring (실패 Job·`system_errors` 확인) | 1 | 17.11 Error Center | ☑ Lovable `/automation/errors` (2026-10-18, 사용자 Phase 5 통과 보고). 실패 Job의 오류 코드·한국어 설명·해결됨 표시 경로. 항목별 화면 캡처는 남기지 않았다 |
 
 **최종 인수:** 사람 손 없이 `Persona → Content Job → 생성 → Asset → 승인 → 게시 → 성과 → AI Decision → 새 Content Job`이 한 바퀴 돈다 (MVP_SCOPE_LOCK 1장, TECH_DESIGN 27.8의 확장). 기록은 27장 형식으로 남긴다.
 
@@ -76,6 +76,8 @@
 | 날짜 | 기능 | 12칸 | 비고 (미통과·N/A 사유) |
 |---|---|---|---|
 | 2026-10-18 | 로컬 전용 생성 E2E (Content Job → Asset), Local Execution Target | 확인 4칸: DB·API·Logging·Tests. 나머지는 아래 사유 | 아래 "2026-10-18 기록" 참고 |
+| 2026-10-18 | Lovable 웹 화면 Phase 1~4 (로그인, Persona, Content Job, Asset) | Hook·UI·API·Error·Logging 확인(수동). RLS·Idempotency·Security는 아래 사유 | 아래 "Lovable 화면 Phase 1~4 기록" 참고 |
+| 2026-10-18 | Lovable 웹 화면 Phase 5·6 (대시보드·워커·오류·설정, 최종 점검) | Hook·UI·API·Security 확인(수동 + 코드 읽기). RLS는 아래 사유 | 아래 "Lovable 화면 Phase 5·6 기록" 참고. Lovable 서버 환경의 서비스 키 건 포함 |
 
 ### 2026-10-18 기록: 로컬 전용 생성 E2E (수동 확인)
 
@@ -112,4 +114,53 @@
 **남은 사실 (미통과 아님, 확인 필요)**
 - `generation_metadata`에는 `resolution` 키가 없고 해상도는 `width`·`height`로 기록된다. `docs/lovable_master_prompt.md`의 Asset 상세 "생성 정보"가 `resolution`을 나열해 데이터와 어긋났으므로, 문서를 `width`·`height` 기준("{width}×{height}")으로 고쳤다 (2026-10-18, 코드와 데이터는 그대로). Lovable 화면 구현으로 확인하는 일은 남아 있다.
 - 직접 INSERT한 Content Job은 `created_by`가 null이다 (SQL Editor에서는 `auth.uid()`가 없음). 이력 추적이 필요하면 INSERT에서 명시한다.
-- 이미지를 화면에서 눈으로 본 확인, `state_transitions`, Lovable 화면 표시는 확인하지 못했다.
+- 이미지를 화면에서 눈으로 본 확인, `state_transitions`, Lovable 화면 표시는 확인하지 못했다. (Lovable `/assets` 표시·다운로드는 아래 기록에서 사용자가 확인함. `state_transitions`는 여전히 미확인.)
+
+### Lovable 화면 Phase 1~4 기록 (2026-10-18)
+
+범위: Lovable 프로젝트 `Benjiworld`(TanStack Start 기반)를 기존 Supabase 프로젝트에 연결해 Phase 1~4를 구현. 프롬프트는 `docs/lovable_master_prompt.md`에서 추출했고, 10,000자 제한 때문에 Project knowledge(규칙)와 `docs/brief/*.md`(데이터 모델, RPC, 화면 명세)로 나눠 넣었다. 진행 확인은 사용자가 화면에서, 코드는 Lovable MCP로 읽기 전용 점검했다.
+
+| Phase | 내용 | 확인 |
+|---|---|---|
+| 1 | 쉘, Google 로그인, 보호 경로 | 사용자 확인: 로그인·새로고침 유지·로그아웃·메뉴 이동. 첫 시도는 Supabase에서 Google provider가 꺼져 있어(`provider is not enabled`) 막혔고, 로그인용 OAuth 클라이언트를 새로 만들어(n8n용과 분리) 해결 |
+| 2 | Persona 목록·편집·Visual Identity·참조 이미지 | 사용자 통과. 코드: 하드 삭제 없음(보관만), 업로드 후 행 삽입과 실패 시 정리, 쓰기 가능 컬럼만 전송. LoRA 강도 범위를 명세(0~1.5)에 맞게 수정 |
+| 3 | Content Job 목록·생성·상세 | 사용자 통과. 화면에서 만든 Job이 `준비됨`까지 감 (32초, 이미지 2장, `local`, 단계별 실제 시각 표시). 실패 경로(`LORA_NOT_FOUND`, 재시도 불가)도 단계·시도·재시도 불가를 표시. 코드: `create_content_job` RPC만 사용, in-flight ref로 중복 방지, Cloud 비활성 |
+| 4 | Asset 갤러리·상세 | 사용자 통과(변형 만들기, 보관, 실시간 반영 포함). 이 시점 DB의 Asset은 10건. 코드: NULL-safe 숨김 필터, `archive_asset` RPC, 변형 만들기(`image_to_image_v1` + `init_image`), 승인·반려 비활성 |
+
+**12칸 사유**
+- RLS: Lovable 화면은 일반 사용자 토큰으로 접근하므로 RLS가 적용된다. 다른 계정으로의 교차 접근 확인은 허용 목록 때문에 UI로 할 수 없고, `tests/db`가 담당한다 (이번에 실행하지 않음).
+- Idempotency: `create_content_job`은 멱등하지 않아 화면의 in-flight ref와 버튼 비활성에 기댄다. 의도적 더블클릭 시험의 결과는 기록하지 않았다.
+- Security: 클라이언트에는 공개용 키만 있다. Lovable이 자동 생성한 `client.server.ts`는 서비스 키를 읽을 수 있게 만들어져 있으나 키가 설정돼 있지 않고 쓰는 코드도 없다 (Phase 6에서 다시 점검).
+- Tests: Lovable이 보고한 자동 테스트(Phase 2는 11개, Phase 3은 20개, Phase 4는 31개 통과)는 이 기록의 작성자가 실행한 것이 아니다.
+
+**확인했거나 정한 불일치**
+- `LORA_NOT_FOUND` 한 코드가 "Persona에 LoRA가 선택되지 않음"과 "워커에 파일이 없음" 두 경우에 쓰여, 화면 안내가 앞의 경우에 부정확하다. Phase 6에서 판단한다.
+- `[테스트 이미지 생성]`은 `content_jobs`에 draft를 직접 INSERT한 뒤 제출한다. 명세상 허용되지만 제출이 실패하면 제출 안 된 draft가 남을 수 있다.
+- `LORA_NOT_FOUND` 문구 구분과 `[테스트 이미지 생성]` 중 앞의 것은 아래 "Phase 5·6 기록"에서 고쳤다.
+
+### Lovable 화면 Phase 5·6 기록 (2026-10-18)
+
+범위: Phase 5(대시보드, 워커, 오류 센터, 설정)와 Phase 6(전체 점검). 진행 확인은 사용자가 화면에서, 코드는 Lovable MCP로 읽기 전용 점검했다.
+
+| Phase | 내용 | 확인 |
+|---|---|---|
+| 5 | 대시보드·헤더 상태, 워커·큐·자동화 Job 표, 오류 센터, 설정(프로필·테마·관리자 설정) | 사용자 통과. 코드: 모든 집계가 DB 조회값(가짜 지표 없음), 헤더의 실패 수는 `completed_at` 24시간 창(누적 실패 수 사용 안 함), 워커 응답 없음 기준 90초. 관리자 영역은 `role = admin`일 때만 보이고, 모든 설정 변경과 워커 Credential 폐기는 확인 창을 거침. Cloud는 선택 불가이고 기본 Target 변경은 항상 `local`만 보냄. 사용하는 RPC는 `get_app_settings`, `update_app_setting`, `list_worker_credentials`, `revoke_worker_credential`, `resolve_system_error` |
+| 6 | 전체 점검과 합의한 수정 3건 | 사용자 통과. 수정: (1) 실행 한도의 JSON 입력칸을 기존 숫자 키별 입력칸으로 교체(바뀐 키만 전송, 0 이상). (2) `LORA_NOT_FOUND` 안내를 "Persona에 LoRA가 선택되지 않음"과 "워커에 파일 없음"으로 구분(재시도 판단은 브라우저가 하지 않음). (3) 허용 이메일 목록이 비면 확인 창에 가입 차단 경고. 변경은 요청 범위에 한정됐고 자동 생성 파일 `client.server.ts`는 수정되지 않음 |
+
+**보안 발견과 조치**
+- Phase 6 점검에서 Lovable 서버 환경에 `SUPABASE_SERVICE_ROLE_KEY`가 설정돼 있는 것이 드러났다. 저장소와 `.env`에는 없었고(공개용 키만 있었음), 이 키를 읽는 자동 생성 파일을 가져다 쓰는 코드도 없었다. 프로젝트 규칙(Lovable에 서비스 키를 두지 않는다)에 어긋나므로 조치했다.
+- 그 값은 Supabase의 이름이 `default`인 secret 키였다 (사용자 확인). 이 PC의 브릿지는 `bridge` 키, n8n은 별도로 만든 키를 쓰므로 영향이 없음을 확인한 뒤 `default`를 삭제했다.
+- 삭제 후 확인: 브릿지 정상(`ok`, ComfyUI 연결), `bridge` 키로 DB 조회 성공, 워커 보고 갱신. 확인하지 못한 것: `default`가 실제로 무효가 됐는지는 값을 갖고 있지 않아 직접 시험하지 못했다 (다른 키가 정상임만 확인).
+- 정리가 남은 것: Lovable의 서버 환경 변수 자체를 지우는 일(플랫폼 관리 설정이라 사용자가 해야 함). 값은 이미 무효이므로 위험은 해소됐다.
+
+**12칸 사유**
+- RLS: 관리자 RPC는 DB 함수가 `require_admin()`으로 막는다. 화면의 숨김은 편의이고 보안 기준이 아니다. 운영자(비관리자) 계정으로 접근 차단을 확인하는 일은 하지 않았다.
+- Tests: Lovable이 보고한 자동 테스트(Phase 5는 43개, Phase 6은 45개 통과)는 이 기록의 작성자가 실행한 것이 아니다.
+
+**남은 발견 사항 (보안 이슈는 아님, 이번에 고치지 않음)**
+- Asset 다운로드 주소를 Supabase 도메인으로 제한하지 않는다 (주소는 DB의 `public_url`에서만 오므로 위험은 낮다).
+- 기본 오류·404 화면에 영어가 남아 있다.
+- 일부 이미지·입력 데이터의 로딩·오류 처리가 부족하다.
+- 일부 코드가 상태 상수 대신 문자열을 직접 쓴다 (값은 DB와 일치).
+- 전체 번들에 금지 문자열이 없는지는 배포 산출물이 없어 확정하지 못했다. 앱을 게시한 뒤 다시 확인해야 한다.
+- 오류 목록 쿼리가 `system_errors`와 `automation_jobs`를 연결해 가져온다. 이 연결이 실패하면 오류 목록 전체가 실패할 수 있어 사용자가 오류 센터를 열어 확인해야 한다 (Phase 6 통과 보고에 포함됨).
