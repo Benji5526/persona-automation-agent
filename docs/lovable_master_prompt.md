@@ -313,11 +313,13 @@ and Success states.
   dataUpdatedAt. If last_seen_at is older than 90 seconds show "워커 응답 없음" in the warning
   color. Every number comes from a query: show 0 or "데이터 없음", never an invented value.
 
-/personas: cards (name, short description, status, content job count, asset count, [열기]),
+/personas: cards (name, short description, status, content job count, asset count, [설정]),
   [+ Persona 만들기] (name, slug, description). Slug: lowercase the name, keep only [a-z0-9-],
   collapse dashes, max 60; if the result is empty (e.g. a Korean name) use
   persona-<6 random [a-z0-9]>. Avoid existing slugs of my personas (including inactive) by
   appending -2, -3 …, and on error 23505 retry with the next suffix. The user may edit it. Archive = status 'inactive' with a confirm dialog.
+  An inactive Persona stays in the list with its status badge and offers [다시 활성화] (status 'active',
+  confirm dialog), on the card and in the detail page header.
 
 /personas/:id tabs: 프로필 | 성격·말투 | Visual Identity | 콘텐츠 규칙.
   JSON shapes (validate with zod before saving):
@@ -464,8 +466,8 @@ and Success states.
       confirm 다이얼로그에 그 건수를 넣고("대기 중인 Job N건을 cloud로 이동합니다"),
       확인하면 move_pending_jobs_to_target(현재 기본 Target) 호출 → 돌려받은 건수를 토스트로.
       실행 중·완료·실패·취소된 Job은 이동하지 않는다는 것을 명시한다. 감사 이벤트가 남는다.
-    Cloud는 Worker JWT 보안이 끝나기 전까지 실제로 실행되지 않는다 (56.5): cloud를 고르면
-    "Cloud Worker가 등록되기 전까지 cloud Job은 대기 상태로 남습니다."를 알린다.
+    Cloud는 Worker JWT 보안이 끝나기 전까지 실제로 실행되지 않는다 (56.5): 그래서 Cloud는 고를 수
+    없고(비활성, "준비 중") 위 [이동] 버튼은 숨긴다. 화면은 execution_target 'cloud'를 어디로도 보내지 않는다.
 
 Header system status: "● 정상" (all workers online, no failed automation job in the last 24h) /
   "● 확인 필요 N건" (retry-waiting jobs + automation jobs failed in the last 24h, by completed_at) /
