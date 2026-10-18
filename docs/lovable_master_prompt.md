@@ -4,7 +4,7 @@ Lovable에 붙여 넣는 프롬프트다. 설계 배경과 사용 방법은 [TEC
 
 **사용 순서**
 
-1. Lovable 프로젝트를 만들고, Lovable의 Supabase 통합으로 **기존** Supabase 프로젝트(마이그레이션 0001~0008 적용 완료)를 연결한다.
+1. Lovable 프로젝트를 만들고, Lovable의 Supabase 통합으로 **기존** Supabase 프로젝트(마이그레이션 0001~0012 적용 완료)를 연결한다.
 2. 아래 **§1 Master Prompt**를 Project Knowledge(또는 첫 메시지)에 넣는다. 이 단계에서는 코드를 만들지 말라고 한다.
 3. **§2 Phase 프롬프트**를 하나씩 보낸다. 각 Phase가 끝나면 체크리스트를 확인하고 GitHub에 동기화한 뒤 다음으로 넘어간다.
 4. Lovable이 SQL·마이그레이션 실행을 제안하면 **거절한다.** 스키마의 정본은 이 저장소의 `supabase/migrations`다.
@@ -26,8 +26,14 @@ requested later, one phase at a time.
 ==================================================
 The app is the CONTROL CENTER of a pipeline that already exists:
 
-  Lovable (this app) → Supabase (source of truth) → n8n (orchestration)
-    → Python bridge (on the local PC or a cloud GPU pod) → ComfyUI → GPU → Supabase Storage → back to this app
+  Lovable (this app) → Supabase (source of truth)
+    → pg_cron dispatcher (a database function turns a queued Content Job into a generation Job)
+    → local Python worker (pulls the job from Supabase) → ComfyUI on 127.0.0.1 → GPU
+    → Supabase Storage → Asset → back to this app
+
+This is the Personal / Local-Only edition: exactly one user (the owner, users.role = 'admin').
+There are no teams, organizations, billing or plans. n8n is optional and is not part of the
+local flow. Cloud execution exists in the schema but is switched off ("준비 중").
 
 The app shows state and sends commands. It never generates images, never calls an LLM,
 never runs workflows. It talks ONLY to Supabase: tables, RPC functions, Storage, Realtime.
@@ -35,7 +41,8 @@ Commands go out as Supabase RPC calls; results come back through Realtime and re
 
 MVP user journey:
 Google login → create a Persona → set its Visual Identity → create a Content Job
-→ watch it progress → see generated images in the Asset Library.
+→ watch it move queued → generating → ready live → see the image in the Asset Library,
+all without opening the Supabase SQL editor.
 
 ==================================================
 2. HARD RULES (never break these)
@@ -60,6 +67,11 @@ Google login → create a Persona → set its Visual Identity → create a Conte
 9. localStorage is only for UI preferences (selected persona, theme, sidebar). Never for app data.
 10. Keep changes small. Do not rewrite or restyle working code that the current request
     does not mention. Do not add V1/V2 features unless asked.
+11. Never call .delete() on personas or persona_assets (the database would allow it, the
+    design does not). Archive instead. There is no hard delete anywhere in the UI.
+12. Never call dispatch_queued_content_jobs, claim_*, create_automation_job or any other worker
+    RPC. The database runs the dispatcher by itself; the browser only creates and watches jobs.
+13. There is no Asset approve/reject backend yet. Never write assets.status directly.
 
 ==================================================
 3. STACK
@@ -133,8 +145,8 @@ persona_assets (id, persona_id, asset_type 'base_model'|'lora'|'face_ref'|'style
 content_jobs (id, persona_id, source, created_by, content_type 'image'|'video'|'carousel'|
   'story'|'text', topic ≤500, prompt ≤4000, prompt_parts jsonb, negative_prompt ≤2000,
   workflow, params jsonb, input_images jsonb, variants 1-4, platform 'instagram'|'tiktok'|'x',
-  priority 1-10 (default 5), status, run_number, metadata jsonb,
-  created_at, updated_at, completed_at)
+  priority 1-10 (default 5), status, run_number, execution_target 'local'|'cloud' (read-only,
+  fixed at creation), metadata jsonb, created_at, updated_at, completed_at)
   status: 'draft' | 'queued' | 'generating' | 'ready' | 'published' | 'failed' | 'cancelled'
   - writable (insert): persona_id, content_type, topic, prompt, negative_prompt, workflow, params,
     input_images, variants, platform, priority, scheduled_at, metadata. A direct insert always
@@ -142,10 +154,12 @@ content_jobs (id, persona_id, source, created_by, content_type 'image'|'video'|'
   - workflow must be a comfy_workflows.id (^[a-z0-9_]+$). completed_at is set when it turns ready.
 
 automation_jobs (id, persona_id, content_job_id, job_type 'prompt'|'generation'|'caption'
-  (V1: 'publish'|'analytics'), status, worker 'n8n'|'python', claimed_by, attempts,
+  (V1: 'publish'|'analytics'), status, worker 'n8n'|'python', execution_target, claimed_by, attempts,
   max_attempts, run_after, locked_at, heartbeat_at, started_at, completed_at,
   payload jsonb, result jsonb, error_type, error_code, error_message, created_at, updated_at)
   status: 'pending' | 'processing' | 'done' | 'failed' | 'cancelled'
+  In the local flow there is NO 'prompt' job: the dispatcher creates the 'generation' job directly
+  (the order must already have a prompt). Show only the jobs that exist.
   "Retry waiting" is NOT a status: status = 'pending' AND attempts > 0 AND run_after > now().
 
 assets (id, persona_id, content_job_id, automation_job_id, asset_type 'image'|'video',
@@ -163,8 +177,9 @@ posts (id, persona_id, asset_id, platform, caption ≤2200, hashtags text[] ≤3
 execution_logs (id bigint, automation_job_id, step, service 'n8n'|'python'|'comfyui'|'llm'|
   'supabase'|'sns', status 'started'|'succeeded'|'failed', input_data, output_data,
   duration_ms, execution_ref, error, created_at)
-  steps: DISPATCH, CLAIM, LLM, COMPLETE, N8N_ERROR (n8n); BUILD, INPUT_UPLOAD, COMFYUI_QUEUE,
-  COMFYUI_WAIT, VALIDATE, UPLOAD, COMPLETE (bridge).
+  steps: DISPATCH (service 'supabase' from the pg_cron dispatcher, or 'n8n'), CLAIM, LLM, COMPLETE,
+  N8N_ERROR (n8n); BUILD, INPUT_UPLOAD, COMFYUI_QUEUE, COMFYUI_WAIT, VALIDATE, UPLOAD, COMPLETE
+  (worker). duration_ms exists only on some steps: never assume it.
 
 system_errors (id bigint, automation_job_id, persona_id, service, step, error_type, error_code,
   message, retryable, resolved, created_at)
@@ -197,6 +212,10 @@ supabase.rpc(name, args):
     p_submit = true, p_execution_target?) → content_jobs row ('queued'; 'draft' if p_submit=false)
     p_execution_target: 'local' | 'cloud'. 비우면 app_settings.default_execution_target.
     Target은 **생성 시점에 고정**된다 (TECH 56.2).
+    **프롬프트(p_prompt)가 없으면 디스패처가 그 주문을 처리하지 않아 영원히 queued에 머문다**
+    (자동 프롬프트 생성은 이 에디션에 없다). 그래서 생성 폼은 프롬프트를 필수로 한다.
+    **create_content_job은 멱등하지 않다**: 두 번 호출하면 Job이 두 개 생긴다. 중복 방지는 화면의 몫이다
+    (요청이 끝날 때까지 버튼 비활성 + 진행 중 플래그). DB의 멱등 키는 그 아래 Automation Job에만 있다.
 - submit_content_job(p_content_job_id)            draft → queued
 - cancel_content_job(p_content_job_id, p_reason?) → cancelled (also cancels running steps)
 - retry_content_job(p_content_job_id)             failed → queued, from the start
@@ -211,6 +230,7 @@ supabase.rpc(name, args):
 - list_worker_credentials() → worker_credentials[]   admin. jti·worker_id·target·provider·만료·폐기 시각만.
     **토큰 값은 어디에도 저장되지 않으므로 보여줄 수 없다**
 - archive_asset(p_asset_id)
+  (승인·반려 RPC는 **아직 없다**. /assets/:id의 승인·반려 버튼은 비활성으로만 둔다.)
 - resolve_system_error(p_error_id)                p_error_id is a bigint
 - get_dashboard_summary(p_persona_id?) → jsonb {
     personas, content_jobs: {<status>: count}, automation_jobs: {active, pending, retry, failed},
@@ -246,9 +266,16 @@ Keep filters, tabs and view mode in the URL query.
 Do not create routes for future features.
 
 Layout: AppLayout = Sidebar + Header + <Outlet/>; /login is outside it.
-Sidebar (lucide icons): Overview (layout-dashboard), Personas (user-round),
-Content Jobs (wand-sparkles), Assets (images), Automation (cpu), Settings (settings).
-Do NOT show future menu items at all (no disabled or "coming soon" items).
+Sidebar (Korean labels, grouped, lucide icons):
+  대시보드 (/dashboard)
+  페르소나: 전체 페르소나 (/personas) · 새 페르소나 (/personas?new=1, opens the create dialog)
+  생성: 이미지 생성 (/content-jobs/new)
+  작업: 전체 작업 (/content-jobs)
+  결과물: 결과물 갤러리 (/assets)
+  실행: 워커 (/automation)
+  운영: 오류 (/automation/errors) · 설정 (/settings)
+Do NOT show menu items for future features (Post, SNS, analytics, AI decisions). The only disabled
+UI in the app is the Asset 승인/반려 buttons (see /assets/:id) and the Cloud option ("준비 중").
 Header: page title, persona selector ("전체" + active personas, saved in localStorage,
 used as the default filter everywhere), running job count, system status badge
 (click → /automation), notification bell, user menu (profile, logout).
@@ -279,7 +306,12 @@ and Success states.
   asset count = count of assets. Use supabase count queries ({ count: 'exact', head: true }).
   Below the cards: retry-waiting count (automation_jobs.retry) and 7-day generation success
   rate. 3) running jobs with step progress, 4) 6 recent assets, 5) last 20 state_transitions
-  as an activity feed.
+  as an activity feed. Also show: 대기 (content_jobs.queued from get_dashboard_summary),
+  열린 오류 (count of system_errors with resolved = false; click → /automation/errors),
+  a Local Worker card from worker_status (id, target, provider, 온라인 / 응답 없음 / 꺼짐,
+  GPU name, VRAM, ComfyUI 연결, last_seen_at) and "마지막 갱신 HH:mm:ss" from the query's
+  dataUpdatedAt. If last_seen_at is older than 90 seconds show "워커 응답 없음" in the warning
+  color. Every number comes from a query: show 0 or "데이터 없음", never an invented value.
 
 /personas: cards (name, short description, status, content job count, asset count, [열기]),
   [+ Persona 만들기] (name, slug, description). Slug: lowercase the name, keep only [a-z0-9-],
@@ -320,9 +352,10 @@ and Success states.
   Columns: status, topic, persona, platform, priority, created, updated. Filters: persona,
   status, content type, platform, priority, date. Search: topic. Row click → detail.
 
-/content-jobs/new: persona (required, active only), content type (only 'image' enabled),
-  topic (required if prompt empty, ≤500), prompt (optional, ≤4000 — "비우면 AI가 만들어요"),
-  negative prompt (optional), variants 1-4, platform (default instagram), priority
+/content-jobs/new (page title "새 이미지 생성"): persona (required, active only), content type
+  (only 'image' enabled), prompt (REQUIRED, 1-4000 characters — without it the job never leaves
+  "대기 중"), topic (optional, ≤500), negative prompt (optional, prefilled from the persona's
+  content_rules.default_negative_prompt), variants 1-4, platform (default instagram), priority
   (낮음 1 / 보통 5 / 높음 8 / 긴급 10), workflow (optional, defaults to persona's),
   resolution preset (Persona 기본 / 세로 4:5 1024×1280 / 정사각 1024×1024 / 가로 3:2 1536×1024 →
   params.width and params.height; no free input; omit both to use the persona default; show only
@@ -332,16 +365,20 @@ and Success states.
   reference image of this persona, filtered by asset_types when given); required slots must be
   filled. Send input_images = { <slot>: { asset_id } | { persona_asset_id } } (TECH 13.6).
   Send null for every empty optional field (never "").
-  Execution Target (TECH 56.2): ◉ Local ○ Cloud. 기본값은 현재 app_settings.default_execution_target.
-    사용자가 이 Job만 다른 Target으로 바꿀 수 있고, 그 값이 p_execution_target으로 간다.
-    Target이 고정된다는 것을 한 줄로 알린다: "이 Job은 선택한 Target에서 실행됩니다. 나중에 기본
-    Target을 바꿔도 이 Job은 이동하지 않습니다."
+  Execution Target (TECH 56.2): ◉ Local ○ Cloud(비활성, "준비 중" — Cloud는 호스팅 JWT 검증 전까지
+    켜지 않는다). Local이 기본이고 그 값이 p_execution_target으로 간다. 바로 아래에
+    "Worker: 자동 선택"을 보여 준다 — Target(어디서)과 Worker(어느 인스턴스)와 GPU는 서로 다른
+    개념이므로 화면에서 GPU나 Worker를 고르게 하지 않는다. 한 줄 안내: "이 Job은 선택한 Target에서
+    실행됩니다. 나중에 기본 Target을 바꿔도 이 Job은 이동하지 않습니다."
     Capability 경고 (worker_status 보고값 기준, 조기 경고일 뿐):
-      선택한 Target의 Worker가 오프라인 → "⚠ Cloud Worker가 오프라인입니다. Job은 대기 상태로 남습니다."
+      Local Worker가 꺼져 있거나 응답 없음 → "⚠ 워커 응답 없음. Job은 대기 상태로 남습니다."
       보고된 VRAM이 Workflow 요구보다 작음 → "⚠ Local Worker의 VRAM이 부족할 수 있습니다."
       Persona가 고른 모델·LoRA가 그 Worker의 installed 목록에 없음 → "⚠ 이 Worker에 <파일>이 없습니다."
     **실행 시점의 Capability 검증이 최종 판단이다** (56.7). 경고는 막지 않고 알리기만 한다.
-  Submit → create_content_job → navigate to the detail page.
+  [생성] button: while the request is in flight it is disabled and reads "생성 중..." (use an
+    in-flight ref, not only React state: a fast double click must not send two requests).
+    On success show "생성 요청이 등록되었습니다. 작업을 처리하고 있습니다." and navigate to the
+    detail page. Only create_content_job is called; never insert automation_jobs.
   There is NO AI prompt preview, NO "improve with AI" button, NO schedule field.
 
 /content-jobs/:id: title, status badge, persona, type, platform, priority, created,
@@ -352,14 +389,19 @@ and Success states.
   실패한 generation 단계에 [다른 Target으로 재시도] 제공: 현재 Target의 반대를 골라
   retry_automation_job(job_id, target). 자동 전환은 하지 않는다 (56.2).
   Step progress (src/lib/progress.ts), computed from automation_jobs + latest execution_logs.step:
-    대기 (content job queued) → 프롬프트 (prompt job processing; the prompt step always exists —
-    if content_jobs.prompt was given, show it as 건너뜀 once the prompt job is done)
-    → 생성 대기 (generation job pending) → 생성 (COMFYUI_QUEUE/COMFYUI_WAIT, show elapsed time)
-    → 검증 (VALIDATE) → 업로드 (UPLOAD) → 완료 (content job ready).
+    요청 등록 (content job created_at) → 대기 중 (queued) → 디스패치 (execution_logs step DISPATCH)
+    → 워커 선점 (generation job status 'processing', claimed_by) → 준비 (BUILD, INPUT_UPLOAD only
+    when present) → ComfyUI 대기열 (COMFYUI_QUEUE) → 생성 (COMFYUI_WAIT, show elapsed time)
+    → 검증 (VALIDATE) → 업로드 (UPLOAD) → 결과물 등록·완료 (COMPLETE, content job ready).
+    A 프롬프트 step is shown ONLY when an automation_jobs row with job_type 'prompt' exists
+    (n8n path); the local flow has none. Mark a step done only when its log row exists, and
+    show real timestamps from the database only: never an estimate, never a percentage.
   Sections: content (topic, prompt or generated prompt_parts, negative prompt), result assets
   grid, caption draft (posts of these assets), execution timeline = state_transitions +
   execution_logs merged by time with Korean step labels.
-  Failure: Korean sentence from src/lib/errors.ts (e.g. OUT_OF_MEMORY → "GPU 메모리가
+  Failure: show what failed (step), the error code and whether it is retryable, taken from the
+  database (execution_logs.step, automation_jobs.error_code, system_errors.retryable): never decide
+  retryability in the browser. Korean sentence from src/lib/errors.ts (e.g. OUT_OF_MEMORY → "GPU 메모리가
   부족했어요. 후보 수나 해상도를 줄여 자동으로 다시 시도하고 있어요."), attempt "2 / 3", and a collapsible
   "기술 정보 보기" (error code, service, retryable, attempts, time, job id).
   Buttons come only from src/lib/actions.ts:
@@ -381,10 +423,16 @@ and Success states.
   p_input_images { init_image: { asset_id: <this asset id> } } (same persona, topic copied),
   [보관] (archive_asset, confirm; only when status ≠ 'archived').
   "생성 정보" from generation_metadata: workflow + version, model, LoRA + strength, seed,
-  steps, cfg, resolution, oom_downscaled, comfy_prompt_id.
+  steps, cfg, resolution (show it as "{width}×{height}" from generation_metadata.width and
+  generation_metadata.height: there is no "resolution" key), oom_downscaled, comfy_prompt_id.
+  Also show the lineage: Asset id,
+  status, persona, content job and automation job (links), prompt, created. Show "-" for a
+  missing value; never fill a field in by guessing.
+  [승인] [반려] buttons: visible but DISABLED, with the tooltip "Asset review backend가 구현되면
+  사용할 수 있습니다." They must not call anything and must not write assets.status.
 
 /automation: Workers — worker_status 한 줄에: Worker(id), **Target**(local/cloud),
-  **Provider**(local/runpod/…), Online / Degraded (comfyui_ok false) / Offline + last seen,
+  **Provider**(local/runpod/…), Online / Degraded (comfyui_ok false) / 응답 없음 (last_seen_at older than 90 s, "워커 응답 없음") + last seen,
   GPU 이름, VRAM(전체·여유), **installed models**, **installed LoRAs** (models.checkpoints /
   models.loras; 길면 개수 + 펼치기). 전부 Worker가 보고한 값이다 — 설정이 아니다 (TECH 56.2).
   **노출 금지**: GPU private URL, Pod id·secret, API 키, JWT 서명 키, SNS 토큰.
@@ -406,7 +454,9 @@ and Success states.
   (trim + lowercase each address before sending) and limits (a partial object is merged) via
   get_app_settings / update_app_setting. Hide admin sections for operators.
   Execution Target (admin only, TECH 56.2):
-    ◉ Local ○ Cloud → update_app_setting('default_execution_target', '"local"' | '"cloud"').
+    ◉ Local ○ Cloud(비활성, "준비 중") → update_app_setting('default_execution_target', '"local"').
+    Every setting change asks for confirmation first. While Cloud is disabled, hide the
+    [대기 중인 Job을 현재 Target으로 이동] button below.
     이 아래에 항상 보이는 안내: "기본 Target을 변경해도 이미 생성된 Job은 이동하지 않습니다."
     [대기 중인 Job을 현재 Target으로 이동] 버튼:
       누르기 전에 영향받는 건수를 보여준다 — automation_jobs에서 job_type='generation',
@@ -463,6 +513,10 @@ inventing a workaround.
 ## §2 Phase 프롬프트
 
 각 Phase를 따로 보낸다. 앞 Phase가 체크리스트를 통과한 뒤에 다음을 보낸다 (TECH 22.22).
+
+PRD(Lovable Control Center)의 단계 A(보기)·B(만들기)는 화면 단위가 아니라 기능 단위다. 이 파일의 Phase를
+1 → 6 순서로 보내면 A와 B가 모두 구현된다. 보기만 먼저 원하면 Phase 1, 4, 5를 읽기 전용으로 요청한다.
+B(만들기)를 확인하려면 로컬 워커가 켜져 있고 ComfyUI가 떠 있어야 한다.
 
 ### Phase 1 — Shell · Auth
 
@@ -529,8 +583,13 @@ Implement Phase 3 only: Content Jobs.
 - [테스트 이미지 생성] on the Visual Identity tab (draft with metadata.purpose='visual_test'
   then submit_content_job).
 The browser must not call n8n, Python or ComfyUI. Do not run or suggest SQL.
-Verify: a new job appears as 대기; changing statuses in the Supabase dashboard updates the
-list and detail without reload; every button matches src/lib/actions.ts.
+The form requires a prompt, disables the button while the request is in flight, and sends only
+create_content_job. Cancel, retry and regenerate use the RPCs in the brief and appear only for
+the statuses in src/lib/actions.ts.
+Verify: a new job appears as 대기, and with the local worker online it becomes 생성 중 within about
+10 seconds and then 완료 without any manual step and without a reload; a double click creates one
+job; changing statuses in the Supabase dashboard updates the list and detail without reload;
+every button matches src/lib/actions.ts.
 ```
 
 ### Phase 4 — Assets
@@ -538,8 +597,8 @@ list and detail without reload; every button matches src/lib/actions.ts.
 ```text
 Implement Phase 4 only: Asset Library.
 - /assets grid using thumbnail_url, filters, default hiding of archived and visual_test assets.
-- /assets/:id preview (public_url), metadata, generation info from generation_metadata,
-  download, 변형 만들기 (create_content_job with image_to_image_v1 and init_image = this asset),
+- /assets/:id preview (public_url), metadata, generation info and lineage from generation_metadata,
+  disabled 승인/반려 buttons with the tooltip from the brief, download, 변형 만들기 (create_content_job with image_to_image_v1 and init_image = this asset),
   보관 (archive_asset with confirm).
 - Realtime: new assets appear without reload.
 Generated media is in the public "media" bucket: use public_url/thumbnail_url, no signed URLs.
@@ -575,7 +634,10 @@ Check and fix:
 - no mock data, no fake progress percentages;
 - every page has loading, empty and error states; RPC error codes handled;
 - realtime subscriptions are cleaned up on unmount;
-- UI copy is Korean.
+- UI copy is Korean;
+- the Asset 승인/반려 buttons do nothing, and personas/persona_assets are never deleted;
+- the built code and env contain none of: service_role, SUPABASE_SERVICE_ROLE_KEY, sb_secret,
+  JWT_SIGNING_SECRET, WORKER_SECRET, SNS_ACCESS_TOKEN, ANTHROPIC_API_KEY.
 Report what you changed.
 ```
 
