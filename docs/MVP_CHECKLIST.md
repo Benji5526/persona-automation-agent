@@ -49,7 +49,7 @@
 | 17 | Decision 검증 (n8n 조기 + DB 최종) | 4 | 54.5 1번 테스트 | ☐ |
 | 18 | Decision → 새 Content Job (승인 후, `source = 'agent'`) | 4 | 30.18 E2E | ☐ |
 | 19 | Audit Log | 1~4 | `state_transitions`, `execution_logs`, `ai_decisions` | ☐ 부분 (`execution_logs` 11행 확인. `state_transitions`·`ai_decisions`는 미확인) |
-| 20 | Emergency Stop (전역·플랫폼·Persona) | 2~4 | 33.16, 30.18 (`agent_enabled = false`) | ☐ |
+| 20 | Emergency Stop (전역·플랫폼·Persona) | 2~4 | 33.16, 30.18 (`agent_enabled = false`) | ☐ 부분 (전역 범위만: 0014를 호스팅에 적용했고, 로컬 DB 테스트 21개와 Lovable 화면의 수동 시험(정지 → 정지 중 주문 → 다시 켜기)으로 확인. Persona·플랫폼 정지는 막을 대상(AI Decision, 게시)이 아직 없어 만들지 않음) |
 | 21 | Retry (일시 오류 재시도, 최종 실패 표시) | 1 | 27.5 F2·F6 | ☐ 부분 (재시도 불가 오류 `LORA_NOT_FOUND`가 1회 시도로 즉시 실패하고 화면이 실패 단계·시도 횟수·재시도 불가를 표시함을 확인. 일시 오류의 재시도·백오프는 미확인) |
 | 22 | Idempotency (생성·게시·수집·결정) | 1~4 | 27.6 D1~D3, 43.8, 49.5 1번 | ☐ |
 | 23 | RLS (교차 계정·교차 Persona) | 1~4 | 27.7 S2~S4, 50.5 1번, 51.5 3번 | ☐ |
@@ -192,3 +192,34 @@
 **남은 사실**
 - 반려로 Content Job에 유효한 Asset이 하나도 남지 않아도 Job은 `ready`로 남는다(설계에 이를 막는 규칙이 없다). 필요하면 별도로 결정한다.
 - Google 로그인은 Lovable 편집기 안의 미리보기 패널(iframe)에서는 열리지 않는다(일반 403). 새 탭이나 새 창에서 열어야 한다.
+
+### Emergency Stop (전역) 백엔드 기록 (2026-10-18)
+
+범위: 마이그레이션 `0014_emergency_stop.sql`과 Lovable Phase 7(헤더 [긴급 정지] 버튼, 정지 중 배너, 설정의 스위치별 다시 켜기). 설계는 TECH_DESIGN 32.6, 33.10, CLAUDE.md 11. 호스팅 Supabase에 적용했고 화면에서 수동 시험을 마쳤다(아래 "수동 시험").
+
+**왜 전역만 했나**: 33.10에서 Persona 정지(`agent_paused`)는 "새 Decision Run·자동 승인·팬 자동 응답"만, 플랫폼 정지(`platform_controls`)는 "그 플랫폼의 게시·팬 전송"만 막는다. 둘 다 아직 없는 기능이다. 생성은 이미 동작하므로 전역 정지가 지금 의미 있는 유일한 범위다. 막을 대상이 없는 칸과 설정을 미리 만들면 시험할 수 없는 데이터만 남는다. 그래서 20번은 ☑가 아니라 "부분"이다.
+
+**동작**
+- `emergency_stop_all()`(admin): `publishing_enabled`와 `generation_enabled`를 한 트랜잭션에서 끄고 `security_events`에 `EMERGENCY_STOP_ALL`(누가, 직전 값)을 남긴다. 이미 꺼져 있어도 같은 결과(멱등). 운영자(비관리자)는 `PT403`, anon은 `42501`.
+- 막는 것: 디스패처(0012가 이미 이 스위치를 읽는다), `claim_content_job`(n8n 경로 포함), 새 generation Job 선점(`claim_automation_job`, `claim_next_automation_job`). 주문 접수(`create_content_job`)는 받고 `queued`로 남는다.
+- 계속되는 것: 이미 선점한 작업의 heartbeat·결과 등록·완료, 이미 시작한 Content Job의 prompt 단계, 수집·오류 기록·복구. 데이터와 진행 중 작업의 상태는 건드리지 않는다.
+- 다시 켜기: 스위치마다 `update_app_setting('generation_enabled', true)`로 따로 켠다. "모두 다시 시작" RPC는 만들지 않았다(설계 32.6). 끄고 켤 때마다 `security_events`(`GENERATION_DISABLED`/`GENERATION_ENABLED`).
+- Fail Closed(33.12): 값이 정확히 `true`가 아니거나 행이 없으면 생성은 막힌다. 행이 없어도 `update_app_setting`으로 다시 켤 수 있다.
+
+**12칸**
+- DB ✔ 새 마이그레이션, 새 스위치 행, `private.generation_enabled()`. RLS ✔ 설정은 RPC로만(admin), 직접 쓰기 없음. API ✔ `PT403`·`PT422`. Logging ✔ `security_events`.
+- Idempotency ✔ `emergency_stop_all()` 재호출이 같은 결과(기록은 호출마다 남음).
+- Tests ✔ `tests/db/test_emergency_stop.py` 21개. 안전장치를 하나씩 일부러 빼서(`claim_automation_job`, `claim_next_automation_job`, `claim_content_job`의 검사, Fail Closed, 게시 스위치 끄기) 해당 테스트가 모두 실패함을 확인했다. 권한 표면 테스트와 설정 키 테스트, 마이그레이션 번호 테스트, `verify_production.sql`(블록 5는 17개, 새 블록 26)을 함께 갱신.
+- Security ✔ authenticated 전용, 워커 거부 목록에 추가. 선점 함수의 시그니처와 권한은 그대로.
+- Documentation ✔ `supabase/README.md`, `README.md`, 이 기록.
+- Hook·UI ✔ Lovable Phase 7: `useEmergencyStop`, 헤더 [긴급 정지](확인 창), 정지 중 배너, 설정의 스위치별 다시 켜기. 설정 조회는 15초마다 갱신.
+
+**수동 시험 (2026-10-18, 호스팅 Supabase + 로컬 브릿지, DB 기록으로 대조)**
+- 14:38:46Z `EMERGENCY_STOP_ALL` (직전 값 generation 켜짐, publishing 꺼짐). 14:39:31Z 한 번 더 눌러도 오류 없이 기록(멱등, 직전 값 둘 다 꺼짐).
+- 정지 중인 14:39:22Z에 만든 주문은 접수됐고, 그 generation Job은 14:39:49Z `GENERATION_ENABLED`(admin) 뒤인 14:39:58Z에야 만들어져 14:40:19Z에 `done`, Content Job `ready`. 정지 동안 새 일이 시작되지 않았고, 켜자 이어졌다.
+- 같은 시간대의 실패 Job 하나(`LORA_NOT_FOUND`, Persona에 활성 LoRA 없음)는 첫 정지보다 8초 앞서 났고 정지와 무관하다.
+- 이 시험에서 **관찰하지 못한 것**: 생성 도중에 정지를 눌렀을 때 진행 중인 Job이 끝나는지. 이 동작은 DB 테스트(`test_a_job_already_claimed_finishes_normally_while_stopped`)로만 확인했다. 실제 환경에서 보려면 생성이 도는 중에 정지를 누르면 된다.
+
+**남은 일**
+- (선택) 생성 도중 정지를 눌러 진행 중 Job이 끝나는지 실제 환경에서 한 번 확인.
+- Persona 정지(`agent_paused`)와 플랫폼 정지(`platform_controls`)는 AI Decision과 게시 기능을 만들 때 같이 한다.

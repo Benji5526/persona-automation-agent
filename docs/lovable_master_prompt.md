@@ -249,6 +249,13 @@ supabase.rpc(name, args):
   automation_jobs.failed is an ALL-TIME count (it includes failed steps of jobs that were later
   retried from the start or cancelled): use it only for the /automation queue numbers.
 - get_app_settings(), update_app_setting(p_key, p_value)   admin only
+    get_app_settings()는 generation_enabled와 publishing_enabled(둘 다 boolean)도 돌려준다.
+    update_app_setting은 generation_enabled를 boolean으로 바꿀 수 있다 (다시 켜기: true).
+- emergency_stop_all() → jsonb {publishing_enabled: false, generation_enabled: false}   admin only
+    전역 긴급 정지: 새 Content Job 시작, 새 generation Job 선점, 게시를 한 번에 멈춘다. 진행 중인 작업은 끝까지
+    진행되고 데이터는 지워지지 않는다. 이미 정지 중이어도 오류 없이 같은 결과다. 다시 켜는 RPC는 없다:
+    스위치마다 update_app_setting('generation_enabled', true)로 따로 켠다 ("모두 다시 시작" 버튼을 만들지 않는다).
+    운영자(비관리자)는 PT403.
 
 Errors come back as { code, message, details }: code is a SQLSTATE, message is our code,
 details is English technical text.
@@ -287,7 +294,8 @@ Do NOT show menu items for future features (Post, SNS, analytics, AI decisions).
 disabled UI in the app is the Cloud option ("준비 중").
 Header: page title, persona selector ("전체" + active personas, saved in localStorage,
 used as the default filter everywhere), running job count, system status badge
-(click → /automation), notification bell, user menu (profile, logout).
+(click → /automation), notification bell, user menu (profile, logout), and for the admin an
+emergency stop button.
 Below 768px the sidebar becomes a sheet menu.
 
 ==================================================
@@ -487,6 +495,19 @@ and Success states.
     Cloud는 Worker JWT 보안이 끝나기 전까지 실제로 실행되지 않는다 (56.5): 그래서 Cloud는 고를 수
     없고(비활성, "준비 중") 위 [이동] 버튼은 숨긴다. 화면은 execution_target 'cloud'를 어디로도 보내지 않는다.
 
+Emergency stop UI (admin only; operators cannot read the settings, so they see nothing): the header has a
+  [긴급 정지] button (destructive outline, always reachable) that opens a confirm dialog ("새 Content Job 시작과
+  게시를 모두 멈춰요. 진행 중인 생성은 끝까지 진행되고 데이터는 지워지지 않아요.", [긴급 정지] [취소]) and then calls
+  emergency_stop_all(). While generation_enabled is false: a persistent warning banner under the header says
+  "⚠ 긴급 정지 중이에요. 새 생성이 시작되지 않아요. 진행 중인 작업은 끝나요." with a [생성 다시 켜기] button
+  (confirm dialog → update_app_setting('generation_enabled', true)), and the header system status reads
+  "● 긴급 정지 중". /settings (admin) has a "긴급 정지" section with the state of both switches ("켜짐" / "꺼짐",
+  from get_app_settings), the same stop button and [생성 다시 켜기]. There is NO "모두 다시 시작" button and no
+  button to turn publishing back on (there is no publishing feature yet: say "게시 기능은 아직 없어요").
+  Read the switches with get_app_settings through TanStack Query (refetch every 15 seconds and after every
+  change). After a change invalidate the settings, overview and content-jobs queries. Use an in-flight ref
+  (a double click must not send two requests). Korean error copy as elsewhere (PT403 → "권한이 없어요").
+  Never call anything else to stop or resume.
 Header system status: "● 정상" (all workers online, no failed automation job in the last 24h) /
   "● 확인 필요 N건" (retry-waiting jobs + automation jobs failed in the last 24h, by completed_at) /
   "● 생성 Worker 꺼짐" etc. (python or n8n worker offline, or comfyui_ok false on the python
@@ -660,6 +681,23 @@ Check and fix:
 - the built code and env contain none of: service_role, SUPABASE_SERVICE_ROLE_KEY, sb_secret,
   JWT_SIGNING_SECRET, WORKER_SECRET, SNS_ACCESS_TOKEN, ANTHROPIC_API_KEY.
 Report what you changed.
+```
+
+### Phase 7 — Emergency Stop (전역)
+
+```text
+Implement the global Emergency Stop UI only, as described in the brief (docs/brief/rpc_functions.md and
+docs/brief/screens_phase4_5.md: the /settings section and "Emergency stop UI").
+- A [긴급 정지] button in the header (admin only) with a confirm dialog, calling emergency_stop_all().
+- A persistent warning banner under the header while generation_enabled is false, with [생성 다시 켜기]
+  (confirm dialog, update_app_setting('generation_enabled', true)); the header status reads "● 긴급 정지 중".
+- /settings (admin): a "긴급 정지" section with the state of both switches, the same stop button and
+  [생성 다시 켜기]. No "모두 다시 시작" button and no button to turn publishing back on.
+- Tests for the confirm flow, the double-click guard, the RPC arguments and the visibility rules (admin only).
+Do not add other features, do not touch the database, do not run or suggest SQL, and do not edit the generated
+files (src/integrations/supabase/types.ts, client.server.ts). If the generated types do not know
+generation_enabled or emergency_stop_all yet, use a small local type and a narrow cast inside the hook and
+tell me. Reply with a short summary of the files you changed.
 ```
 
 ---

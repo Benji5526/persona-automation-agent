@@ -25,7 +25,7 @@ PA_WORKER_RPC_DENYLIST = {
     "create_content_job", "submit_content_job", "cancel_content_job", "retry_content_job",
     "regenerate_content_job", "retry_automation_job", "archive_asset", "resolve_system_error",
     "get_app_settings", "update_app_setting", "get_dashboard_summary",
-    "issue_worker_credential", "list_worker_credentials", "move_pending_jobs_to_target", "review_asset",
+    "issue_worker_credential", "list_worker_credentials", "move_pending_jobs_to_target", "review_asset", "emergency_stop_all",
     "claim_content_job", "create_automation_job", "save_prompt_parts", "create_post_draft",
     "sync_workflow_registry", "recover_stale_jobs", "reserve_llm_call", "dispatch_queued_content_jobs",
 }
@@ -35,7 +35,7 @@ AUTHENTICATED_RPC_ALLOWLIST = {
     "archive_asset", "cancel_content_job", "create_content_job", "get_app_settings", "get_dashboard_summary",
     "issue_worker_credential", "list_worker_credentials", "move_pending_jobs_to_target",
     "regenerate_content_job", "resolve_system_error", "retry_automation_job", "retry_content_job",
-    "revoke_worker_credential", "review_asset", "submit_content_job", "update_app_setting",
+    "revoke_worker_credential", "review_asset", "emergency_stop_all", "submit_content_job", "update_app_setting",
 }
 WORKER_ONLY_RPCS = {
     "claim_next_automation_job", "claim_automation_job", "heartbeat_automation_job", "complete_automation_job",

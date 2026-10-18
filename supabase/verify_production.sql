@@ -5,7 +5,7 @@
 -- =============================================================================
 
 -- 1. 마이그레이션 적용 버전
---    기대: 0001 ~ 0013 열세 줄 (파일 이름 앞부분이 version)
+--    기대: 0001 ~ 0014 열네 줄 (파일 이름 앞부분이 version)
 select version
   from supabase_migrations.schema_migrations
  order by version;
@@ -32,13 +32,14 @@ select n.nspname as schema, p.proname as function_name
    and has_function_privilege('anon', p.oid, 'execute');
 
 -- 5. authenticated(Lovable)가 실행할 수 있는 public 함수
---    기대: 16개 — archive_asset, cancel_content_job, create_content_job,
+--    기대: 17개 — archive_asset, cancel_content_job, create_content_job,
 --          get_app_settings, get_dashboard_summary, regenerate_content_job, resolve_system_error,
 --          retry_automation_job, retry_content_job, submit_content_job, update_app_setting
 --          + 0010: move_pending_jobs_to_target (admin)
 --          + 0011: issue_worker_credential, list_worker_credentials, revoke_worker_credential
 --            (함수 안에서 private.require_admin()으로 막는다. revoke는 Worker가 자기 자격만 폐기할 수도 있다)
 --          + 0013: review_asset (Asset 승인·반려. 내 Persona의 Asset만, 반려 사유는 assets.review_note)
+--          + 0014: emergency_stop_all (admin. 전역 긴급 정지: 생성·게시 스위치를 한 번에 끈다)
 --    claim_*, complete_*, fail_*, heartbeat_*, register_asset, report_worker_status,
 --    reserve_llm_call, dispatch_queued_content_jobs, sync_workflow_registry 등이 보이면 안 된다.
 select p.proname as function_name
@@ -264,3 +265,14 @@ select
            where table_schema = 'public' and table_name = 'assets' and column_name = 'review_note') as has_review_note,
   has_function_privilege('authenticated', 'public.review_asset(uuid, text, text)', 'execute') as authenticated_can_execute,
   has_function_privilege('anon', 'public.review_asset(uuid, text, text)', 'execute') as anon_can_execute;
+
+-- 26. 0014 Emergency Stop (전역)
+--     기대: has_generation_switch = true, authenticated_can_execute = true, anon_can_execute = false
+--           (generation_enabled 값은 평소에 true. 정지 중이면 false이고 publishing_enabled도 false)
+select
+  exists (select 1 from public.app_settings where key = 'generation_enabled') as has_generation_switch,
+  has_function_privilege('authenticated', 'public.emergency_stop_all()', 'execute') as authenticated_can_execute,
+  has_function_privilege('anon', 'public.emergency_stop_all()', 'execute') as anon_can_execute;
+
+--     현재 스위치 상태 (정지 중인지 보는 용도)
+select key, value from public.app_settings where key in ('generation_enabled', 'publishing_enabled') order by key;
