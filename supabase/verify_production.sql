@@ -32,10 +32,14 @@ select n.nspname as schema, p.proname as function_name
    and has_function_privilege('anon', p.oid, 'execute');
 
 -- 5. authenticated(Lovable)가 실행할 수 있는 public 함수
---    기대: Operator RPC만 — archive_asset, cancel_content_job, create_content_job,
+--    기대: 15개 — archive_asset, cancel_content_job, create_content_job,
 --          get_app_settings, get_dashboard_summary, regenerate_content_job, resolve_system_error,
 --          retry_automation_job, retry_content_job, submit_content_job, update_app_setting
---    claim_*, complete_*, fail_*, register_asset, report_worker_status 등이 보이면 안 된다.
+--          + 0010: move_pending_jobs_to_target (admin)
+--          + 0011: issue_worker_credential, list_worker_credentials, revoke_worker_credential
+--            (함수 안에서 private.require_admin()으로 막는다. revoke는 Worker가 자기 자격만 폐기할 수도 있다)
+--    claim_*, complete_*, fail_*, heartbeat_*, register_asset, report_worker_status,
+--    reserve_llm_call, dispatch_queued_content_jobs, sync_workflow_registry 등이 보이면 안 된다.
 select p.proname as function_name
   from pg_proc p
   join pg_namespace n on n.oid = p.pronamespace
