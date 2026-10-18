@@ -4,7 +4,7 @@ Lovable에 붙여 넣는 프롬프트다. 설계 배경과 사용 방법은 [TEC
 
 **사용 순서**
 
-1. Lovable 프로젝트를 만들고, Lovable의 Supabase 통합으로 **기존** Supabase 프로젝트(마이그레이션 0001~0012 적용 완료)를 연결한다.
+1. Lovable 프로젝트를 만들고, Lovable의 Supabase 통합으로 **기존** Supabase 프로젝트(마이그레이션 0001~0013 적용 완료)를 연결한다.
 2. 아래 **§1 Master Prompt**를 Project Knowledge(또는 첫 메시지)에 넣는다. 이 단계에서는 코드를 만들지 말라고 한다.
 3. **§2 Phase 프롬프트**를 하나씩 보낸다. 각 Phase가 끝나면 체크리스트를 확인하고 GitHub에 동기화한 뒤 다음으로 넘어간다.
 4. Lovable이 SQL·마이그레이션 실행을 제안하면 **거절한다.** 스키마의 정본은 이 저장소의 `supabase/migrations`다.
@@ -71,7 +71,8 @@ all without opening the Supabase SQL editor.
     design does not). Archive instead. There is no hard delete anywhere in the UI.
 12. Never call dispatch_queued_content_jobs, claim_*, create_automation_job or any other worker
     RPC. The database runs the dispatcher by itself; the browser only creates and watches jobs.
-13. There is no Asset approve/reject backend yet. Never write assets.status directly.
+13. Asset review goes through the review_asset RPC only. Never write assets.status or
+    assets.review_note directly.
 
 ==================================================
 3. STACK
@@ -164,8 +165,11 @@ automation_jobs (id, persona_id, content_job_id, job_type 'prompt'|'generation'|
 
 assets (id, persona_id, content_job_id, automation_job_id, asset_type 'image'|'video',
   file_name, storage_bucket, storage_path, public_url, thumbnail_url, mime_type, width,
-  height, duration, prompt, workflow jsonb, generation_metadata jsonb, status, created_at)
+  height, duration, prompt, workflow jsonb, generation_metadata jsonb, status, review_note,
+  created_at)
   status: 'generated' | 'approved' | 'rejected' | 'archived'
+  review_note: read-only text (≤500). Only review_asset writes it: the reject reason, empty
+  otherwise (approving again clears it).
   - Generated media is in the PUBLIC bucket "media": use public_url / thumbnail_url directly.
 
 posts (id, persona_id, asset_id, platform, caption ≤2200, hashtags text[] ≤30, status, ...)
@@ -230,7 +234,12 @@ supabase.rpc(name, args):
 - list_worker_credentials() → worker_credentials[]   admin. jti·worker_id·target·provider·만료·폐기 시각만.
     **토큰 값은 어디에도 저장되지 않으므로 보여줄 수 없다**
 - archive_asset(p_asset_id)
-  (승인·반려 RPC는 **아직 없다**. /assets/:id의 승인·반려 버튼은 비활성으로만 둔다.)
+- review_asset(p_asset_id, p_decision, p_note?) → assets row     p_decision: 'approved' | 'rejected'
+    generated·rejected → approved, generated·approved → rejected. 반려할 때만 사유 p_note를 보낸다
+    (500자 이하, 앞뒤 공백은 DB가 지운다, 선택). 다시 승인하면 DB가 사유를 비운다. 승인에 사유를 보내면 PT422.
+    오류: PT404(내 Asset이 아님), PT409(같은 결정을 다시, 보관된 Asset, 또는 이 Asset의 Post가
+    예약·게시 중·게시됨이라 반려 불가), PT422(결정 값이 틀림, 사유가 500자 초과).
+    누가·언제는 DB가 state_transitions에 남긴다 (브라우저가 기록하지 않는다).
 - resolve_system_error(p_error_id)                p_error_id is a bigint
 - get_dashboard_summary(p_persona_id?) → jsonb {
     personas, content_jobs: {<status>: count}, automation_jobs: {active, pending, retry, failed},
@@ -274,8 +283,8 @@ Sidebar (Korean labels, grouped, lucide icons):
   결과물: 결과물 갤러리 (/assets)
   실행: 워커 (/automation)
   운영: 오류 (/automation/errors) · 설정 (/settings)
-Do NOT show menu items for future features (Post, SNS, analytics, AI decisions). The only disabled
-UI in the app is the Asset 승인/반려 buttons (see /assets/:id) and the Cloud option ("준비 중").
+Do NOT show menu items for future features (Post, SNS, analytics, AI decisions). The only permanently
+disabled UI in the app is the Cloud option ("준비 중").
 Header: page title, persona selector ("전체" + active personas, saved in localStorage,
 used as the default filter everywhere), running job count, system status badge
 (click → /automation), notification bell, user menu (profile, logout).
@@ -430,8 +439,17 @@ and Success states.
   Also show the lineage: Asset id,
   status, persona, content job and automation job (links), prompt, created. Show "-" for a
   missing value; never fill a field in by guessing.
-  [승인] [반려] buttons: visible but DISABLED, with the tooltip "Asset review backend가 구현되면
-  사용할 수 있습니다." They must not call anything and must not write assets.status.
+  [승인] [반려] (review_asset): [승인] asks for confirmation, then calls review_asset(id, 'approved').
+  [반려] opens a dialog with an optional 사유 field (≤500 characters, with a counter) and a confirm button,
+  then calls review_asset(id, 'rejected', <사유 or null>); send null, never "", when the field is empty.
+  Show [승인] only when status is 'generated' or 'rejected'; show [반려] only when status is 'generated' or
+  'approved'; show neither for 'archived'. Use an in-flight ref and disable the buttons while a request
+  runs (a double click must not send two requests). A rejected Asset shows its 사유 (assets.review_note, or
+  "사유 없음" when empty) in a [사유 보기] section; an approved Asset shows none. Errors in Korean, with the
+  collapsible 기술 정보: PT409 → "이미 처리된 Asset이거나, 예약·게시된 Post가 있어 반려할 수 없어요",
+  PT404 → "Asset을 찾을 수 없어요", PT422 → "입력값을 확인해 주세요". On success show a toast ("승인했어요" /
+  "반려했어요") and invalidate the asset detail, the asset library and the dashboard queries. Only
+  review_asset changes the status: never write assets.status or assets.review_note directly.
 
 /automation: Workers — worker_status 한 줄에: Worker(id), **Target**(local/cloud),
   **Provider**(local/runpod/…), Online / Degraded (comfyui_ok false) / 응답 없음 (last_seen_at older than 90 s, "워커 응답 없음") + last seen,
@@ -600,7 +618,7 @@ every button matches src/lib/actions.ts.
 Implement Phase 4 only: Asset Library.
 - /assets grid using thumbnail_url, filters, default hiding of archived and visual_test assets.
 - /assets/:id preview (public_url), metadata, generation info and lineage from generation_metadata,
-  disabled 승인/반려 buttons with the tooltip from the brief, download, 변형 만들기 (create_content_job with image_to_image_v1 and init_image = this asset),
+  승인/반려 via review_asset (reject with an optional reason dialog) as in the brief, download, 변형 만들기 (create_content_job with image_to_image_v1 and init_image = this asset),
   보관 (archive_asset with confirm).
 - Realtime: new assets appear without reload.
 Generated media is in the public "media" bucket: use public_url/thumbnail_url, no signed URLs.
@@ -637,7 +655,8 @@ Check and fix:
 - every page has loading, empty and error states; RPC error codes handled;
 - realtime subscriptions are cleaned up on unmount;
 - UI copy is Korean;
-- the Asset 승인/반려 buttons do nothing, and personas/persona_assets are never deleted;
+- the Asset 승인/반려 buttons only call review_asset (assets.status and assets.review_note are never
+  written directly), and personas/persona_assets are never deleted;
 - the built code and env contain none of: service_role, SUPABASE_SERVICE_ROLE_KEY, sb_secret,
   JWT_SIGNING_SECRET, WORKER_SECRET, SNS_ACCESS_TOKEN, ANTHROPIC_API_KEY.
 Report what you changed.

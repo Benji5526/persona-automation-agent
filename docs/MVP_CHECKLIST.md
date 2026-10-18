@@ -39,7 +39,7 @@
 | 7 | ComfyUI 생성 (활성 GPU: Local 또는 Cloud) | 1 | 25.6, 48.8 | ☑ Local (2026-10-18). Cloud는 호스팅 검증 전이라 미확인 |
 | 8 | Asset 업로드 (Storage) | 1 | 27.4 | ☑ Local (2026-10-18). `media` 버킷의 PNG·썸네일(WebP) 공개 URL이 200이고 MIME·크기가 맞음. Lovable `/assets`에서 이미지 표시와 다운로드를 사용자가 확인 |
 | 9 | Asset DB 등록 (lineage 칸 포함) | 1 | 27.3 확인 SQL, 50.3 | ☑ Local (2026-10-18). persona·content job·automation job·workflow(+버전)·model·seed·prompt·negative prompt·width/height 확인. LoRA는 쓰지 않아 null (N/A) |
-| 10 | Asset 승인·반려 (사유) | 2 | 50.5 3번 | ☐ 부분 (백엔드 `review_asset`(0013)과 `assets.review_note`는 로컬 DB 테스트 24개로 검증. 실제 Supabase 적용 전이고 Lovable 화면의 승인·반려 버튼은 아직 비활성) |
+| 10 | Asset 승인·반려 (사유) | 2 | 50.5 3번 | ☑ Lovable 화면 (2026-10-18, 사용자 확인). 백엔드 `review_asset`(0013)은 로컬 DB 테스트 24개와 호스팅 적용 점검(칸 생성, authenticated만 실행)을 확인했고, 승인·사유 있는 반려·재승인은 사용자가 화면에서 통과시킴. 다운스트림(Post 게시)은 아직 이 상태를 쓰지 않음 |
 | 11 | Post 생성 (캡션 초안 → 제출) | 2 | 28.7, 51장 | ☐ |
 | 12 | SNS 게시 (Instagram 또는 X) | 2 | 28.15 E2E, 관문 G2 | ☐ |
 | 13 | Post ID 저장 (`external_post_id`, `permalink`) | 2 | 11.8 CHECK | ☐ |
@@ -183,7 +183,12 @@
 - Documentation ✔ `supabase/README.md`, `README.md`, `verify_production.sql`, 이 기록.
 - Hook·UI: 이번 범위 밖. Lovable 화면의 승인·반려 버튼 연결은 호스팅 적용과 확인 뒤에 한다.
 
-**남은 일**
-- 호스팅 Supabase에 0013 적용 후 `verify_production.sql` 블록 5(16개)와 25를 확인.
-- Lovable 브리프(`docs/lovable_master_prompt.md`)의 승인·반려 관련 문구를 바꾸고 Lovable 화면 연결, 그 뒤 이 항목(10번)을 ☑로 올린다.
+**진행 결과 (같은 날 이어서)**
+- 호스팅 Supabase에 0013을 적용했다 (사용자 실행). 점검 SQL(블록 25)이 `true, true, false`로 나왔고, `assets.review_note` 칸이 생긴 것을 읽기 전용으로 확인했다. 블록 5의 전체 16개 목록은 호스팅에서 따로 확인하지 않았다.
+- Lovable 브리프(규칙 13번, 데이터 모델, RPC 목록, `/assets/:id`)를 바꾸고 Project knowledge와 `docs/brief/` 파일을 갱신한 뒤, 승인·반려를 `review_asset`에 연결하는 화면 수정을 적용했다. 코드는 읽기 전용으로 점검했다(호출 RPC는 `review_asset`뿐, 사유는 반려에서만 전달하고 빈 값은 null, 버튼 노출 조건, 중복 클릭 방지).
+- 사용자가 화면에서 승인, 사유 있는 반려, 사유 보기, 재승인을 통과시켰다. Lovable이 보고한 자동 테스트 60개는 이 기록의 작성자가 실행한 것이 아니다.
+- 승인·반려는 지금은 Asset의 상태와 사유를 남기는 단계다. 이 상태를 읽어 게시 대상을 거르는 일은 Post 게시(항목 11~13)를 만들 때 한다.
+
+**남은 사실**
 - 반려로 Content Job에 유효한 Asset이 하나도 남지 않아도 Job은 `ready`로 남는다(설계에 이를 막는 규칙이 없다). 필요하면 별도로 결정한다.
+- Google 로그인은 Lovable 편집기 안의 미리보기 패널(iframe)에서는 열리지 않는다(일반 403). 새 탭이나 새 창에서 열어야 한다.
