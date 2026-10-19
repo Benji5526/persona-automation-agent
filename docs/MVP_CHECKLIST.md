@@ -40,7 +40,7 @@
 | 8 | Asset 업로드 (Storage) | 1 | 27.4 | ☑ Local (2026-10-18). `media` 버킷의 PNG·썸네일(WebP) 공개 URL이 200이고 MIME·크기가 맞음. Lovable `/assets`에서 이미지 표시와 다운로드를 사용자가 확인 |
 | 9 | Asset DB 등록 (lineage 칸 포함) | 1 | 27.3 확인 SQL, 50.3 | ☑ Local (2026-10-18). persona·content job·automation job·workflow(+버전)·model·seed·prompt·negative prompt·width/height 확인. LoRA는 쓰지 않아 null (N/A) |
 | 10 | Asset 승인·반려 (사유) | 2 | 50.5 3번 | ☑ Lovable 화면 (2026-10-18, 사용자 확인). 백엔드 `review_asset`(0013)은 로컬 DB 테스트 24개와 호스팅 적용 점검(칸 생성, authenticated만 실행)을 확인했고, 승인·사유 있는 반려·재승인은 사용자가 화면에서 통과시킴. 다운스트림(Post 게시)은 아직 이 상태를 쓰지 않음 |
-| 11 | Post 생성 (캡션 초안 → 제출) | 2 | 28.7, 51장 | ☐ |
+| 11 | Post 생성 (캡션 초안 → 제출) | 2 | 28.7, 51장 | ☐ 부분 (백엔드 0015를 로컬 DB 테스트 54개로 검증하고 호스팅에 적용·점검함(2026-10-19). Lovable 화면(Phase 8)은 아직 없음. 승인·반려까지 포함, 예약·게시는 12번) |
 | 12 | SNS 게시 (Instagram 또는 X) | 2 | 28.15 E2E, 관문 G2 | ☐ |
 | 13 | Post ID 저장 (`external_post_id`, `permalink`) | 2 | 11.8 CHECK | ☐ |
 | 14 | 성과 수집 (24h·168h Snapshot) | 3 | 29.20 테스트, 52장 | ☐ |
@@ -223,3 +223,26 @@
 **남은 일**
 - (선택) 생성 도중 정지를 눌러 진행 중 Job이 끝나는지 실제 환경에서 한 번 확인.
 - Persona 정지(`agent_paused`)와 플랫폼 정지(`platform_controls`)는 AI Decision과 게시 기능을 만들 때 같이 한다.
+
+### Post 승인 흐름 백엔드 기록 (2026-10-19)
+
+범위: 마이그레이션 `0015_post_approval.sql`. Asset → Post 초안 → 제출 → 승인·반려(완료 목록 11번). 예약·게시·게시 전 검사(12·13번)는 다음 마이그레이션이다. 설계 기록은 TECH_DESIGN 56.12. 호스팅에 적용했고(2026-10-19) Lovable 화면(Phase 8)은 아직 없다.
+
+**동작**
+- `create_post_from_asset`: 운영자가 쓰는 캡션 초안(`draft`). 원래 초안은 WF-005(LLM)가 만들지만 로컬 흐름에는 LLM 캡션 경로가 없어 더했다(설계 추가). 캡션 필수·2200자, 해시태그 30개(`#`는 DB가 떼고 중복 제거), 플랫폼은 instagram·x, Asset은 `generated`·`approved`만(반려·보관은 거부), 활성 Persona만.
+- `submit_post_for_approval`: `draft → pending_approval`과 대기 중인 `approvals` 행. 같은 Persona·같은 플랫폼의 **활성** 계정이 있어야 한다.
+- `resolve_approval`: 승인·반려. Post는 같은 트랜잭션에서 `approved`·`rejected`(롤업 R6). 한 번만 처리, 누가·언제는 `state_transitions`.
+- `revise_post`: `rejected → draft`(캡션·해시태그를 함께 고칠 수 있음). 다시 제출하면 새 승인 행(지난 행은 기록으로 남음).
+- `cancel_post`: `published`를 뺀 모든 상태 → `cancelled`, 대기 중인 승인과 진행 중인 Job도 함께 취소(R5). **`publishing` 중에는 거부**(외부 SNS 호출이 이미 나갔을 수 있어서).
+- **승인 없이는 Post가 `approved`가 될 수 없다**: 그 Post의 approvals 행이 `approved`일 때만 전이가 통과한다. service_role로 상태만 바꿔도 막힌다.
+
+**12칸**
+- DB ✔ 새 마이그레이션, `approvals` 테이블. RLS ✔ 소유 Persona의 것만 읽기, 쓰기 권한 없음, 교차 계정 테스트 있음. API ✔ `PT404`·`PT409`·`PT422`. Logging ✔ `state_transitions`(post·approval). Idempotency: `create_post_from_asset`은 멱등하지 않다(두 번 부르면 Post 둘, 화면의 몫). 승인 행은 Post당 대기 1건(부분 유니크).
+- Tests ✔ `tests/db/test_post_approval.py` 54개. 안전장치 23개를 하나씩 일부러 빼서 20개는 바로 테스트가 실패했고, 살아남은 하나(승인 처리 시 Post가 더는 대기 중이 아닌 경우)는 테스트를 더해 잡았다. 나머지 둘은 동작이 같은 중복 방어다(전이 트리거가 이미 같은 오류를 냄, 기본 권한이 이미 anon을 막음). 기존 테스트 둘(`test_db`, `test_review_asset`)은 승인 없이 `approved`로 건너뛰던 곳을 실제 승인 경로로 고쳤다. 권한 표면·마이그레이션 번호·`verify_production.sql`(블록 5는 22개, 새 블록 27)을 함께 갱신.
+- Security ✔ authenticated 전용, 워커 거부 목록에 추가. Documentation ✔ TECH_DESIGN 56.11·56.12, `supabase/README.md`, `README.md`, Lovable 브리프(규칙 14, RPC 5개, 화면, Phase 8).
+- Hook·UI: Lovable Phase 8 전.
+
+**남은 일**
+- (완료 2026-10-19) 호스팅 적용 점검: `approvals` 테이블과 RPC 5개가 있고(등록되지 않은 호출은 `PT403`으로 함수까지 도달), 사용자가 SQL Editor에서 돌린 점검 결과가 기대와 모두 같았다: RLS 켜짐·정책 1개·authenticated는 SELECT만·anon 권한 없음, authenticated 실행 가능 함수 22개·anon 0개, 승인 Guard 있음, `approval` 전이 5개, Realtime 포함.
+- 운영자가 제출·승인하려면 활성 `social_accounts` 행이 있어야 한다. 계정 연결(OAuth, Meta 앱)은 아직 없어 테스트용 행을 SQL로 하나 넣어야 한다(실제 게시는 12번에서 연결 필요).
+- Lovable Phase 8(화면), 승인 만료(`expire_approvals`)와 예약·게시(다음 마이그레이션).

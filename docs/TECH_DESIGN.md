@@ -15184,3 +15184,30 @@ pg_cron ─ 10초마다(미지원 시 1분) ─▶ public.dispatch_queued_conten
 
 **한계.** 브라우저는 이 함수를 부를 수 없다 — Lovable은 `create_content_job`만 부르고 디스패치를 기다린다 (최대 한 주기). `queued`가 한 주기 이상 지속되면 화면은 원인 후보를 안내한다: 프롬프트가 없는 주문(LLM 필요), 비활성 Persona, 예약 시각, 일일 한도(`system_errors`의 `dispatcher`), 정지 스위치.
 
+### 56.11 전역 Emergency Stop (`0014`) ⚙️
+
+56.10의 정지 행("두 키는 아직 DB에 없다")은 이 절로 대체한다. `emergency_stop_all`·`generation_enabled`가 생겼다.
+
+| 항목 | 규칙 |
+|---|---|
+| 스위치 | `app_settings.generation_enabled`(기본 켜짐)와 `publishing_enabled`(기본 꺼짐, 0001). 값이 정확히 `true`가 아니거나 행이 없으면 생성은 막힌다(fail closed). `emergency_stop_all`이라는 설정 키는 만들지 않았다 |
+| `emergency_stop_all()` | admin 전용. 두 스위치를 한 트랜잭션에서 끄고 `security_events`(`EMERGENCY_STOP_ALL`, 직전 값)에 남긴다. 이미 꺼져 있어도 같은 결과(멱등) |
+| 막는 것 | 디스패처, `claim_content_job`, 새 generation Job 선점(`claim_automation_job`, `claim_next_automation_job`). 주문 접수는 받고 `queued`로 남는다 |
+| 계속되는 것 | 이미 선점한 Job의 heartbeat·결과 등록·완료·실패, 이미 시작한 Content Job의 prompt 단계, 수집·오류 기록·복구. 데이터는 지우지 않는다 |
+| 다시 켜기 | 스위치마다 `update_app_setting`으로 따로. "모두 다시 시작" RPC는 없다 |
+| 범위 | 전역만. Persona 정지(`agent_paused`)와 플랫폼 정지(`platform_controls`)는 막을 대상(AI Decision, 게시·팬 전송)이 생길 때 같이 만든다 |
+
+### 56.12 Post 승인 흐름 (`0015`) ⚙️
+
+범위: Asset → Post 초안 → 제출 → 승인·반려(MVP 완료 목록 11번). 예약·게시·게시 전 검사는 다음 마이그레이션이다. 11.8~11.10, 12.4, 28.7, 33.7을 따르되 아래만 다르다.
+
+| 항목 | 설계 | 지금 | 이유 |
+|---|---|---|---|
+| Post 초안 | WF-005(LLM 캡션)가 `create_post_draft`로 만든다 | **운영자가 캡션을 직접 쓰는 `create_post_from_asset`을 더한다.** `create_post_draft`는 그대로 둔다 | 이 PC의 로컬 흐름에는 LLM 캡션 경로가 없다. 승인 흐름은 두 경로가 같은 `draft`에서 만난다 |
+| `approvals` 칸 | 10.18: `approval_type` 3종, 대상 FK 여러 개(33.7) | `approval_type = 'publish'`, `post_id` 하나. 다른 유형은 그 대상이 생길 때 CHECK와 FK를 더한다 | 지금 대상이 있는 것은 Post뿐 |
+| 승인 보장 | 11.8: `pending_approval → approved`는 연결된 `approvals.status = 'approved'` (DB 트리거) | `enforce_status_transition`에 Guard를 더했다. `pending_approval → approved·rejected`는 그 Post의 approvals 행이 `approved`·`rejected`일 때만 통과한다. **service_role로 상태만 바꿔도 막힌다** | 승인 없는 게시는 구조적으로 불가능해야 한다 (PRD 2번) |
+| `cancel_post` | `published` 외 모든 상태 → `cancelled` | `publishing` 중에는 거부한다(전이표는 그대로) | 외부 SNS 호출이 이미 나갔을 수 있다. 취소하면 게시물만 남고 기록이 끊긴다. 결과(`published`·`failed`)가 나온 뒤에 취소한다 |
+| 승인 만료 | `expire_approvals` pg_cron 5분 (R7) | 만들지 않았다. 전이(`expired → draft`)만 동작한다 | 예약 게시와 함께 한다. 그때까지 `pending`은 그대로 남는다(시간이 지나도 자동 실행하지 않는다, 33.7) |
+| 승인 뒤 캡션 변경 | 승인 뒤 캡션·Asset이 바뀌면 `pending_approval`로 되돌린다 (DB 트리거) | 만들지 않았다 | 승인된 Post의 캡션을 바꿀 경로가 없다(직접 UPDATE는 `draft`·`rejected`만, RLS). 경로가 생길 때 같이 한다 |
+
+RPC(모두 authenticated 전용, 워커·n8n·anon 실행 불가): `create_post_from_asset`, `submit_post_for_approval`, `resolve_approval`, `revise_post`, `cancel_post`. 승인자는 그 Persona의 소유 Operator다.

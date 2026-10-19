@@ -27,7 +27,7 @@ Lovable (관제센터) → Supabase (Source of Truth) → n8n (Orchestrator) →
 ```text
 app/                   Python 브릿지 (M2): FastAPI /v1, GPU Worker, ComfyUI·Supabase 연동
 workflows/             ComfyUI Workflow 템플릿 + registry.json
-supabase/migrations/   DB 마이그레이션 0001~0014
+supabase/migrations/   DB 마이그레이션 0001~0015
 supabase/tests/stubs/  로컬 테스트 전용 Supabase 흉내 스키마
 tests/db/              DB 테스트
 tests/bridge/          브릿지 테스트 (실제 DB + 가짜 ComfyUI)
@@ -46,7 +46,7 @@ docs/product/          Personal MVP · SaaS 로드맵 (링크)
 | PRD v1.0 (1~8) | ✅ |
 | 기술 설계 v1.0 (9~56) | ✅ (17 UI/UX, 18 Frontend, 19 Python 실행 계층, 20 n8n 구현, 21 Supabase 구현, 22 Lovable 빌드 명세, 23 Lovable 프롬프트, 24 Supabase 적용 절차, 25 로컬 PC 운영, 26 n8n 서버 운영, 27 MVP E2E 테스트, 28 SNS 연동 V1 설계, 29 Analytics 설계, 30 AI Decision Engine 설계, 31 Fan Interaction & Memory 설계, 32 Autonomous Operation Loop 설계, 33 AI Permission·Safety 설계, 34 Experimentation 설계, 35 Self-Optimization 설계, 36 Multi-Persona 설계, 37 Monitoring·Observability 설계(37-A 데이터 모델 포함), 38 Backup·DR 설계, 39 Cost·Resource 설계, 40 최종 통합 명세, 41 예약 게시 모듈, 42 Scheduler 프론트엔드 명세, 43 Scheduler 실행 통합 명세, 44 구현 로드맵(실행 순서·작업 분리), 45 Foundation 실행 명세, 46 Content Job 대응·실행, 47 Python 실행 계층 대응·실행, 48 ComfyUI Workflow 대응·첫 실제 생성 준비, 49 n8n Production Generation Workflow 대응·첫 자동 실행, 50 Asset Management 대응, 51 Post·SNS Publishing 대응, 52 Analytics·Performance Intelligence 대응, 53 AI Decision Engine 대응, 54 AI Decision Engine 구현 사양 대응, 55 Fan Interaction·Memory 대응, 56 Personal Edition·Execution Target 포함) |
 | M0 Environment (Supabase, Cloudflare Tunnel, n8n 서버, Lovable) | 🟡 일부 완료. Supabase 프로젝트·Google 로그인·Lovable 프로젝트는 준비됨. n8n은 이 PC에서만 실행(서버 Docker + Caddy는 미구성). Personal 로컬 흐름은 Worker Pull이라 Cloudflare Tunnel이 필요 없다 (순서와 작업 분담: TECH_DESIGN 44.5) |
-| M1 Database Foundation | ✅ 로컬 테스트 통과 · 실제 Supabase에 0001~0014 적용 (2026-10-18). 0013까지는 권한 점검(`supabase/verify_production.sql` 블록 3·4·5·7·25) 통과. 0014(전역 Emergency Stop)는 화면에서 정지·재개를 시험했고, 블록 26 점검 결과는 아직 기록하지 않음 |
+| M1 Database Foundation | ✅ 로컬 테스트 통과 · 실제 Supabase에 0001~0015 적용 (0015 Post 승인은 2026-10-19, 권한·Guard 점검 통과). 0013까지는 권한 점검(`supabase/verify_production.sql` 블록 3·4·5·7·25) 통과. 0014(전역 Emergency Stop)는 화면에서 정지·재개를 시험했고, 블록 26 점검 결과는 아직 기록하지 않음 |
 | M2 Python Bridge v1 | ✅ 로컬 테스트 통과 · 실제 ComfyUI·Supabase 연결로 생성 E2E 확인 (Local, 2026-10-18). Cloud는 호스팅 검증 전이라 미확인 (첫 실제 생성 절차: TECH_DESIGN 25.6) |
 | M3 n8n Workflows | 🟡 작성 · 이 PC의 n8n 2.x에 import·Credential 연결(`[PA] 006`만 Publish). 로컬 전용 흐름은 n8n 없이 동작(DB 디스패처 0012). 나머지 Workflow의 실제 구동은 미확인 ([n8n_guide](docs/n8n_guide.md)) |
 | M4 Lovable | ✅ Phase 1~6 구현 (로그인·Persona·Content Job·Asset·대시보드·워커·오류·설정). 아직 게시 전. 게시 후 번들 점검과 Persona [다시 활성화] 확인이 남음 ([lovable_master_prompt](docs/lovable_master_prompt.md)) |
