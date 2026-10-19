@@ -18,6 +18,7 @@
 | `migrations/0012_dispatch_queued_content_jobs.sql` | Local 디스패처: `dispatch_queued_content_jobs()`(프롬프트가 있는 `queued` Content Job → `generation` Job, 원자적·멱등·동시 실행 안전, 정지 스위치 존중)와 pg_cron 스케줄 `dispatch-queued-content-jobs` (TECH_DESIGN 56.10) |
 | `migrations/0013_review_asset.sql` | Asset 검토: `review_asset(p_asset_id, p_decision, p_note)`(`generated·rejected → approved`, `generated·approved → rejected`, 내 Persona의 Asset만, 게시·예약 중인 Post가 있으면 반려 불가는 0002 가드), 반려 사유 `assets.review_note`(500자 이하, 다시 승인하면 비움). authenticated 전용 (TECH_DESIGN 12.4, 50.5 3번) |
 | `migrations/0014_emergency_stop.sql` | 전역 긴급 정지: `app_settings.generation_enabled`(기본 켜짐, 값이 true가 아니거나 행이 없으면 닫힘), `emergency_stop_all()`(admin, 생성·게시 스위치를 한 번에 끄고 `security_events`에 기록, 멱등), 선점 함수(`claim_content_job`, `claim_automation_job`, `claim_next_automation_job`)가 꺼져 있으면 새 일을 시작하지 않음(진행 중인 작업은 끝냄), `get_app_settings`·`update_app_setting`이 `generation_enabled`를 다룸(스위치마다 따로 다시 켬). Persona·플랫폼 정지는 막을 대상이 생길 때 (TECH_DESIGN 32.6, 33.10) |
+| `migrations/0015_post_approval.sql` | Post 승인 흐름: `approvals`(RLS 읽기 전용, Realtime, Post당 대기 중 1건), RPC `create_post_from_asset`(운영자가 쓰는 캡션 초안, 설계 추가 56.12)·`submit_post_for_approval`·`resolve_approval`·`revise_post`·`cancel_post`(`publishing` 중에는 거부), 승인 Guard(승인 행 없이는 Post가 `approved`·`rejected`가 될 수 없음, service_role도 마찬가지), 롤업 R5·R6·R7. 예약·게시·게시 전 검사는 다음 마이그레이션 (TECH_DESIGN 11.8~11.10, 12.4, 28.7, 33.7) |
 | `tests/stubs/supabase_stub.sql` | **로컬 테스트 전용.** 실제 프로젝트에 적용하지 않는다 |
 | `verify_production.sql` | 실제 프로젝트 적용 후 점검 (읽기 전용, TECH_DESIGN 24.4) |
 

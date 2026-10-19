@@ -189,8 +189,9 @@ def test_an_approved_asset_with_a_publishing_post_cannot_be_rejected(db, op):
     acct = db.val("insert into social_accounts (persona_id, platform, account_id, status)"
                   " values (%s, 'instagram', 'ig-review', 'active') returning id", (pid,))
     db.conn.execute("update posts set social_account_id = %s, status = 'pending_approval' where id = %s", (acct, post["id"]))
-    for status in ("approved", "publishing"):
-        db.conn.execute("update posts set status = %s where id = %s", (status, post["id"]))
+    db.conn.execute("insert into approvals (user_id, persona_id, post_id) values (%s, %s, %s)", (uid, pid, post["id"]))
+    db.conn.execute("update approvals set status = 'approved', resolved_at = now() where post_id = %s", (post["id"],))
+    db.conn.execute("update posts set status = 'publishing' where id = %s", (post["id"],))
 
     db.as_operator(uid)
     assert db.expect_error("select * from review_asset(%s, 'rejected', 'late')", (asset["id"],)).sqlstate == "PT409"

@@ -390,8 +390,11 @@ def test_caption_draft_then_post_publish_rolls_up(db, op):
     acct = db.val("insert into social_accounts (persona_id, platform, account_id, status)"
                   " values (%s, 'instagram', 'ig-1', 'active') returning id", (pid,))
     db.conn.execute("update posts set social_account_id = %s, status = 'pending_approval' where id = %s", (acct, post["id"]))
-    for status in ("approved", "publishing"):
-        db.conn.execute("update posts set status = %s where id = %s", (status, post["id"]))
+    assert db.expect_error("update posts set status = 'approved' where id = %s", (post["id"],)).sqlstate == "PT409"  # 0015: 승인 행 없이는 불가
+    db.conn.execute("insert into approvals (user_id, persona_id, post_id) values (%s, %s, %s)", (uid, pid, post["id"]))
+    db.conn.execute("update approvals set status = 'approved', resolved_at = now() where post_id = %s", (post["id"],))
+    assert db.val("select status from posts where id = %s", (post["id"],)) == "approved"                         # R6
+    db.conn.execute("update posts set status = 'publishing' where id = %s", (post["id"],))
     assert db.expect_error("update posts set status = 'published' where id = %s", (post["id"],)).sqlstate == "23514"
     db.conn.execute("update posts set status = 'published', external_post_id = 'ig-post-1' where id = %s", (post["id"],))
     assert db.val("select status from content_jobs where id = %s", (cj["id"],)) == "published"  # R4

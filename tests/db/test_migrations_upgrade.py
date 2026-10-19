@@ -47,7 +47,7 @@ def apply(url, *paths):
 
 def test_the_migration_files_are_numbered_without_gaps():
     numbers = [int(p.name[:4]) for p in MIGRATIONS]
-    assert numbers == list(range(1, len(numbers) + 1)) and numbers[-1] == 14
+    assert numbers == list(range(1, len(numbers) + 1)) and numbers[-1] == 15
 
 
 def test_a_fresh_install_applies_every_migration_in_order(blank_database):

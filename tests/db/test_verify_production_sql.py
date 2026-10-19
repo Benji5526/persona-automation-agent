@@ -29,7 +29,7 @@ def run(db, number: int) -> list[list[tuple]]:
     return [db.conn.execute(stmt).fetchall() for stmt in block(number)]
 
 
-@pytest.mark.parametrize("number", [20, 21, 22, 23, 25, 26])
+@pytest.mark.parametrize("number", [20, 21, 22, 23, 25, 26, 27])
 def test_every_check_block_runs_on_a_fresh_database(db, number):
     results = run(db, number)
     assert results                                   # 문장이 하나 이상 있고 모두 오류 없이 실행된다
@@ -85,3 +85,13 @@ def test_block_26_reports_the_emergency_stop_surface_and_the_switch_state(db):
     first, switch_state = run(db, 26)
     assert first == [(True, True, False)]
     assert switch_state == [("generation_enabled", True), ("publishing_enabled", False)]
+
+
+def test_block_27_reports_the_post_approval_surface(db):
+    """0015: approvals는 RLS가 켜져 있고 authenticated는 읽기만, RPC 5개는 authenticated만 실행, 승인 Guard가 있다."""
+    table, functions, guard = run(db, 27)
+    assert table == [(True, 1, ["SELECT"], [])]
+    assert functions == [("cancel_post", True, False), ("create_post_from_asset", True, False),
+                         ("resolve_approval", True, False), ("revise_post", True, False),
+                         ("submit_post_for_approval", True, False)]
+    assert guard == [(True, 5)]

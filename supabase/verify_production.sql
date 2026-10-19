@@ -32,7 +32,7 @@ select n.nspname as schema, p.proname as function_name
    and has_function_privilege('anon', p.oid, 'execute');
 
 -- 5. authenticated(Lovable)가 실행할 수 있는 public 함수
---    기대: 17개 — archive_asset, cancel_content_job, create_content_job,
+--    기대: 22개 — archive_asset, cancel_content_job, create_content_job,
 --          get_app_settings, get_dashboard_summary, regenerate_content_job, resolve_system_error,
 --          retry_automation_job, retry_content_job, submit_content_job, update_app_setting
 --          + 0010: move_pending_jobs_to_target (admin)
@@ -40,6 +40,8 @@ select n.nspname as schema, p.proname as function_name
 --            (함수 안에서 private.require_admin()으로 막는다. revoke는 Worker가 자기 자격만 폐기할 수도 있다)
 --          + 0013: review_asset (Asset 승인·반려. 내 Persona의 Asset만, 반려 사유는 assets.review_note)
 --          + 0014: emergency_stop_all (admin. 전역 긴급 정지: 생성·게시 스위치를 한 번에 끈다)
+--          + 0015: create_post_from_asset, submit_post_for_approval, resolve_approval, revise_post, cancel_post
+--            (Post 초안·제출·승인·반려·수정·취소. 내 Persona의 것만)
 --    claim_*, complete_*, fail_*, heartbeat_*, register_asset, report_worker_status,
 --    reserve_llm_call, dispatch_queued_content_jobs, sync_workflow_registry 등이 보이면 안 된다.
 select p.proname as function_name
@@ -276,3 +278,31 @@ select
 
 --     현재 스위치 상태 (정지 중인지 보는 용도)
 select key, value from public.app_settings where key in ('generation_enabled', 'publishing_enabled') order by key;
+
+-- 27. 0015 Post 승인 (approvals 테이블과 RPC 5개)
+--     (1) 기대: rls_on = true, policies = 1 (approvals_select_own), authenticated_privileges = {SELECT} (읽기만), anon_privileges = {}
+select c.relrowsecurity as rls_on,
+       (select count(*) from pg_policies where schemaname = 'public' and tablename = 'approvals') as policies,
+       (select coalesce(array_agg(privilege_type::text order by privilege_type), '{}') from information_schema.role_table_grants
+         where table_schema = 'public' and table_name = 'approvals' and grantee = 'authenticated') as authenticated_privileges,
+       (select coalesce(array_agg(privilege_type::text order by privilege_type), '{}') from information_schema.role_table_grants
+         where table_schema = 'public' and table_name = 'approvals' and grantee = 'anon') as anon_privileges
+  from pg_class c where c.oid = 'public.approvals'::regclass;
+
+--     (2) 기대: 5행 모두 authenticated = true, anon = false
+select f.name,
+       has_function_privilege('authenticated', f.sig, 'execute') as authenticated,
+       has_function_privilege('anon', f.sig, 'execute') as anon
+  from (values
+    ('cancel_post',             'public.cancel_post(uuid, text)'),
+    ('create_post_from_asset',  'public.create_post_from_asset(uuid, text, text, text[], uuid, boolean)'),
+    ('resolve_approval',        'public.resolve_approval(uuid, text, text)'),
+    ('revise_post',             'public.revise_post(uuid, text, text[])'),
+    ('submit_post_for_approval','public.submit_post_for_approval(uuid, uuid)')
+  ) as f(name, sig)
+ order by 1;
+
+--     (3) 기대: has_approval_guard = true (승인 행 없이는 Post가 approved가 될 수 없다), approval_transitions = 5
+select position('post has no approved approval' in pg_get_functiondef('private.enforce_status_transition()'::regprocedure)) > 0
+         as has_approval_guard,
+       (select count(*) from private.allowed_transitions where entity_type = 'approval') as approval_transitions;
